@@ -38,7 +38,11 @@ No public database of ESM-2 or GNN embeddings exists for these receptors/molecul
 | Script | Produces | How |
 |---|---|---|
 | `02_embed_receptors.py` | ESM-2 650M, mean-pooled 1280-d | run ESM-2 over the receptor sequences |
-| `03_embed_molecules.py`  | PyG graphs (RDKit) | featurize SMILES; embeddings come from a GCN you train (`--checkpoint`) |
+| `03_embed_molecules.py`  | PyG graphs (RDKit) | featurize SMILES; embeddings from a GCN you train (`--checkpoint`) |
+| `embed_molecules_gin.py` | pretrained GIN, 300-d | LORAX's `gin_supervised_*` (Hu 2020) via dgllife — fixed vectors |
+
+> The GIN path pins **torch 2.2 + dgl 2.2.1** (dgl ships graphbolt only for torch ≤2.2
+> and needs the old `setuptools.extern`); these constraints live in `pyproject.toml`.
 
 ## Environment — uv only (local `.venv`, no global installs)
 

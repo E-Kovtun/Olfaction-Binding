@@ -6,16 +6,23 @@ requires-python = ">=3.10"
 dependencies = [
     # core data prep (script 01)
     "pandas>=2.0",
-    "numpy>=1.24",
+    "numpy>=1.26,<2",          # dgl 2.2.1 has numpy<2 ABI
     # receptor embeddings (script 02): ESM-2
     "fair-esm>=2.0.0",
-    "torch>=2.0",
     # molecule graphs (script 03): RDKit + torch_geometric
     "rdkit>=2023.3",
     "torch-geometric>=2.5",
+    # pretrained GIN from LORAX (gin_supervised_*) via dgllife — needs dgl,
+    # which is built only against torch<=2.2 and the old setuptools.extern namespace
+    "torch>=2.2,<2.3",
+    "dgl==2.2.1",
+    "dgllife>=0.3.2",
+    "setuptools<71",
+    "torchdata<0.8",          # dgl 2.2.1 imports torchdata.datapipes (removed in >=0.10)
+    "pyyaml",                 # dgl graphbolt undeclared deps
+    "pydantic",
 ]
 
 [tool.uv]
-# application, not a library — don't build `orbind` itself.
-# all deps are mandatory so `uv run` always has a complete env (no --extra needed).
+# application, not a library; all deps mandatory so `uv run` always has a full env.
 package = false

@@ -59,7 +59,15 @@ uv run python scripts/embedding_generation/proteins/02_embed_receptors.py \
        --sequences data/processed/proteins/receptor_sequences.csv
 uv run python scripts/embedding_generation/molecules/03_embed_molecules.py \
        --molecules data/processed/molecules/molecule_smiles.csv
+
+# MP baseline (LORAX-style): concat[molecule||protein] -> MLP -> bind/no-bind
+uv run python scripts/modeling/train_mp.py --split stratified   # or group_receptor
 ```
+
+The MP model is **weighted** twice: a label-**stratified** train/test split, and
+a `pos_weight = #neg/#pos` loss to counter the ~1:11 imbalance. Metrics are
+imbalance-aware (AUROC, AUPRC, MCC, F1). `--split group_receptor` holds out whole
+receptors to avoid paralog leakage.
 
 ## Layout
 

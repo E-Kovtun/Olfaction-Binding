@@ -1,0 +1,13 @@
+# data & model artifacts — never commit
+data/raw/
+data/processed/
+data/embeddings/
+*.npz
+*.pt
+*.csv.gz
+
+# python
+__pycache__/
+*.pyc
+.venv/
+.ipynb_checkpoints/

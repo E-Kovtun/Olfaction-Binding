@@ -1,0 +1,13 @@
+# core data prep (script 01) — offline
+pandas>=2.0
+numpy>=1.24
+
+# receptor embeddings (script 02) — generates ESM-2 vectors
+fair-esm>=2.0.0
+torch>=2.0
+
+# molecule embeddings (script 03) — pretrained GNN extractor
+# dgl + dgllife pin to your CUDA/CPU build; see https://www.dgl.ai/pages/start.html
+dgllife>=0.3.2
+rdkit>=2023.3
+# dgl   (install separately, matched to your torch/CUDA)

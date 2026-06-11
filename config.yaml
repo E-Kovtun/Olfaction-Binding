@@ -1,0 +1,22 @@
+# orbind configuration (edit paths to your machine)
+
+data:
+  m2or_raw: "../m2or_official/M2OR_20230428.csv"   # official M2OR dump (;-separated)
+  processed_dir: "data/processed"
+  embeddings_dir: "data/embeddings"
+
+filters:
+  human_only: true          # species contains "homo"
+  drop_mutants: true        # official Mutation field non-empty
+  binary_only: true         # Responsive in {0, 1}
+  drop_orphan_receptors: true   # receptor with 0 positive pairs
+  receptor_key: "Gene ID"   # "Gene ID" (full) or "Sequence" (ESM-ready, 75%)
+
+receptor_embedding:
+  model: "esm2_t33_650M_UR50D"   # ESM-2 650M (same as NOSE/MolOR)
+  pooling: "mean"                # mean over residues -> 1280-d
+  backfill_sequences: true       # fill missing 25% via Gene ID -> UniProt
+
+molecule_embedding:
+  model: "gin_supervised_contextpred"   # pretrained GIN -> 300-d (swappable)
+  backfill_smiles: true                 # InChIKey -> PubChem

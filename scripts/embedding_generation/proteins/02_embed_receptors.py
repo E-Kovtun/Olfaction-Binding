@@ -4,15 +4,14 @@ There is no public database of ESM-2 embeddings for olfactory receptors, so we
 run ESM-2 (650M, esm2_t33_650M_UR50D — same as NOSE/MolOR) over the unique
 sequences and cache one vector per sequence. Mean-pooled over residues -> 1280-d.
 
-Input : data/processed/pairs_curated.csv must carry a `sequence` column, OR pass
-        a fasta/csv of (receptor_id, sequence). Because pairs_curated keys on the
-        receptor id, join it to the annotated table to attach sequences first
-        (see --sequences).
+Input : data/processed/proteins/receptor_sequences.csv  (receptor_id, sequence),
+        produced by the preprocessing step.
 
 Examples
 --------
-python scripts/02_embed_receptors.py --sequences data/processed/receptor_sequences.csv \
-       --out data/embeddings/esm2_650m.npz
+uv run python scripts/embedding_generation/proteins/02_embed_receptors.py \
+       --sequences data/processed/proteins/receptor_sequences.csv \
+       --out data/embeddings/proteins/esm2_650m.npz
 """
 import argparse, pathlib
 import numpy as np
@@ -59,7 +58,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--sequences", required=True,
                     help="csv with columns: receptor_id, sequence")
-    ap.add_argument("--out", default="data/embeddings/esm2_650m.npz")
+    ap.add_argument("--out", default="data/embeddings/proteins/esm2_650m.npz")
     ap.add_argument("--version", default="650m", choices=["650m", "3B"])
     args = ap.parse_args()
 

@@ -49,19 +49,29 @@ uv sync            # installs everything into ./.venv (pandas, torch, fair-esm, 
 ## Usage  (always via `uv run`)
 
 ```bash
-uv run python scripts/00_download_m2or.py                # -> data/raw/M2OR.zip
-uv run python scripts/01_build_table.py                  # -> data/processed/pairs_curated.csv (+SMILES)
-uv run python scripts/02_embed_receptors.py --sequences data/processed/receptor_sequences.csv
-uv run python scripts/03_embed_molecules.py --molecules data/processed/molecule_smiles.csv
+uv run python scripts/downloading/00_download_m2or.py            # -> data/raw/M2OR.zip
+uv run python scripts/preprocessing/01_build_table.py            # -> data/processed/pairs_curated.csv (+SMILES)
+uv run python scripts/embedding_generation/proteins/02_embed_receptors.py \
+       --sequences data/processed/proteins/receptor_sequences.csv
+uv run python scripts/embedding_generation/molecules/03_embed_molecules.py \
+       --molecules data/processed/molecules/molecule_smiles.csv
 ```
 
 ## Layout
 
 ```
 orbind/
-├── orbind/        filters.py (relational M2OR cleaning)
-├── scripts/       00_download · 01_build_table · 02_embed_receptors · 03_embed_molecules
-├── data/          raw / processed / embeddings   (gitignored)
+├── orbind/                 filters.py (relational M2OR cleaning)
+├── scripts/
+│   ├── downloading/        00_download_m2or.py
+│   ├── preprocessing/      01_build_table.py
+│   └── embedding_generation/
+│       ├── proteins/       02_embed_receptors.py
+│       └── molecules/      03_embed_molecules.py
+├── data/                   (gitignored content; structure kept via .gitkeep)
+│   ├── raw/                {proteins, molecules}   + M2OR.zip
+│   ├── processed/          {proteins, molecules}   + pairs_curated.csv
+│   └── embeddings/         {proteins, molecules}
 ├── pyproject.toml · config.yaml
 ```
 

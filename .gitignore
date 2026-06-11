@@ -1,10 +1,7 @@
-# data & model artifacts — never commit
-data/raw/
-data/processed/
-data/embeddings/
-*.npz
-*.pt
-*.csv.gz
+# data & model artifacts — ignore content, keep folder structure (.gitkeep)
+data/**
+!data/**/
+!data/**/.gitkeep
 
 # python
 __pycache__/

@@ -15,8 +15,9 @@ deepchem MolGraphConvFeaturizer used by the local GCN baseline.
 
 Example
 -------
-python scripts/03_embed_molecules.py --molecules data/processed/molecule_smiles.csv \
-       --out data/embeddings/mol_graphs.pt
+uv run python scripts/embedding_generation/molecules/03_embed_molecules.py \
+       --molecules data/processed/molecules/molecule_smiles.csv \
+       --out data/embeddings/molecules/mol_graphs.pt
 """
 import argparse, pathlib
 import numpy as np
@@ -62,7 +63,7 @@ def smiles_to_pyg(smiles):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--molecules", required=True, help="csv with columns: inchikey, smiles")
-    ap.add_argument("--out", default="data/embeddings/mol_graphs.pt")
+    ap.add_argument("--out", default="data/embeddings/molecules/mol_graphs.pt")
     ap.add_argument("--checkpoint", default=None,
                     help="optional trained GCN (.pt) to emit fixed embeddings instead of graphs")
     args = ap.parse_args()

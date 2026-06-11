@@ -9,7 +9,7 @@ Output: data/raw/M2OR.zip  (≈7.5 MB), containing
     pairs.csv  main_compounds.csv  main_receptors.csv  experiments.csv
     species.csv  assays.csv  references.csv  ...
 
-Usage:  uv run python scripts/00_download_m2or.py
+Usage:  uv run python scripts/downloading/00_download_m2or.py
 """
 import re, pathlib, http.cookiejar, urllib.request, urllib.parse
 

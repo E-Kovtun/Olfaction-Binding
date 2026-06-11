@@ -1,9 +1,12 @@
 # orbind configuration
 
 data:
-  m2or_zip: "data/raw/M2OR.zip"          # full relational export (script 00)
-  processed_dir: "data/processed"
-  embeddings_dir: "data/embeddings"
+  m2or_zip: "data/raw/M2OR.zip"                      # full relational export (downloading/)
+  pairs_curated: "data/processed/pairs_curated.csv"  # shared pair table
+  receptor_sequences: "data/processed/proteins/receptor_sequences.csv"
+  molecule_smiles: "data/processed/molecules/molecule_smiles.csv"
+  protein_embeddings: "data/embeddings/proteins/esm2_650m.npz"
+  molecule_graphs: "data/embeddings/molecules/mol_graphs.pt"
 
 filters:
   human_only: true            # species_id == Homo sapiens

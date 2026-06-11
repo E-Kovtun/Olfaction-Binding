@@ -6,12 +6,16 @@ join tables the embedding scripts consume. No network backfill needed.
 
 Usage
 -----
-uv run python scripts/00_download_m2or.py          # fetch data/raw/M2OR.zip
-uv run python scripts/01_build_table.py            # curate (mono compounds only)
-uv run python scripts/01_build_table.py --mixture-policy mono+isomers
+uv run python scripts/downloading/00_download_m2or.py     # fetch data/raw/M2OR.zip
+uv run python scripts/preprocessing/01_build_table.py     # curate (mono compounds only)
+uv run python scripts/preprocessing/01_build_table.py --mixture-policy mono+isomers
 """
 import argparse, pathlib, sys
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+# locate repo root (depth-independent) so `orbind` imports regardless of script nesting
+_root = pathlib.Path(__file__).resolve()
+while not (_root / "pyproject.toml").exists():
+    _root = _root.parent
+sys.path.insert(0, str(_root))
 from orbind import filters as F
 
 
@@ -22,7 +26,10 @@ def main():
     ap.add_argument("--mixture-policy", default="mono", choices=list(F.MIXTURE_POLICY))
     args = ap.parse_args()
 
-    out = pathlib.Path(args.outdir); out.mkdir(parents=True, exist_ok=True)
+    out = pathlib.Path(args.outdir)
+    prot = out / "proteins"; mol = out / "molecules"
+    for d in (out, prot, mol):
+        d.mkdir(parents=True, exist_ok=True)
 
     tabs = F.load_zip(args.input)
     print(f"loaded M2OR.zip: pairs={len(tabs['pairs'])}, compounds={len(tabs['main_compounds'])}, "
@@ -35,22 +42,23 @@ def main():
     curated = F.build_pairs(pairs)
     final = curated[curated["kept_final"]].copy()
 
+    # shared pair tables at processed root
     pairs.to_csv(out / "pairs_annotated.csv.gz", index=False, compression="gzip")
     curated.to_csv(out / "pairs_all_flagged.csv", index=False)
     final[["receptor", "inchikey", "label", "smiles"]].to_csv(out / "pairs_curated.csv", index=False)
 
-    # join tables for the embedding scripts (both 100% populated now)
+    # per-modality join tables the embedding scripts consume (both 100% populated)
     (final[["receptor"]].drop_duplicates()
         .rename(columns={"receptor": "sequence"}).assign(receptor_id=lambda d: d["sequence"])
-        [["receptor_id", "sequence"]]).to_csv(out / "receptor_sequences.csv", index=False)
+        [["receptor_id", "sequence"]]).to_csv(prot / "receptor_sequences.csv", index=False)
     (final[["inchikey", "smiles"]].drop_duplicates("inchikey")
-        ).to_csv(out / "molecule_smiles.csv", index=False)
+        ).to_csv(mol / "molecule_smiles.csv", index=False)
 
     print("\n=== curated summary ===")
     for k, v in F.summary(curated).items():
         print(f"  {k}: {v}")
-    print(f"\nwrote -> {out}/ : pairs_curated.csv (+smiles), receptor_sequences.csv, "
-          f"molecule_smiles.csv, pairs_annotated.csv.gz")
+    print(f"\nwrote -> {out}/pairs_curated.csv, {prot}/receptor_sequences.csv, "
+          f"{mol}/molecule_smiles.csv")
 
 
 if __name__ == "__main__":

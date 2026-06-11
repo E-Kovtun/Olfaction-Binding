@@ -1,22 +1,21 @@
-# orbind configuration (edit paths to your machine)
+# orbind configuration
 
 data:
-  m2or_raw: "../m2or_official/M2OR_20230428.csv"   # official M2OR dump (;-separated)
+  m2or_zip: "data/raw/M2OR.zip"          # full relational export (script 00)
   processed_dir: "data/processed"
   embeddings_dir: "data/embeddings"
 
 filters:
-  human_only: true          # species contains "homo"
-  drop_mutants: true        # official Mutation field non-empty
-  binary_only: true         # Responsive in {0, 1}
-  drop_orphan_receptors: true   # receptor with 0 positive pairs
-  receptor_key: "Gene ID"   # "Gene ID" (full) or "Sequence" (ESM-ready, 75%)
+  human_only: true            # species_id == Homo sapiens
+  drop_mutants: true          # main_receptors.mutation non-empty
+  mixture_policy: "mono"      # "mono" | "mono+isomers"  (main_compounds.mixture)
+  binary_only: true           # responsive in {0, 1}
+  drop_orphan_receptors: true # receptor with 0 positive pairs
+  receptor_key: "sequence"    # SMILES & sequence are inline in the export (100%)
 
 receptor_embedding:
-  model: "esm2_t33_650M_UR50D"   # ESM-2 650M (same as NOSE/MolOR)
+  model: "esm2_t33_650M_UR50D"   # ESM-2 650M
   pooling: "mean"                # mean over residues -> 1280-d
-  backfill_sequences: true       # fill missing 25% via Gene ID -> UniProt
 
 molecule_embedding:
-  model: "gin_supervised_contextpred"   # pretrained GIN -> 300-d (swappable)
-  backfill_smiles: true                 # InChIKey -> PubChem
+  stack: "rdkit + torch_geometric"   # SMILES -> PyG graph -> your GCN

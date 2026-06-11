@@ -1,75 +1,90 @@
-"""Deterministic M2OR cleaning logic.
+"""M2OR cleaning logic — operates on the FULL relational export (M2OR.zip).
 
-The official M2OR dump (``M2OR_20230428.csv``, ``;``-separated, one row per
-*bioassay*) is annotated in place — we never silently drop rows, we add marker
-columns so every decision is auditable. The curated *pairs* table is then
-derived from the rows we kept.
+Unlike the GitHub flat dump, the web export ships SMILES inline and explicit
+``mixture`` / ``mutation`` / ``species`` fields, so no PubChem/UniProt backfill
+is needed. We annotate the pair table with marker columns (non-destructive),
+then derive the curated unique (receptor, molecule) pairs.
 
-Filter chain (matches the agreed spec):
-    1. human only            -> ``is_human``
-    2. drop engineered mutants -> ``is_mutant`` (official ``Mutation`` field)
-    3. explicit binary label -> ``is_binary`` (``Responsive`` in {0, 1})
-    4. row passes 1-3        -> ``kept_by_us``
-    5. dedup to receptor x molecule pairs (label = max Responsive)
-    6. drop orphan receptors -> receptor with 0 positive pairs (``is_orphan``)
+Filter chain:
+    1. human only              -> ``is_human``   (via experiments.species_id)
+    2. drop engineered mutants -> ``is_mutant``  (main_receptors.mutation)
+    3. keep pure compounds     -> ``is_pure``    (main_compounds.mixture policy)
+    4. explicit binary label   -> ``is_binary``  (responsive in {0, 1})
+    5. row passes 1-4          -> ``kept_by_us``
+    6. dedup to (sequence, inchikey) pairs (label = max responsive)
+    7. drop orphan receptors   -> receptor with 0 positive pairs
 """
 from __future__ import annotations
+import zipfile
 import pandas as pd
 
-# --- column names in the official dump -------------------------------------
-C_SPECIES = "species"
-C_MUT     = "Mutation"
-C_GENE    = "Gene ID"
-C_UNIPROT = "Uniprot ID"
-C_SEQ     = "Sequence"
-C_INCHI   = "InChI Key"
-C_SMILES  = "canonicalSMILES"
-C_RESP    = "Responsive"
+# which main_compounds.mixture values count as a single "pure" structure
+MIXTURE_POLICY = {
+    "mono": {"mono"},
+    "mono+isomers": {"mono", "sum of isomers"},
+}
 
 
 def _nonempty(s: pd.Series) -> pd.Series:
     return s.notna() & (s.astype(str).str.strip() != "")
 
 
-def annotate(df: pd.DataFrame) -> pd.DataFrame:
-    """Add boolean marker columns to the raw bioassay table (non-destructive)."""
-    df = df.copy()
-    df["is_human"]  = df[C_SPECIES].astype(str).str.contains("homo", case=False, na=False)
-    df["is_mutant"] = _nonempty(df[C_MUT])
-    df["is_binary"] = df[C_RESP].isin([0, 1])
-    df["kept_by_us"] = df["is_human"] & (~df["is_mutant"]) & df["is_binary"]
-    return df
+def load_zip(path) -> dict:
+    z = zipfile.ZipFile(path)
+    rd = lambda n: pd.read_csv(z.open(n), sep=";", low_memory=False)
+    return {k: rd(f"{k}.csv") for k in
+            ["pairs", "main_compounds", "main_receptors", "experiments", "species"]}
 
 
-def build_pairs(df: pd.DataFrame, receptor_key: str = C_GENE) -> pd.DataFrame:
-    """Collapse kept bioassays into unique (receptor, molecule) pairs.
+def annotate(tabs: dict, mixture_policy: str = "mono") -> pd.DataFrame:
+    """Join the relational tables and add boolean marker columns to `pairs`."""
+    pairs, mr, mc = tabs["pairs"].copy(), tabs["main_receptors"], tabs["main_compounds"]
+    ex, sp = tabs["experiments"], tabs["species"]
 
-    receptor_key: ``"Gene ID"`` (100% coverage) or ``"Sequence"`` (75%, ESM-ready).
-    A pair is positive if ANY measurement was responsive (label = max).
-    Orphan receptors (no positive pair) are flagged in ``is_orphan``.
-    """
-    kept = df[df["kept_by_us"]].dropna(subset=[receptor_key, C_INCHI]).copy()
-    pairs = (
-        kept.groupby([receptor_key, C_INCHI], as_index=False)
-        .agg(label=(C_RESP, "max"))
-        .rename(columns={receptor_key: "receptor", C_INCHI: "inchikey"})
-    )
-    pos_per_rec = pairs.groupby("receptor")["label"].transform("sum")
-    pairs["is_orphan"] = pos_per_rec == 0
-    pairs["kept_final"] = ~pairs["is_orphan"]
+    human_id = int(sp.loc[sp["name"].str.contains("homo", case=False), "id"].iloc[0])
+    pair_species = ex.groupby("pairs_id")["species_id"].agg(lambda s: s.mode().iloc[0])
+    pairs["species_id"] = pairs["id"].map(pair_species)
+
+    pairs = pairs.merge(
+        mr[["id", "mutation", "uniprot_id", "sequence"]].rename(columns={"id": "main_receptors_id"}),
+        on="main_receptors_id", how="left")
+    pairs = pairs.merge(
+        mc[["id", "mixture"]].rename(columns={"id": "main_compounds_id"}),
+        on="main_compounds_id", how="left")
+
+    keep_mix = MIXTURE_POLICY[mixture_policy]
+    pairs["is_human"]  = pairs["species_id"] == human_id
+    pairs["is_mutant"] = _nonempty(pairs["mutation"])
+    pairs["is_pure"]   = pairs["mixture"].astype(str).str.lower().isin(keep_mix)
+    pairs["is_binary"] = pairs["responsive"].isin([0, 1])
+    pairs["kept_by_us"] = (pairs["is_human"] & ~pairs["is_mutant"]
+                           & pairs["is_pure"] & pairs["is_binary"])
     return pairs
+
+
+def build_pairs(pairs: pd.DataFrame) -> pd.DataFrame:
+    """Dedup kept rows to unique (receptor sequence, molecule) pairs; flag orphans."""
+    kept = pairs[pairs["kept_by_us"]].dropna(subset=["sequence", "inchi_key"])
+    out = (kept.groupby(["sequence", "inchi_key"], as_index=False)
+           .agg(label=("responsive", "max"),
+                smiles=("smiles", "first"),
+                uniprot_id=("uniprot_id", "first"))
+           .rename(columns={"sequence": "receptor", "inchi_key": "inchikey"}))
+    pos_per_rec = out.groupby("receptor")["label"].transform("sum")
+    out["is_orphan"] = pos_per_rec == 0
+    out["kept_final"] = ~out["is_orphan"]
+    return out
 
 
 def summary(pairs: pd.DataFrame) -> dict:
     final = pairs[pairs["kept_final"]]
-    n_pos = int(final["label"].sum())
-    n = len(final)
+    n, npos = len(final), int(final["label"].sum())
     return {
         "receptors": int(final["receptor"].nunique()),
         "molecules": int(final["inchikey"].nunique()),
         "pairs": n,
-        "positives": n_pos,
-        "pos_rate_%": round(100 * n_pos / n, 2) if n else 0.0,
-        "pos_to_neg": f"1:{(n - n_pos) / n_pos:.1f}" if n_pos else "n/a",
-        "orphan_receptors_dropped": int(pairs["is_orphan"].groupby(pairs["receptor"]).first().sum()),
+        "positives": npos,
+        "pos_rate_%": round(100 * npos / n, 2) if n else 0.0,
+        "pos_to_neg": f"1:{(n - npos) / npos:.1f}" if npos else "n/a",
+        "smiles_coverage_%": round(100 * final["smiles"].notna().mean(), 1),
     }

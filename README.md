@@ -31,25 +31,33 @@ receptors/molecules — both scripts compute them:
 | Script | Produces | Source reality |
 |---|---|---|
 | `02_embed_receptors.py` | ESM-2 650M, mean-pooled 1280-d | run ESM-2 over sequences (weights ~2.5 GB, once) |
-| `03_embed_molecules.py` | pretrained GIN, 300-d | run a pretrained GNN over SMILES (swappable / or train your own) |
+| `03_embed_molecules.py` | PyG graphs (RDKit) → your GCN | featurize SMILES; embeddings come from a GCN you train (or `--checkpoint`) |
 
-Two fields are also missing from raw M2OR and are backfilled online
-(`orbind/backfill.py`): **25% of receptor sequences** (Gene ID → UniProt) and
-**~all SMILES** (InChIKey → PubChem). Both cache to `data/processed/`.
+The raw M2OR dump also lacks SMILES (only InChIKey) and ~25% of receptor
+sequences; both are backfilled online (`orbind/backfill.py`): InChIKey → PubChem,
+Gene ID → UniProt. Both cache to `data/processed/`.
 
-## Usage
+## Environment (uv only — no global installs)
+
+The whole project runs through [uv](https://docs.astral.sh/uv/) with a local `.venv`:
 
 ```bash
-pip install -r requirements.txt        # + install dgl matched to your torch/CUDA
+uv sync                       # core (pandas, numpy)
+uv sync --extra receptors     # + fair-esm, torch   (script 02)
+uv sync --extra molecules     # + rdkit, torch, torch_geometric  (script 03)
+```
 
+## Usage  (always via `uv run`)
+
+```bash
 # 1. curate the table (offline; add --backfill-seq for the missing 25%)
-python scripts/01_build_table.py --input ../m2or_official/M2OR_20230428.csv
+uv run python scripts/01_build_table.py --input ../m2or_official/M2OR_20230428.csv
 
-# 2. generate receptor embeddings
-python scripts/02_embed_receptors.py --sequences data/processed/receptor_sequences.csv
+# 2. receptor embeddings (ESM-2)
+uv run python scripts/02_embed_receptors.py --sequences data/processed/receptor_sequences.csv
 
-# 3. generate molecule embeddings  (resolve SMILES first via backfill)
-python scripts/03_embed_molecules.py --molecules data/processed/molecule_smiles.csv
+# 3. molecule graphs (resolve SMILES first via backfill)
+uv run python scripts/03_embed_molecules.py --molecules data/processed/molecule_smiles.csv
 ```
 
 ## Layout

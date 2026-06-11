@@ -1,66 +1,97 @@
-"""Script 3 — GENERATE molecule (GCN/GNN) embeddings for the molecules we need.
+"""Script 3 — molecule representations for the GCN side.
 
-There is no canonical "GCN embedding" to download: an embedding is defined by a
-trained GNN. We default to a PRE-TRAINED GIN from dgllife
-(``gin_supervised_contextpred`` — the family LORAX benchmarked), which yields a
-fixed 300-d vector per molecule. Swap ``--model`` for another pretrained GNN, or
-use ``--graphs-only`` to just emit DGL graphs and train your own GCN end-to-end.
+Stack: RDKit (SMILES -> graph) + torch_geometric (PyG). No dgl.
 
-Requires SMILES. The official M2OR dump lacks SMILES (only InChIKey), so resolve
-them first with orbind.backfill.inchikey_to_smiles (network) and pass a csv of
-(inchikey, smiles).
+There is no public "GCN embedding" to download and no canonical pretrained GCN
+here, so this script FEATURIZES each molecule into a PyG ``Data`` graph (atom /
+bond features + connectivity). Those graphs are the reusable input for a GCN:
 
-Examples
---------
+  * default            -> save graphs to a .pt list (train your GCN end-to-end);
+  * --checkpoint M.pt  -> load a trained GCN and dump fixed embeddings (.npz).
+
+Atom features (per node, 33-d one-hots + scalars): atomic number, degree,
+formal charge, hybridization, aromaticity, H count. Mirrors the spirit of the
+deepchem MolGraphConvFeaturizer used by the local GCN baseline.
+
+Example
+-------
 python scripts/03_embed_molecules.py --molecules data/processed/molecule_smiles.csv \
-       --out data/embeddings/gin_contextpred.npz
+       --out data/embeddings/mol_graphs.pt
 """
 import argparse, pathlib
 import numpy as np
 import pandas as pd
 
+ATOM_LIST = list(range(1, 54))                 # H..I
+HYBRID = ["SP", "SP2", "SP3", "SP3D", "SP3D2", "UNSPECIFIED"]
 
-def embed_pretrained_gin(smiles, model_name="gin_supervised_contextpred"):
+
+def _onehot(x, choices):
+    v = [0.0] * (len(choices) + 1)
+    v[choices.index(x) if x in choices else -1] = 1.0
+    return v
+
+
+def atom_features(atom):
+    from rdkit.Chem import rdchem
+    return (
+        _onehot(atom.GetAtomicNum(), ATOM_LIST)
+        + _onehot(atom.GetTotalDegree(), [0, 1, 2, 3, 4, 5])
+        + _onehot(atom.GetFormalCharge(), [-2, -1, 0, 1, 2])
+        + _onehot(str(atom.GetHybridization()), HYBRID)
+        + [float(atom.GetIsAromatic()), float(atom.GetTotalNumHs())]
+    )
+
+
+def smiles_to_pyg(smiles):
+    from rdkit import Chem
     import torch
-    from dgllife.model import load_pretrained
-    from dgllife.utils import smiles_to_bigraph, PretrainAtomFeaturizer, PretrainBondFeaturizer
-    from dgl import batch as dgl_batch
-
-    model = load_pretrained(model_name).eval()
-    af, bf = PretrainAtomFeaturizer(), PretrainBondFeaturizer()
-    vecs, ok = [], []
-    for smi in smiles:
-        g = smiles_to_bigraph(smi, node_featurizer=af, edge_featurizer=bf)
-        if g is None:
-            vecs.append(None); ok.append(False); continue
-        with torch.no_grad():
-            nfeats = [g.ndata.pop("atomic_number"), g.ndata.pop("chirality_type")]
-            efeats = [g.edata.pop("bond_type"), g.edata.pop("bond_direction_type")]
-            node_repr = model(g, nfeats, efeats)
-            # readout: mean over atoms -> graph embedding (300-d)
-            vecs.append(node_repr.mean(0).numpy()); ok.append(True)
-    return vecs, ok
+    from torch_geometric.data import Data
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return None
+    x = torch.tensor([atom_features(a) for a in mol.GetAtoms()], dtype=torch.float)
+    src, dst = [], []
+    for b in mol.GetBonds():
+        i, j = b.GetBeginAtomIdx(), b.GetEndAtomIdx()
+        src += [i, j]; dst += [j, i]                       # undirected
+    edge_index = torch.tensor([src, dst], dtype=torch.long) if src else torch.zeros((2, 0), dtype=torch.long)
+    return Data(x=x, edge_index=edge_index)
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--molecules", required=True, help="csv with columns: inchikey, smiles")
-    ap.add_argument("--out", default="data/embeddings/gin_contextpred.npz")
-    ap.add_argument("--model", default="gin_supervised_contextpred")
-    ap.add_argument("--graphs-only", action="store_true",
-                    help="emit DGL graphs for end-to-end training instead of fixed embeddings")
+    ap.add_argument("--out", default="data/embeddings/mol_graphs.pt")
+    ap.add_argument("--checkpoint", default=None,
+                    help="optional trained GCN (.pt) to emit fixed embeddings instead of graphs")
     args = ap.parse_args()
+    import torch
 
     df = pd.read_csv(args.molecules).dropna(subset=["smiles"]).drop_duplicates("inchikey")
-    keys, smis = df["inchikey"].tolist(), df["smiles"].tolist()
-    print(f"generating molecule embeddings for {len(smis)} molecules via {args.model} ...")
+    graphs, ids, bad = [], [], 0
+    for ik, smi in zip(df["inchikey"], df["smiles"]):
+        g = smiles_to_pyg(smi)
+        if g is None:
+            bad += 1; continue
+        g.inchikey = ik
+        graphs.append(g); ids.append(ik)
+    print(f"featurized {len(graphs)}/{len(df)} molecules ({bad} unparseable) | node dim={graphs[0].num_node_features}")
 
-    vecs, ok = embed_pretrained_gin(smis, args.model)
-    keys = [k for k, o in zip(keys, ok) if o]
-    emb = np.stack([v for v, o in zip(vecs, ok) if o])
-    pathlib.Path(args.out).parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(args.out, ids=np.array(keys), emb=emb)
-    print(f"wrote {len(keys)} x {emb.shape[1]}-d -> {args.out}  ({sum(ok)}/{len(ok)} parsed)")
+    out = pathlib.Path(args.out); out.parent.mkdir(parents=True, exist_ok=True)
+    if args.checkpoint:
+        from torch_geometric.loader import DataLoader
+        model = torch.load(args.checkpoint, weights_only=False).eval()
+        embs = []
+        with torch.no_grad():
+            for g in DataLoader(graphs, batch_size=64):
+                embs.append(model(g).cpu().numpy())          # model must return graph-level vec
+        emb = np.concatenate(embs)
+        np.savez_compressed(out.with_suffix(".npz"), ids=np.array(ids), emb=emb)
+        print(f"wrote {len(ids)} x {emb.shape[1]}-d -> {out.with_suffix('.npz')}")
+    else:
+        torch.save({"ids": ids, "graphs": graphs}, out)
+        print(f"wrote {len(graphs)} PyG graphs -> {out}  (feed to your GCN end-to-end)")
 
 
 if __name__ == "__main__":

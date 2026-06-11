@@ -1,0 +1,21 @@
+[project]
+name = "orbind"
+version = "0.0.1"
+description = "Curated M2OR olfactory receptor-ligand binding pipeline"
+requires-python = ">=3.10"
+dependencies = [
+    # core data prep (script 01)
+    "pandas>=2.0",
+    "numpy>=1.24",
+    # receptor embeddings (script 02): ESM-2
+    "fair-esm>=2.0.0",
+    "torch>=2.0",
+    # molecule graphs (script 03): RDKit + torch_geometric
+    "rdkit>=2023.3",
+    "torch-geometric>=2.5",
+]
+
+[tool.uv]
+# application, not a library — don't build `orbind` itself.
+# all deps are mandatory so `uv run` always has a complete env (no --extra needed).
+package = false

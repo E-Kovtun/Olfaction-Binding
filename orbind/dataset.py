@@ -22,8 +22,10 @@ def load_npz_dict(path) -> dict:
 def assemble(pairs_csv, prot_npz, mol_npz, random_prot=False, seed=0):
     """Return (X, y, pairs) where X = [molecule_emb || protein_emb].
 
-    random_prot: replace the protein block with one seeded random vector PER
-    receptor (the "mock protein" floor — isolates the molecule contribution).
+    random_prot: replace the protein block with independent seeded noise PER
+    ROW (the "mock protein" floor). Per-row (not per-receptor) noise is the
+    correct control — a consistent per-receptor vector would leak receptor
+    identity to tree models on splits where receptors are seen.
     """
     pairs = pd.read_csv(pairs_csv)
     prot = load_npz_dict(prot_npz)   # sequence -> protein vector
@@ -39,9 +41,7 @@ def assemble(pairs_csv, prot_npz, mol_npz, random_prot=False, seed=0):
     if random_prot:
         dim = next(iter(prot.values())).shape[0]
         rng = np.random.default_rng(seed)
-        randvec = {r: rng.standard_normal(dim).astype(np.float32)
-                   for r in pairs["receptor"].unique()}
-        Xp = np.stack([randvec[r] for r in pairs["receptor"]])
+        Xp = rng.standard_normal((len(pairs), dim)).astype(np.float32)   # independent noise per row
     else:
         Xp = np.stack([prot[r] for r in pairs["receptor"]]).astype(np.float32)
     X = np.concatenate([Xm, Xp], axis=1)

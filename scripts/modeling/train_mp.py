@@ -50,7 +50,8 @@ def main():
     ap.add_argument("--pairs", default="data/processed/pairs_curated.csv")
     ap.add_argument("--prot", default="data/embeddings/proteins/esm2_650m.npz")
     ap.add_argument("--mol", default="data/embeddings/molecules/gin_supervised_contextpred.npz")
-    ap.add_argument("--split", default="stratified", choices=["stratified", "group_receptor"])
+    ap.add_argument("--split", default="stratified",
+                    choices=["stratified", "group_receptor", "group_molecule"])
     ap.add_argument("--test-size", type=float, default=0.2)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--hidden", default="512,128")

@@ -49,18 +49,18 @@ def split(pairs, y, kind="stratified", test_size=0.2, seed=42):
         from sklearn.model_selection import train_test_split
         idx_tr, idx_te = train_test_split(
             np.arange(n), test_size=test_size, random_state=seed, stratify=y)
-    elif kind == "group_receptor":
-        # hold out whole receptors, while roughly matching the test fraction and
-        # keeping positives on both sides
-        recs = pairs["receptor"].to_numpy()
-        uniq = rng.permutation(np.unique(recs))
-        te_recs, n_te = set(), 0
-        for r in uniq:
+    elif kind in ("group_receptor", "group_molecule"):
+        # hold out whole receptors (or molecules): no entity appears on both sides
+        col = "receptor" if kind == "group_receptor" else "inchikey"
+        vals = pairs[col].to_numpy()
+        uniq = rng.permutation(np.unique(vals))
+        te_grp, n_te = set(), 0
+        for g in uniq:
             if n_te >= test_size * n:
                 break
-            te_recs.add(r); n_te += int((recs == r).sum())
-        idx_te = np.where(pairs["receptor"].isin(te_recs))[0]
-        idx_tr = np.where(~pairs["receptor"].isin(te_recs))[0]
+            te_grp.add(g); n_te += int((vals == g).sum())
+        idx_te = np.where(pairs[col].isin(te_grp))[0]
+        idx_tr = np.where(~pairs[col].isin(te_grp))[0]
     else:
         raise ValueError(kind)
 

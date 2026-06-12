@@ -12,6 +12,7 @@ dependencies = [
     # molecule graphs (script 03): RDKit + torch_geometric
     "rdkit>=2023.3",
     "torch-geometric>=2.5",
+    "xgboost>=2.0",           # MP boosting head (ProSmith/LORAX-style)
     # pretrained GIN from LORAX (gin_supervised_*) via dgllife — needs dgl,
     # which is built only against torch<=2.2 and the old setuptools.extern namespace
     "torch>=2.2,<2.3",

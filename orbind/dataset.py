@@ -19,8 +19,12 @@ def load_npz_dict(path) -> dict:
     return {k: v for k, v in zip(d["ids"].tolist(), d["emb"])}
 
 
-def assemble(pairs_csv, prot_npz, mol_npz):
-    """Return (X, y, pairs) where X = [molecule_emb || protein_emb]."""
+def assemble(pairs_csv, prot_npz, mol_npz, random_prot=False, seed=0):
+    """Return (X, y, pairs) where X = [molecule_emb || protein_emb].
+
+    random_prot: replace the protein block with one seeded random vector PER
+    receptor (the "mock protein" floor — isolates the molecule contribution).
+    """
     pairs = pd.read_csv(pairs_csv)
     prot = load_npz_dict(prot_npz)   # sequence -> protein vector
     mol = load_npz_dict(mol_npz)     # inchikey -> molecule vector
@@ -29,16 +33,37 @@ def assemble(pairs_csv, prot_npz, mol_npz):
     dropped = int((~mask).sum())
     pairs = pairs[mask].reset_index(drop=True)
     if dropped:
-        print(f"  dropped {dropped} pairs lacking an embedding "
-              f"({pairs['receptor'].isin(prot).all()=}, {pairs['inchikey'].isin(mol).all()=})")
+        print(f"  dropped {dropped} pairs lacking an embedding")
 
     Xm = np.stack([mol[i] for i in pairs["inchikey"]]).astype(np.float32)
-    Xp = np.stack([prot[r] for r in pairs["receptor"]]).astype(np.float32)
+    if random_prot:
+        dim = next(iter(prot.values())).shape[0]
+        rng = np.random.default_rng(seed)
+        randvec = {r: rng.standard_normal(dim).astype(np.float32)
+                   for r in pairs["receptor"].unique()}
+        Xp = np.stack([randvec[r] for r in pairs["receptor"]])
+    else:
+        Xp = np.stack([prot[r] for r in pairs["receptor"]]).astype(np.float32)
     X = np.concatenate([Xm, Xp], axis=1)
     y = pairs["label"].to_numpy().astype(np.float32)
-    print(f"  assembled X={X.shape} (mol {Xm.shape[1]} + prot {Xp.shape[1]}), "
+    print(f"  assembled X={X.shape} (mol {Xm.shape[1]} + prot {Xp.shape[1]}{', RANDOM' if random_prot else ''}), "
           f"positives={int(y.sum())}/{len(y)}")
     return X, y, pairs
+
+
+def metrics(y, p):
+    """Imbalance-aware binary metrics from labels y and scores p."""
+    from sklearn.metrics import (roc_auc_score, average_precision_score,
+                                 matthews_corrcoef, f1_score, precision_score, recall_score)
+    pred = (p >= 0.5).astype(int)
+    return {
+        "AUROC": roc_auc_score(y, p),
+        "AUPRC": average_precision_score(y, p),
+        "MCC": matthews_corrcoef(y, pred),
+        "F1": f1_score(y, pred, zero_division=0),
+        "precision": precision_score(y, pred, zero_division=0),
+        "recall": recall_score(y, pred, zero_division=0),
+    }
 
 
 def split(pairs, y, kind="stratified", test_size=0.2, seed=42):

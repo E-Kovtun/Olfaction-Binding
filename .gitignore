@@ -8,3 +8,7 @@ __pycache__/
 *.pyc
 .venv/
 .ipynb_checkpoints/
+
+# notebook cache (regenerable; results persist on disk)
+notebooks/cache/
+notebooks/.ipynb_checkpoints/

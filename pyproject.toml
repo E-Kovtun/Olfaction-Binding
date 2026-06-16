@@ -14,6 +14,7 @@ dependencies = [
     "torch-geometric>=2.5",
     "xgboost>=2.0",           # MP boosting head (ProSmith/LORAX-style)
     "ipykernel>=6",           # run the screening notebook on the project .venv
+    "matplotlib>=3.7",        # notebook plots (similarity heatmaps, etc.)
     # pretrained GIN from LORAX (gin_supervised_*) via dgllife — needs dgl,
     # which is built only against torch<=2.2 and the old setuptools.extern namespace
     "torch>=2.2,<2.3",

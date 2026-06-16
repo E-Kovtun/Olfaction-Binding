@@ -65,10 +65,30 @@ def train_boost(Xtr, ytr, Xte, seed=42):
 HEADS = {"mlp": train_mlp, "boost": train_boost}
 
 
-def run_one(pairs, prot, mol, head, split, random_prot=False, seed=42, test_size=0.2):
-    """assemble -> split -> train head -> metrics. Returns (metrics, info)."""
-    X, y, p = make_xy(pairs, prot, mol, random_prot=random_prot, seed=seed)
+def run_one(pairs, prot, mol, head, split, random_prot=False,
+            prot_transform=None, seed=42, test_size=0.2):
+    """assemble -> split -> (transform using train only) -> train head -> metrics.
+
+    prot_transform: optional callable (prot_dict, train_receptor_ids) -> prot_dict.
+    Applied AFTER the split so the mean/params are computed from train receptors only.
+    """
+    # 1. filter to pairs with embeddings
+    mask = pairs["receptor"].isin(prot) & pairs["inchikey"].isin(mol)
+    p = pairs[mask].reset_index(drop=True)
+    y = p["label"].to_numpy().astype(np.float32)
+
+    # 2. split first
     tr, te = D.split(p, y, kind=split, test_size=test_size, seed=seed)
-    pred = HEADS[head](X[tr], y[tr], X[te], seed=seed)
-    info = {"train": int(tr.sum()), "test": int(te.sum()), "test_pos": int(y[te].sum())}
-    return D.metrics(y[te], pred), info
+
+    # 3. transform using train receptors only
+    _prot = prot
+    if prot_transform is not None:
+        train_recs = p["receptor"][tr].unique().tolist()
+        _prot = prot_transform(prot, train_recs)
+
+    # 4. build features (p already filtered; make_xy's internal filter is a no-op)
+    X, y2, _ = make_xy(p, _prot, mol, random_prot=random_prot, seed=seed)
+
+    pred = HEADS[head](X[tr], y2[tr], X[te], seed=seed)
+    info = {"train": int(tr.sum()), "test": int(te.sum()), "test_pos": int(y2[te].sum())}
+    return D.metrics(y2[te], pred), info

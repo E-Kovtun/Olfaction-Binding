@@ -45,4 +45,13 @@ modeling/
     (interaction ladder + bilinear structure → notebooks/interaction_research.ipynb)
 ```
 
+Graph runners support `--transductive-exp`: in transductive mode the final probe uses
+`[graph-enriched molecule || graph-enriched protein]` instead of the default
+`[raw molecule || graph-enriched protein]`. It is deliberately unavailable for an
+explicit `inductive_molecule` run.
+
+`--disjoint-probe-train` removes the easier same-edge setup: the original train labels
+are split (class-stratified) into a GNN MP/decoder subset and a separate downstream
+probe subset. `--probe-train-frac` controls the latter share (default 0.5).
+
 Notebooks in [`../notebooks/`](../notebooks/) consume the CSVs / checkpoints these write.

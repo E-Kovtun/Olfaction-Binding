@@ -25,6 +25,20 @@ The reported head is an unentangled **XGBoost probe** on `[raw mol ‖ graph-enr
 architecture (GNN / GAT), molecule-coverage quality filter (`q87/q95/q99`), and
 history depth (`[x0‖x1]` vs `[x0‖x1‖x2]`).
 
+Transductive runs have an additional opt-in probe, `--transductive-exp`, using
+`[graph-enriched mol ‖ graph-enriched prot]`. The default transductive probe remains
+`[raw mol ‖ graph-enriched prot]`; inductive-molecule always keeps the raw molecule
+embedding because held-out molecules have no graph context. Checkpoint/table variants
+from the new probe carry the `_transductive_exp` suffix. A transductive molecule whose
+train edges were removed (for example by the quality filter) still receives the GNN/GAT
+root/self transformation, but no neighbor-derived context; this is expected.
+
+For a stricter probe protocol, `--disjoint-probe-train` partitions the original train
+edges into two class-stratified subsets. GNN/GAT message passing and decoder training
+use only the first; XGBoost/MLP fitting uses only the second. Thus no downstream-probe
+training label was already present as the exact same MP edge. The default split is 50/50
+and result variants carry the `_disjoint` suffix.
+
 ## Notebooks
 
 | notebook | dataset | regimes | what it shows |

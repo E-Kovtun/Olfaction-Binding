@@ -16,9 +16,15 @@ Node features (the paper shows the molecule encoder is interchangeable):
 Message passing uses TRAIN edges only; supervision uses the LORAX train/val/test
 splits directly. Only the unentangled XGBoost probe is reported
 ([raw_mol_emb || graph_prot_emb]); the MLP probe is dropped.
+For transductive runs, --transductive-exp instead reports
+([graph_mol_emb || graph_prot_emb]). Inductive runs intentionally keep raw molecules.
+With --disjoint-probe-train, GNN MP/decoder training and downstream XGBoost fitting
+use disjoint class-stratified halves of the original train labels.
 
   uv run python scripts/modeling/train/train_graph_full_full.py --arch gnn --mp_mode signed
   uv run python scripts/modeling/train/train_graph_full_full.py --arch gat --mp_mode all_edges
+  uv run python scripts/modeling/train/train_graph_full_full.py --regime transductive \
+      --arch gnn --mp_mode signed --transductive-exp --disjoint-probe-train
 
 Writes checkpoints to <results-dir>/checkpoints/ in the same shape the
 graph_evaluation notebooks expect (regime == "ec50").
@@ -43,8 +49,10 @@ METRICS = ["AUROC", "AUPRC", "MCC", "F1", "precision", "recall"]
 def variant_name(args):
     q = args.mol_quality_q
     hist_tag = ("_history" if args.history_depth >= 2 else "_hist1") if args.history else ""
+    exp_tag = "_transductive_exp" if args.transductive_exp else ""
+    disjoint_tag = "_disjoint" if args.disjoint_probe_train else ""
     return (args.mp_mode + (f"_q{int(q * 100)}" if q > 0 else "") + hist_tag
-            + ("_rawp" if args.concat_raw_prot else ""))
+            + ("_rawp" if args.concat_raw_prot else "") + exp_tag + disjoint_tag)
 
 
 def save_history(history, csv_path, plot_path):
@@ -103,10 +111,20 @@ def run(args):
     Xm, Xp, splits = L.build(args.regime, args.fold, esm, chem, seed=args.seed)
     x_dict = {H.MOL: Xm, H.PROT: Xp}
 
+    if args.disjoint_probe_train:
+        gnn_train, probe_train = H.split_train_for_probe(
+            splits["train"], probe_frac=args.probe_train_frac, seed=args.seed + 101)
+    else:
+        gnn_train = probe_train = splits["train"]
+
     # MP graph from TRAIN edges only; optional molecule-coverage quality filter
-    mp_pos_a, mp_neg_a = splits["train"]["pos"], splits["train"]["neg"]
+    mp_pos_a, mp_neg_a = gnn_train["pos"], gnn_train["neg"]
     if args.mol_quality_q > 0.0:
-        mask = H.quality_mol_mask(mp_pos_a, mp_neg_a, Xm.shape[0], args.mol_quality_q)
+        # Compute coverage on the complete original train, preserving q## semantics;
+        # apply the resulting mask only to the GNN half's MP edges.
+        mask = H.quality_mol_mask(
+            splits["train"]["pos"], splits["train"]["neg"],
+            Xm.shape[0], args.mol_quality_q)
         keep = set(int(i) for i in np.where(mask)[0])
         _f = lambda a: a[np.array([int(m) in keep for m in a[:, 0]], dtype=bool)] if len(a) else a
         mp_pos_a, mp_neg_a = _f(mp_pos_a), _f(mp_neg_a)
@@ -114,7 +132,12 @@ def run(args):
     mp_pos = torch.tensor(mp_pos_a.T, dtype=torch.long)
     mp_neg = torch.tensor(mp_neg_a.T, dtype=torch.long)
     eidx = H.edge_index_dict(mp_pos, mp_neg, mode=args.mp_mode)
-    sup = {s: H.sup_edges(splits[s]) for s in ("train", "val", "test")}
+    sup = {"train": H.sup_edges(gnn_train),
+           "probe_train": H.sup_edges(probe_train),
+           "val": H.sup_edges(splits["val"]),
+           "test": H.sup_edges(splits["test"])}
+    print(f"  GNN train pos/neg={len(gnn_train['pos'])}/{len(gnn_train['neg'])} | "
+          f"probe train={len(probe_train['pos'])}/{len(probe_train['neg'])}")
 
     model = make_model(args.arch, args.mp_mode, args)
     with torch.no_grad():
@@ -141,6 +164,8 @@ def run(args):
     history_csv = history_dir / f"{run_id}.csv"
     history_plot = history_dir / f"{run_id}.png"
     history = []
+    best_val_auprc = -1.0
+    best_state = None
 
     for ep in range(1, args.epochs + 1):
         model.train(); opt.zero_grad()
@@ -163,6 +188,13 @@ def run(args):
             row.update({f"test_{k}": float(v) for k, v in test_m.items()})
         history.append(row)
 
+        if val_m["AUPRC"] > best_val_auprc:
+            best_val_auprc = val_m["AUPRC"]
+            best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+            row["is_best"] = True
+        else:
+            row["is_best"] = False
+
         # CSV is updated every epoch so an interrupted 900-epoch run remains useful.
         save_table = pd.DataFrame(history)
         history_csv.parent.mkdir(parents=True, exist_ok=True)
@@ -172,8 +204,9 @@ def run(args):
         if ep % args.plot_every == 0 or ep == args.epochs:
             save_history(history, history_csv, history_plot)
         if ep == 1 or ep % args.log_every == 0 or ep == args.epochs:
+            best_marker = " *" if row["is_best"] else ""
             log = (f"    epoch {ep:3d} | loss={row['train_loss']:.4f} | "
-                   f"val AUROC={val_m['AUROC']:.3f} AUPRC={val_m['AUPRC']:.3f}")
+                   f"val AUROC={val_m['AUROC']:.3f} AUPRC={val_m['AUPRC']:.3f}{best_marker}")
             if args.observe_test:
                 log += f" | test AUROC={test_m['AUROC']:.3f} AUPRC={test_m['AUPRC']:.3f}"
             print(log, flush=True)
@@ -193,12 +226,17 @@ def run(args):
     print(f"  history -> {history_csv.relative_to(_root)}")
     print(f"  plot    -> {history_plot.relative_to(_root)}")
 
+    # Restore best-val checkpoint before building the probe
+    print(f"  restoring best encoder (epoch {int(best.epoch)}, val AUPRC={best_val_auprc:.4f})")
+    model.load_state_dict({k: v.to(next(model.parameters()).device)
+                           for k, v in best_state.items()})
+
     # ---- unentangled BOOST probe: [raw chemberta mol || graph-enriched esm prot] ----
     model.eval()
     with torch.no_grad():
         z = (model.encode_history(x_dict, eidx, depth=args.history_depth)
              if args.history else model.encode(x_dict, eidx))
-    Xm_raw = x_dict[H.MOL].numpy()
+    Xm_probe = (z[H.MOL] if args.transductive_exp else x_dict[H.MOL]).numpy()
     Zp = z[H.PROT].numpy()
     # The graph probe normally never sees the RAW ESM — only the trained 256-d
     # proj+ReLU bottleneck (even history concats stages of that bottleneck).
@@ -211,18 +249,20 @@ def run(args):
         prot_desc = f"{Xp_raw.shape[1]} raw ESM + {prot_desc}"
 
     def feats(idx):
-        return np.concatenate([Xm_raw[idx[0].numpy()], Zp[idx[1].numpy()]], axis=1)
+        return np.concatenate([Xm_probe[idx[0].numpy()], Zp[idx[1].numpy()]], axis=1)
 
-    Xtr, ytr = feats(sup["train"][0]), sup["train"][1].numpy()
+    Xtr, ytr = feats(sup["probe_train"][0]), sup["probe_train"][1].numpy()
     Xte, yte = feats(sup["test"][0]),  sup["test"][1].numpy()
+    mol_desc = f"{args.arch.upper()}-enriched" if args.transductive_exp else "raw ChemBERTa"
     print(f"  unentangled features: {Xtr.shape[1]}d "
-          f"(mol {Xm_raw.shape[1]} ChemBERTa + prot {prot_desc})")
+          f"(mol {Xm_probe.shape[1]} {mol_desc} + prot {prot_desc})")
     scores = train_boost(Xtr, ytr, Xte, seed=args.seed)
     r = metrics(yte, scores)
     print("  unentangled_boost EC50-TEST " + " ".join(f"{k}={v:.3f}" for k, v in r.items()))
 
     # ---- save in the shape graph_evaluation_full_full expects ----
-    # variant fully identifies the run within (regime, arch): mp_mode [+q##] [+history]
+    # variant fully identifies the run within (regime, arch):
+    # mp_mode [+q##] [+history] [+rawp] [+transductive_exp] [+disjoint]
     q = args.mol_quality_q
     prefix = args.arch                          # "gnn" or "gat"
     ckpt = {
@@ -232,7 +272,13 @@ def run(args):
         "config": {"mp_mode": args.mp_mode, "mol_quality_q": q, "history": args.history,
                    "history_depth": args.history_depth if args.history else 0,
                    "concat_raw_prot": args.concat_raw_prot,
+                   "transductive_exp": args.transductive_exp,
+                   "molecule_features": "graph_enriched" if args.transductive_exp else "raw",
+                   "disjoint_probe_train": args.disjoint_probe_train,
+                   "probe_train_frac": args.probe_train_frac,
                    "hidden": args.hidden if args.arch == "gnn" else args.gat_hidden},
+        "gnn_train_sup": sup["train"],
+        "probe_train_sup": sup["probe_train"],
         "test_sup": sup["test"], "test_scores": scores,
         "decoder_history": history,
         "decoder_history_csv": str(history_csv.relative_to(_root)),
@@ -259,6 +305,16 @@ def main():
     ap.add_argument("--concat_raw_prot", action="store_true",
                     help="Probe on [raw ESM-1280 || z_prot] — gives the probe the full "
                          "raw protein embedding the graph bottleneck otherwise discards")
+    ap.add_argument("--transductive-exp", "--transductive_exp", "-transductive_exp",
+                    dest="transductive_exp", action="store_true",
+                    help="Transductive only: probe on [graph molecule || graph protein] "
+                         "instead of [raw molecule || graph protein]")
+    ap.add_argument("--disjoint-probe-train", "--disjoint_probe_train",
+                    dest="disjoint_probe_train", action="store_true",
+                    help="Split train labels: one disjoint half for GNN MP/decoder, "
+                         "the other for XGBoost fitting")
+    ap.add_argument("--probe-train-frac", type=float, default=0.5,
+                    help="Fraction of train labels reserved for XGBoost in disjoint mode")
     ap.add_argument("--observe_test", action="store_true",
                     help="[DIAGNOSTICS ONLY] Log test-set metrics every epoch. "
                          "ONLY for gnn_training_diagnostics.ipynb. "
@@ -270,13 +326,17 @@ def main():
     ap.add_argument("--heads",      type=int,   default=4)
     ap.add_argument("--dropout",    type=float, default=0.3)
     ap.add_argument("--lr",         type=float, default=5e-3)
-    ap.add_argument("--epochs",     type=int,   default=900)
+    ap.add_argument("--epochs",     type=int,   default=1500)
     ap.add_argument("--log-every",  type=int,   default=10,
                     help="Print compact validation/test status every N epochs")
     ap.add_argument("--plot-every", type=int,   default=25,
                     help="Refresh the history PNG every N epochs (CSV is saved every epoch)")
     ap.add_argument("--seed",       type=int,   default=42)
     args = ap.parse_args()
+    if args.transductive_exp and args.regime != "transductive":
+        ap.error("--transductive-exp is only valid with --regime transductive")
+    if not 0.0 < args.probe_train_frac < 1.0:
+        ap.error("--probe-train-frac must be between 0 and 1")
     run(args)
 
 

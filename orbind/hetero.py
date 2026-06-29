@@ -140,6 +140,35 @@ def sup_edges(split):
     return idx, y
 
 
+def split_train_for_probe(train_split, probe_frac=0.5, seed=42):
+    """Split train labels into disjoint GNN and downstream-probe subsets.
+
+    Positive and negative arrays are partitioned independently, preserving the
+    class balance approximately. Only the GNN subset should become MP edges or
+    decoder supervision; the probe subset is reserved for fitting XGBoost/MLP.
+    """
+    if not 0.0 < probe_frac < 1.0:
+        raise ValueError(f"probe_frac must be between 0 and 1, got {probe_frac}")
+    rng = np.random.default_rng(seed)
+    gnn, probe = {}, {}
+    for label in ("pos", "neg"):
+        edges = train_split[label]
+        if len(edges) < 2:
+            raise ValueError(f"need at least 2 {label} train edges for a disjoint split")
+        perm = rng.permutation(len(edges))
+        n_probe = min(max(int(round(probe_frac * len(edges))), 1), len(edges) - 1)
+        probe[label] = edges[perm[:n_probe]]
+        gnn[label] = edges[perm[n_probe:]]
+    gnn_edges = set(map(tuple, np.concatenate([gnn["pos"], gnn["neg"]], axis=0)))
+    probe_edges = set(map(tuple, np.concatenate([probe["pos"], probe["neg"]], axis=0)))
+    overlap = gnn_edges & probe_edges
+    if overlap:
+        raise ValueError(
+            f"{len(overlap)} labeled pairs occur in both disjoint subsets; "
+            "deduplicate conflicting pair labels before splitting")
+    return gnn, probe
+
+
 class HeteroLink(torch.nn.Module):
     """Heterogeneous bipartite link predictor.
 

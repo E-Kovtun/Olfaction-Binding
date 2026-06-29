@@ -16,7 +16,9 @@ import pandas as pd
 
 def load_npz_dict(path) -> dict:
     d = np.load(path, allow_pickle=True)
-    return {k: v for k, v in zip(d["ids"].tolist(), d["emb"])}
+    if "ids" in d.files:
+        return {k: v for k, v in zip(d["ids"].tolist(), d["emb"])}
+    return {k: d[k] for k in d.files}
 
 
 def assemble(pairs_csv, prot_npz, mol_npz, random_prot=False, seed=0):

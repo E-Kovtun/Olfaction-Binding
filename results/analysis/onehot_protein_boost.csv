@@ -1,0 +1,7 @@
+variant,split,AUROC,AUPRC,MCC,F1,precision,recall,train,test,test_pos
+onehot,stratified,0.8617,0.4227,0.3919,0.4246,0.3033,0.7074,17107,4277,352
+onehot,group_molecule,0.7716,0.3286,0.2168,0.2756,0.1989,0.4485,16767,4617,330
+onehot,group_receptor,0.7738,0.2399,0.2699,0.3266,0.2189,0.6427,17063,4321,389
+onehot_fam,stratified,0.8705,0.4483,0.4035,0.4372,0.3175,0.7017,17107,4277,352
+onehot_fam,group_molecule,0.7555,0.3168,0.2287,0.2871,0.2132,0.4394,16767,4617,330
+onehot_fam,group_receptor,0.7701,0.2479,0.2682,0.3257,0.2187,0.6375,17063,4321,389

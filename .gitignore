@@ -24,6 +24,12 @@ notebooks/figures/
 results/**/checkpoints/
 results/**/*smoke*
 results/**/*.npz
+# Existing graph sweeps used an evaluation protocol we intend to replace.
+# Keep their local CSVs for reference, but do not publish them as final results.
+results/**/tables/gnn_*.csv
+results/**/tables/gat_*.csv
+# Large row-level analysis exports are reproducible; notebooks keep summaries.
+results/analysis/pocket_binding_signal*.csv
 *.pt
 *.pth
 *.ckpt

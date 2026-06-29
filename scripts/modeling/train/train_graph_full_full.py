@@ -59,6 +59,8 @@ def save_history(history, csv_path, plot_path):
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
+    has_test = "test_AUROC" in table.columns
+
     fig, axes = plt.subplots(2, 2, figsize=(12, 8), sharex=True)
     panels = [
         (axes[0, 0], ["AUROC", "AUPRC"], "Ranking metrics"),
@@ -68,14 +70,17 @@ def save_history(history, csv_path, plot_path):
     for ax, names, title in panels:
         for metric in names:
             ax.plot(table.epoch, table[f"val_{metric}"], label=f"val {metric}")
-            ax.plot(table.epoch, table[f"test_{metric}"], "--", alpha=.75,
-                    label=f"test {metric}")
+            if has_test:
+                ax.plot(table.epoch, table[f"test_{metric}"], "--", alpha=.75,
+                        label=f"test {metric}")
         ax.set_title(title); ax.grid(alpha=.25); ax.legend(fontsize=8, ncol=2)
     axes[1, 1].plot(table.epoch, table.train_loss, color="black")
     axes[1, 1].set_title("Training loss"); axes[1, 1].grid(alpha=.25)
     for ax in axes[1]:
         ax.set_xlabel("epoch")
-    fig.suptitle("Validation vs test history (test is diagnostic only)")
+    suptitle = ("Validation vs test history (--observe_test)" if has_test
+                else "Validation history (test hidden — no --observe_test)")
+    fig.suptitle(suptitle)
     fig.tight_layout()
     tmp_plot = plot_path.with_suffix(".tmp.png")
     fig.savefig(tmp_plot, dpi=140, bbox_inches="tight")
@@ -119,6 +124,17 @@ def run(args):
     pw = torch.tensor([(tr_y == 0).sum() / max((tr_y == 1).sum(), 1)])
     loss_fn = torch.nn.BCEWithLogitsLoss(pos_weight=pw)
 
+    if args.observe_test:
+        print(
+            "\n" + "!" * 70 + "\n"
+            "!!  WARNING: --observe_test ENABLED                                 !!\n"
+            "!!  Test-set metrics are computed and logged EVERY epoch.           !!\n"
+            "!!  This is ONLY valid for gnn_training_diagnostics.ipynb.          !!\n"
+            "!!  DO NOT use this flag for any hyperparameter sweep or tuning.    !!\n"
+            "!!  DO NOT report results from a run that used this flag.           !!\n"
+            + "!" * 70 + "\n"
+        )
+
     variant = variant_name(args)
     history_dir = _root / args.results_dir / "history"
     run_id = f"{args.arch}_{variant}_{args.regime}_fold{args.fold}"
@@ -132,21 +148,19 @@ def run(args):
         loss.backward()
         opt.step()
 
-        # Exact per-epoch decoder history. Test is observed for diagnosis only:
-        # it never affects gradients, stopping, hyperparameters, or checkpoint choice.
         model.eval()
         with torch.no_grad():
             z_eval = model.encode(x_dict, eidx)
-            pred = {
-                s: torch.sigmoid(model.decode(z_eval, sup[s][0])).numpy()
-                for s in ("val", "test")
-            }
-        epoch_metrics = {
-            s: metrics(sup[s][1].numpy(), pred[s]) for s in ("val", "test")
-        }
+            val_pred = torch.sigmoid(model.decode(z_eval, sup["val"][0])).numpy()
+            if args.observe_test:
+                test_pred = torch.sigmoid(model.decode(z_eval, sup["test"][0])).numpy()
+
+        val_m = metrics(sup["val"][1].numpy(), val_pred)
         row = {"epoch": ep, "train_loss": float(loss.detach())}
-        for s in ("val", "test"):
-            row.update({f"{s}_{k}": float(v) for k, v in epoch_metrics[s].items()})
+        row.update({f"val_{k}": float(v) for k, v in val_m.items()})
+        if args.observe_test:
+            test_m = metrics(sup["test"][1].numpy(), test_pred)
+            row.update({f"test_{k}": float(v) for k, v in test_m.items()})
         history.append(row)
 
         # CSV is updated every epoch so an interrupted 900-epoch run remains useful.
@@ -158,20 +172,24 @@ def run(args):
         if ep % args.plot_every == 0 or ep == args.epochs:
             save_history(history, history_csv, history_plot)
         if ep == 1 or ep % args.log_every == 0 or ep == args.epochs:
-            vm, tm = epoch_metrics["val"], epoch_metrics["test"]
-            print(f"    epoch {ep:3d} | loss={row['train_loss']:.4f} | "
-                  f"val AUROC={vm['AUROC']:.3f} AUPRC={vm['AUPRC']:.3f} | "
-                  f"test AUROC={tm['AUROC']:.3f} AUPRC={tm['AUPRC']:.3f}", flush=True)
+            log = (f"    epoch {ep:3d} | loss={row['train_loss']:.4f} | "
+                   f"val AUROC={val_m['AUROC']:.3f} AUPRC={val_m['AUPRC']:.3f}")
+            if args.observe_test:
+                log += f" | test AUROC={test_m['AUROC']:.3f} AUPRC={test_m['AUPRC']:.3f}"
+            print(log, flush=True)
 
     save_history(history, history_csv, history_plot)
     hist_df = pd.DataFrame(history)
     best_i = int(hist_df["val_AUPRC"].idxmax())
     best = hist_df.loc[best_i]
-    print(f"  best val AUPRC epoch={int(best.epoch)}: val={best.val_AUPRC:.3f}, "
-          f"test={best.test_AUPRC:.3f}")
-    for metric in ("AUROC", "AUPRC", "MCC", "F1"):
-        corr = hist_df[f"val_{metric}"].corr(hist_df[f"test_{metric}"])
-        print(f"  epoch-wise val/test correlation {metric}: r={corr:.3f}")
+    best_line = f"  best val AUPRC epoch={int(best.epoch)}: val={best.val_AUPRC:.3f}"
+    if args.observe_test:
+        best_line += f", test={best.test_AUPRC:.3f}"
+    print(best_line)
+    if args.observe_test:
+        for metric in ("AUROC", "AUPRC", "MCC", "F1"):
+            corr = hist_df[f"val_{metric}"].corr(hist_df[f"test_{metric}"])
+            print(f"  epoch-wise val/test correlation {metric}: r={corr:.3f}")
     print(f"  history -> {history_csv.relative_to(_root)}")
     print(f"  plot    -> {history_plot.relative_to(_root)}")
 
@@ -241,6 +259,10 @@ def main():
     ap.add_argument("--concat_raw_prot", action="store_true",
                     help="Probe on [raw ESM-1280 || z_prot] — gives the probe the full "
                          "raw protein embedding the graph bottleneck otherwise discards")
+    ap.add_argument("--observe_test", action="store_true",
+                    help="[DIAGNOSTICS ONLY] Log test-set metrics every epoch. "
+                         "ONLY for gnn_training_diagnostics.ipynb. "
+                         "NEVER use during HP sweeps — test leaks into your mental model.")
     ap.add_argument("--fold",    type=int, default=1, choices=[1, 2, 3, 4, 5])
     ap.add_argument("--results-dir", default="results/full_full/")
     ap.add_argument("--hidden",     type=int,   default=256)   # GNN width

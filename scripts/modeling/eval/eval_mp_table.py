@@ -3,10 +3,10 @@
 Settings (columns): protein in {ESM, random} x split in {stratified, molecule}.
 Both heads consume the SAME concatenated [molecule || protein] features.
 
-  uv run python scripts/modeling/eval_mp_table.py --head all     # mlp + boost
-  uv run python scripts/modeling/eval_mp_table.py --head boost
+  uv run python scripts/modeling/eval/eval_mp_table.py --head all     # mlp + boost
+  uv run python scripts/modeling/eval/eval_mp_table.py --head boost
 
-Writes results/<head>_results.{md,csv}.
+Writes results/tables/<head>_results.{md,csv}.
 """
 import argparse, pathlib, sys, warnings
 warnings.filterwarnings("ignore")
@@ -43,15 +43,14 @@ def run_head(head, args):
         print("  " + " ".join(f"{k}={v:.3f}" for k, v in m.items()))
 
     tab = pd.DataFrame({c: [cols[c][k] for k in METRICS] for c in cols}, index=METRICS).round(3)
-    out = _root / "results"; out.mkdir(exist_ok=True)
+    out = _root / args.out_dir / "tables"; out.mkdir(parents=True, exist_ok=True)
     tab.to_csv(out / f"{head}_results.csv")
-    # manual markdown (no tabulate dependency)
     hdr = "| Metric | " + " | ".join(tab.columns) + " |"
     sep = "|" + "---|" * (len(tab.columns) + 1)
     rows = [f"| {k} | " + " | ".join(f"{tab.loc[k, c]:.3f}" for c in tab.columns) + " |" for k in METRICS]
     (out / f"{head}_results.md").write_text(
         f"# MP results — {head} head\n\n" + "\n".join([hdr, sep, *rows]) + "\n", encoding="utf-8")
-    print(f"\n=== {head} table ===\n{tab.to_string()}\nsaved -> results/{head}_results.md")
+    print(f"\n=== {head} table ===\n{tab.to_string()}\nsaved -> {args.out_dir}/tables/{head}_results.md")
     return tab
 
 
@@ -59,8 +58,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--head", default="all", choices=["mlp", "boost", "all"])
     ap.add_argument("--pairs", default="data/processed/pairs_curated.csv")
-    ap.add_argument("--prot", default="data/embeddings/proteins/esm2_650m.npz")
+    ap.add_argument("--prot", default="data/embeddings/proteins/esm2_650m_mean_curated.npz")
     ap.add_argument("--mol", default="data/embeddings/molecules/gin_supervised_contextpred.npz")
+    ap.add_argument("--out-dir", default="results/",
+                    help="Dataset results root; tables go to <dir>/tables (use results/full/ for the full dataset)")
     ap.add_argument("--test-size", type=float, default=0.2)
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()

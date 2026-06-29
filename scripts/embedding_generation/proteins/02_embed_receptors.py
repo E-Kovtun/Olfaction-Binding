@@ -11,7 +11,7 @@ Examples
 --------
 uv run python scripts/embedding_generation/proteins/02_embed_receptors.py \
        --sequences data/processed/proteins/receptor_sequences.csv \
-       --out data/embeddings/proteins/esm2_650m.npz
+       --out data/embeddings/proteins/esm2_650m_mean_curated.npz
 """
 import argparse, pathlib
 import numpy as np
@@ -58,7 +58,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--sequences", required=True,
                     help="csv with columns: receptor_id, sequence")
-    ap.add_argument("--out", default="data/embeddings/proteins/esm2_650m.npz")
+    ap.add_argument("--out", default="data/embeddings/proteins/esm2_650m_mean_curated.npz")
     ap.add_argument("--version", default="650m", choices=["650m", "3B"])
     args = ap.parse_args()
 

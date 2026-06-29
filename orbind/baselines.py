@@ -54,10 +54,13 @@ def train_mlp(Xtr, ytr, Xte, seed=42, hidden=(512, 128), dropout=0.3, lr=1e-3, e
 
 def train_boost(Xtr, ytr, Xte, seed=42):
     import xgboost as xgb
+    import torch
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     spw = float((ytr == 0).sum() / max((ytr == 1).sum(), 1))
     clf = xgb.XGBClassifier(n_estimators=400, max_depth=6, learning_rate=0.1,
                             subsample=0.8, colsample_bytree=0.8, scale_pos_weight=spw,
-                            eval_metric="aucpr", tree_method="hist", n_jobs=-1, random_state=seed)
+                            eval_metric="aucpr", tree_method="hist", device=device,
+                            n_jobs=-1, random_state=seed)
     clf.fit(Xtr, ytr)
     return clf.predict_proba(Xte)[:, 1]
 

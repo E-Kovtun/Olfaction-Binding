@@ -44,7 +44,7 @@ def main():
 
     # shared pair tables at processed root
     pairs.to_csv(out / "pairs_annotated.csv.gz", index=False, compression="gzip")
-    curated.to_csv(out / "pairs_all_flagged.csv", index=False)
+    curated.to_csv(out / "pairs_m2or_full.csv", index=False)
     final[["receptor", "inchikey", "label", "smiles"]].to_csv(out / "pairs_curated.csv", index=False)
 
     # per-modality join tables the embedding scripts consume (both 100% populated)

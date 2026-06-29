@@ -1,0 +1,7 @@
+split,variant,AUROC,AUPRC,MCC,F1
+stratified,detached_with_id,0.8596,0.4333,0.4272,0.469
+stratified,detached,0.822,0.3533,0.3502,0.3849
+group_molecule,detached_with_id,0.7373,0.3357,0.2949,0.3403
+group_molecule,detached,0.7038,0.2487,0.2445,0.2928
+group_receptor,detached_with_id,0.8282,0.3506,0.369,0.4264
+group_receptor,detached,0.8217,0.3331,0.3267,0.3752

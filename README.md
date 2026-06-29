@@ -8,7 +8,7 @@ built on the **full official M2OR** database export (Lalis et al. 2024).
 ```
 M2OR.zip ──00 download──▶ relational export (pairs/compounds/receptors, SMILES inline)
          ──01 curate────▶ pairs_curated.csv (receptor, molecule, label, SMILES)
-                          receptor_sequences.csv ──02──▶ esm2_650m.npz (1280-d/receptor)
+                          receptor_sequences.csv ──02──▶ esm2_650m_mean_curated.npz (1280-d/receptor)
                           molecule_smiles.csv     ──03──▶ mol_graphs.pt (PyG → your GCN)
 ```
 
@@ -60,14 +60,19 @@ uv run python scripts/embedding_generation/proteins/02_embed_receptors.py \
 uv run python scripts/embedding_generation/molecules/03_embed_molecules.py \
        --molecules data/processed/molecules/molecule_smiles.csv
 
-# MP baseline (LORAX-style): concat[molecule||protein] -> MLP -> bind/no-bind
-uv run python scripts/modeling/train_mp.py --split stratified   # or group_receptor
+# MP baseline: concat[molecule || protein] -> head (XGBoost | MLP) -> bind/no-bind
+uv run python scripts/modeling/train/train_mp.py --split group_molecule   # our main mode
 ```
 
-The MP model is **weighted** twice: a label-**stratified** train/test split, and
-a `pos_weight = #neg/#pos` loss to counter the ~1:11 imbalance. Metrics are
-imbalance-aware (AUROC, AUPRC, MCC, F1). `--split group_receptor` holds out whole
-receptors to avoid paralog leakage.
+Goal: a competent **protein–molecule interaction** model for olfaction — not a single
+target number. The reference baseline is **XGBoost** over `[GIN molecule ‖ ESM-2 mean
+receptor]` (an MLP head also exists but is less maintained). Because the human OR
+repertoire is **fixed and known** (~400 receptors), the relevant evaluation is
+matrix-completion over known receptors: **group_molecule** (new odorants — our main
+bet) and **stratified** (matrix fill, often used by other papers). The cold-**receptor**
+split (`group_receptor`) is **de-emphasized** — generalizing to unseen receptors is not
+really the olfactory task. Class imbalance (~1:11) is handled by
+`scale_pos_weight` / `pos_weight`; metrics are imbalance-aware (AUROC, AUPRC, MCC, F1).
 
 ## Layout
 
@@ -91,4 +96,6 @@ orbind/
 
 - Mixture policy: `mono` (strict, pure substances) vs `mono+isomers`.
 - Molecule model: graphs for an end-to-end GCN (no canonical pretrained GCN here).
-- Splits: build **group-aware** (by receptor) to avoid the leakage LORAX's random CV has.
+- Splits: **group_molecule** (new odorants, known receptors) is the practical target;
+  **stratified** for matrix completion; **group_receptor** de-emphasized (OR repertoire
+  is fixed/known, so cold-receptor isn't really the olfactory task).

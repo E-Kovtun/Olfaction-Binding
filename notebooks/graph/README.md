@@ -3,6 +3,15 @@
 Evaluation of the **heterogeneous bipartite GNN/GAT link predictor** (molecule ↔ protein)
 across our three dataset variants, plus a mechanism analysis.
 
+> **Protocol status — exploratory, rerun required.** Existing graph checkpoints,
+> tables, plots, and notebook outputs must not be treated as final benchmark results.
+> The old runs have three evaluation problems: the `full_full` cold-molecule split is
+> reconstructed from the same row universe for every nominal LORAX fold; train labels
+> are also used as message-passing edges; and the original sweeps used the final epoch
+> rather than a validation-selected checkpoint. Future runs should create genuinely
+> distinct group-molecule folds, checkpoint by validation metrics, and touch test only
+> once after model selection. The notebooks remain useful as exploratory diagnostics.
+
 All notebooks read checkpoints/CSVs produced by `scripts/modeling/train/` and
 `scripts/modeling/eval/`. They resolve the repo root by walking up to `pyproject.toml`,
 so they run correctly from this sub-folder.
@@ -26,7 +35,7 @@ history depth (`[x0‖x1]` vs `[x0‖x1‖x2]`).
 | `graph_inductive-transductive_analysis.ipynb` | full_full | both | **mechanism**: the `rawp` ablation (`[ChemBERTa ‖ raw ESM ‖ z_prot]`) that disentangles "graph compresses away raw ESM" from "graph adds transferable signal" |
 | `gnn_training_diagnostics.ipynb` | full_full | inductive_molecule | **900-epoch training curves** (val vs test per epoch, loss, correlation scatter, key-epoch table); shows why 300-epoch early stop is suboptimal |
 
-## Key findings (full_full, fold 1)
+## Provisional observations (full_full, fold 1; require rerun)
 
 - **Quality filter is the strongest knob**: `signed + q95` lifts the graph well above plain
   `signed` (`q99` over-prunes and degrades).

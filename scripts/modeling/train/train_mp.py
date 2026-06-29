@@ -5,9 +5,9 @@ Weighted in two senses:
   * the loss uses pos_weight = #neg/#pos to counter the ~1:11 imbalance.
 
 Run (after embeddings exist):
-  uv run python scripts/modeling/train_mp.py \
+  uv run python scripts/modeling/train/train_mp.py \
       --pairs data/processed/pairs_curated.csv \
-      --prot  data/embeddings/proteins/esm2_650m.npz \
+      --prot  data/embeddings/proteins/esm2_650m_mean_curated.npz \
       --mol   data/embeddings/molecules/gin_supervised_contextpred.npz \
       --split stratified            # or group_receptor
 """
@@ -48,7 +48,7 @@ def metrics(y, p):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--pairs", default="data/processed/pairs_curated.csv")
-    ap.add_argument("--prot", default="data/embeddings/proteins/esm2_650m.npz")
+    ap.add_argument("--prot", default="data/embeddings/proteins/esm2_650m_mean_curated.npz")
     ap.add_argument("--mol", default="data/embeddings/molecules/gin_supervised_contextpred.npz")
     ap.add_argument("--split", default="stratified",
                     choices=["stratified", "group_receptor", "group_molecule"])

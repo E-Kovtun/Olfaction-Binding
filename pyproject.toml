@@ -12,7 +12,7 @@ dependencies = [
     # molecule graphs (script 03): RDKit + torch_geometric
     "rdkit>=2023.3",
     "torch-geometric>=2.5",
-    "xgboost>=2.0",           # MP boosting head (ProSmith/LORAX-style)
+    "xgboost>=2.0,<3.0",           # MP boosting head (ProSmith/LORAX-style)
     "ipykernel>=6",           # run the screening notebook on the project .venv
     "matplotlib>=3.7",        # notebook plots (similarity heatmaps, etc.)
     # pretrained GIN from LORAX (gin_supervised_*) via dgllife — needs dgl,
@@ -24,8 +24,15 @@ dependencies = [
     "torchdata<0.8",          # dgl 2.2.1 imports torchdata.datapipes (removed in >=0.10)
     "pyyaml",                 # dgl graphbolt undeclared deps
     "pydantic",
+    "biopython>=1.87",
+    "shap>=0.49.1",
 ]
 
 [tool.uv]
 # application, not a library; all deps mandatory so `uv run` always has a full env.
 package = false
+
+[dependency-groups]
+dev = [
+    "nbformat>=5.10.4",
+]

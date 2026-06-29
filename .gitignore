@@ -7,8 +7,35 @@ data/**
 __pycache__/
 *.pyc
 .venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+*.egg-info/
 .ipynb_checkpoints/
 
-# notebook cache (regenerable; results persist on disk)
+# notebooks are source; only their generated side-products are ignored
 notebooks/cache/
 notebooks/.ipynb_checkpoints/
+notebooks/figures/
+
+# training artifacts — keep compact tables/analysis/history, not model binaries
+results/**/checkpoints/
+results/**/*smoke*
+results/**/*.npz
+*.pt
+*.pth
+*.ckpt
+*.log
+
+# isolated experiments: keep scripts, READMEs and compact CSV manifests/results;
+# ignore native binaries and regenerable structures/poses/ligand files
+experiments/**/bin/
+experiments/**/data/**
+!experiments/**/data/
+!experiments/**/data/*.csv
+
+# editor / OS noise
+.DS_Store
+Thumbs.db

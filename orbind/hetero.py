@@ -15,6 +15,15 @@ Design choices that encode the task constraints:
       "inductive_molecule"  — hold out whole MOLECULES (≈ group_molecule);
                               new molecules appear at test with features but no
                               message-passing edges (cold start).
+
+  * Three message-passing (MP) modes (--mp_mode flag):
+      pos_only  — only positive (binding) edges in the MP graph (default).
+                  Negatives participate only through the supervision loss.
+      all_edges — positive AND negative edges in the MP graph, treated equally.
+                  The graph encodes co-occurrence regardless of sign.
+      signed    — positive edges contribute +, negative edges contribute −.
+                  Separate SAGEConv layers for each sign; explicit subtraction
+                  in the update formula nudges representations apart.
 """
 from __future__ import annotations
 import numpy as np
@@ -22,13 +31,19 @@ import pandas as pd
 import torch
 
 MOL, PROT = "molecule", "protein"
-ETYPE = (MOL, "binds", PROT)
-RTYPE = (PROT, "rev_binds", MOL)
+ETYPE     = (MOL,  "binds",         PROT)
+RTYPE     = (PROT, "rev_binds",     MOL)
+ETYPE_NEG = (MOL,  "no_binds",      PROT)
+RTYPE_NEG = (PROT, "rev_no_binds",  MOL)
+
+MP_MODES = ("pos_only", "all_edges", "signed")
 
 
 def load_npz_dict(path):
     d = np.load(path, allow_pickle=True)
-    return {k: v for k, v in zip(d["ids"].tolist(), d["emb"])}
+    if "ids" in d.files:
+        return {k: v for k, v in zip(d["ids"].tolist(), d["emb"])}
+    return {k: d[k] for k in d.files}
 
 
 def build_nodes(pairs_csv, prot_npz, mol_npz):
@@ -53,6 +68,21 @@ def build_nodes(pairs_csv, prot_npz, mol_npz):
     return Xm, Xp, pos, neg, len(mol_ids)
 
 
+def quality_mol_mask(pos, neg, n_mol, quantile):
+    """Boolean mask [n_mol] — True for molecules above coverage quantile.
+
+    Coverage = total (pos + neg) measurements across the full dataset.
+    Intended to filter message-passing edges to well-measured molecules only;
+    supervision pairs are left untouched.
+    """
+    counts = np.bincount(np.concatenate([pos[:, 0], neg[:, 0]]), minlength=n_mol)
+    threshold = np.quantile(counts, quantile)
+    mask = counts >= threshold
+    print(f"  quality filter q={quantile}: {mask.sum()} / {n_mol} molecules "
+          f"(min {int(threshold)} measurements)")
+    return mask
+
+
 def _split_idx(n, fracs, rng):
     perm = rng.permutation(n)
     n_te = int(fracs[2] * n); n_va = int(fracs[1] * n)
@@ -60,17 +90,14 @@ def _split_idx(n, fracs, rng):
 
 
 def make_splits(pos, neg, n_mol, regime="transductive", fracs=(0.7, 0.15, 0.15), seed=42):
-    """Return dict split -> {'pos': [E,2], 'neg': [E,2]} and the train pos edges
-    used for message passing (`mp`)."""
+    """Return (splits dict, mp_pos [2,E+], mp_neg [2,E-]) for message passing."""
     rng = np.random.default_rng(seed)
     out = {}
     if regime == "transductive":
-        # split edges (positives and negatives independently keep the ratio)
         ip = _split_idx(len(pos), fracs, rng); ineg = _split_idx(len(neg), fracs, rng)
         for s, a, b in zip(["train", "val", "test"], ip, ineg):
             out[s] = {"pos": pos[a], "neg": neg[b]}
     elif regime == "inductive_molecule":
-        # hold out whole molecules: a pair goes to the split of its molecule
         m_tr, m_va, m_te = _split_idx(n_mol, fracs, rng)
         sets = {"train": set(m_tr), "val": set(m_va), "test": set(m_te)}
         for s in sets:
@@ -79,13 +106,29 @@ def make_splits(pos, neg, n_mol, regime="transductive", fracs=(0.7, 0.15, 0.15),
             out[s] = {"pos": pos[pm], "neg": neg[nm]}
     else:
         raise ValueError(regime)
-    mp = torch.tensor(out["train"]["pos"].T, dtype=torch.long)   # [2, E] (mol, prot)
-    return out, mp
+    mp_pos = torch.tensor(out["train"]["pos"].T, dtype=torch.long)
+    mp_neg = torch.tensor(out["train"]["neg"].T, dtype=torch.long)
+    return out, mp_pos, mp_neg
 
 
-def edge_index_dict(mp):
-    """Bidirectional message-passing edges (positives only)."""
-    return {ETYPE: mp, RTYPE: mp.flip(0)}
+def edge_index_dict(mp_pos, mp_neg=None, mode="pos_only"):
+    """Build message-passing edge index dict for the requested MP mode.
+
+    pos_only  : {ETYPE: pos, RTYPE: pos_rev}
+    all_edges : {ETYPE: pos+neg, RTYPE: (pos+neg)_rev}   — sign-blind
+    signed    : {ETYPE: pos, RTYPE: pos_rev,
+                 ETYPE_NEG: neg, RTYPE_NEG: neg_rev}       — two separate channels
+    """
+    if mode == "pos_only":
+        return {ETYPE: mp_pos, RTYPE: mp_pos.flip(0)}
+    elif mode == "all_edges":
+        mp_all = torch.cat([mp_pos, mp_neg], dim=1)
+        return {ETYPE: mp_all, RTYPE: mp_all.flip(0)}
+    elif mode == "signed":
+        return {ETYPE:     mp_pos,        RTYPE:     mp_pos.flip(0),
+                ETYPE_NEG: mp_neg,        RTYPE_NEG: mp_neg.flip(0)}
+    else:
+        raise ValueError(f"mp_mode must be one of {MP_MODES}, got {mode!r}")
 
 
 def sup_edges(split):
@@ -98,25 +141,87 @@ def sup_edges(split):
 
 
 class HeteroLink(torch.nn.Module):
-    def __init__(self, hidden=128, dropout=0.3):
+    """Heterogeneous bipartite link predictor.
+
+    mp_mode controls how negatives enter the message-passing graph:
+      pos_only  — negatives invisible to the encoder; only in the loss.
+      all_edges — negatives added as ordinary edges (sign-blind SAGE).
+      signed    — separate SAGEConv layers for pos/neg with explicit subtraction
+                  so negatives push representations apart.
+    """
+    def __init__(self, hidden=256, dropout=0.3, mp_mode="pos_only", dec_layers=3):
         super().__init__()
         from torch_geometric.nn import HeteroConv, SAGEConv, Linear
+        assert mp_mode in MP_MODES, f"mp_mode must be one of {MP_MODES}"
+        self.mp_mode = mp_mode
         self.proj = torch.nn.ModuleDict({
             MOL: Linear(-1, hidden), PROT: Linear(-1, hidden)})
         self.conv1 = HeteroConv({ETYPE: SAGEConv((-1, -1), hidden),
                                  RTYPE: SAGEConv((-1, -1), hidden)}, aggr="sum")
         self.conv2 = HeteroConv({ETYPE: SAGEConv((-1, -1), hidden),
                                  RTYPE: SAGEConv((-1, -1), hidden)}, aggr="sum")
-        self.dec = torch.nn.Sequential(
-            torch.nn.Linear(2 * hidden, hidden), torch.nn.ReLU(),
-            torch.nn.Dropout(dropout), torch.nn.Linear(hidden, 1))
+        if mp_mode == "signed":
+            # Separate convolutions for negative edges; their outputs are subtracted.
+            self.conv1_neg = HeteroConv({ETYPE_NEG: SAGEConv((-1, -1), hidden),
+                                         RTYPE_NEG: SAGEConv((-1, -1), hidden)}, aggr="sum")
+            self.conv2_neg = HeteroConv({ETYPE_NEG: SAGEConv((-1, -1), hidden),
+                                         RTYPE_NEG: SAGEConv((-1, -1), hidden)}, aggr="sum")
+        if dec_layers == 3:
+            # 3-layer: 2·hidden → hidden → hidden//2 → 1
+            self.dec = torch.nn.Sequential(
+                torch.nn.Linear(2 * hidden, hidden),      torch.nn.ReLU(), torch.nn.Dropout(dropout),
+                torch.nn.Linear(hidden,     hidden // 2), torch.nn.ReLU(), torch.nn.Dropout(dropout),
+                torch.nn.Linear(hidden // 2, 1))
+        else:
+            # 2-layer (legacy): 2·hidden → hidden → 1
+            self.dec = torch.nn.Sequential(
+                torch.nn.Linear(2 * hidden, hidden), torch.nn.ReLU(),
+                torch.nn.Dropout(dropout), torch.nn.Linear(hidden, 1))
 
     def encode(self, x_dict, eidx_dict):
         import torch.nn.functional as F
         x = {k: F.relu(self.proj[k](v)) for k, v in x_dict.items()}
-        x = {k: F.relu(v) for k, v in self.conv1(x, eidx_dict).items()}
-        x = self.conv2(x, eidx_dict)
+        if self.mp_mode == "signed":
+            pos_eidx = {ETYPE:     eidx_dict[ETYPE],     RTYPE:     eidx_dict[RTYPE]}
+            neg_eidx = {ETYPE_NEG: eidx_dict[ETYPE_NEG], RTYPE_NEG: eidx_dict[RTYPE_NEG]}
+            x_p = self.conv1(x, pos_eidx)
+            x_n = self.conv1_neg(x, neg_eidx)
+            # ReLU after signed difference — negatives push representations away
+            x = {k: F.relu(x_p[k] - x_n.get(k, torch.zeros_like(x_p[k]))) for k in x_p}
+            x_p = self.conv2(x, pos_eidx)
+            x_n = self.conv2_neg(x, neg_eidx)
+            x = {k: x_p[k] - x_n.get(k, torch.zeros_like(x_p[k])) for k in x_p}
+        else:
+            x = {k: F.relu(v) for k, v in self.conv1(x, eidx_dict).items()}
+            x = self.conv2(x, eidx_dict)
         return x
+
+    def encode_history(self, x_dict, eidx_dict, depth=2):
+        """Concatenate initial + per-layer embeddings per node.
+
+        depth=2 (default): [x0 || x1 || x2]   — through the last (2nd) MP layer.
+        depth=1          : [x0 || x1]         — through the first MP layer only.
+
+        Richer protein features for unentangled probing without touching the decoder.
+        """
+        import torch.nn.functional as F
+        x0 = {k: F.relu(self.proj[k](v)) for k, v in x_dict.items()}
+        if self.mp_mode == "signed":
+            pos_eidx = {ETYPE:     eidx_dict[ETYPE],     RTYPE:     eidx_dict[RTYPE]}
+            neg_eidx = {ETYPE_NEG: eidx_dict[ETYPE_NEG], RTYPE_NEG: eidx_dict[RTYPE_NEG]}
+            xp = self.conv1(x0, pos_eidx)
+            xn = self.conv1_neg(x0, neg_eidx)
+            x1 = {k: F.relu(xp[k] - xn.get(k, torch.zeros_like(xp[k]))) for k in xp}
+            if depth >= 2:
+                xp = self.conv2(x1, pos_eidx)
+                xn = self.conv2_neg(x1, neg_eidx)
+                x2 = {k: xp[k] - xn.get(k, torch.zeros_like(xp[k])) for k in xp}
+        else:
+            x1 = {k: F.relu(v) for k, v in self.conv1(x0, eidx_dict).items()}
+            if depth >= 2:
+                x2 = self.conv2(x1, eidx_dict)
+        stages = [x0, x1, x2] if depth >= 2 else [x0, x1]
+        return {k: torch.cat([s[k] for s in stages], dim=-1) for k in x1}
 
     def decode(self, z, label_index):
         zm = z[MOL][label_index[0]]

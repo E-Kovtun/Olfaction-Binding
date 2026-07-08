@@ -9,20 +9,25 @@ Outputs (under data/embeddings/proteins/)
 esm2_650m_per_residue_{tag}.npz   — {sequence: float32[seq_len, 1280]}
 esm2_650m_mean_{tag}.npz          — {sequence: float32[1280]}  (derived)
 
-Default run (generates full = curated 409 reused + 371 new):
+`full` (780 receptors, pairs_m2or_full.csv) is the single source of truth going
+forward — curated (409) is a strict subset and is derived on demand by
+filtering `full` against `pairs_curated.csv["receptor"]` (no separate curated
+npz is persisted; see any consumer script for the one-line filter).
+
+Default run:
     uv run python scripts/embedding_generation/proteins/05_per_residue_embeddings.py
 
-Re-generate curated only (no new receptors needed):
+Extend to an even larger corpus later without recomputing what's already done:
     uv run python scripts/embedding_generation/proteins/05_per_residue_embeddings.py \\
-        --source data/processed/pairs_curated.csv --tag curated --reuse ""
+        --source <bigger_pairs.csv> --tag full --reuse data/embeddings/proteins/esm2_650m_per_residue_full.npz
 
 Args
 ----
 --source   CSV with a 'receptor' column (AA sequences). Default: pairs_m2or_full.csv
 --tag      Output file suffix. Default: full
---reuse    Existing per-residue npz to copy already-computed receptors from.
-           Default: esm2_650m_per_residue_curated.npz (skips 409, runs only 371).
-           Pass empty string "" to disable reuse.
+--reuse    Existing per-residue npz to copy already-computed receptors from
+           (avoids re-running ESM on sequences already embedded).
+           Default: esm2_650m_per_residue_full.npz. Pass "" to disable reuse.
 --version  ESM-2 variant: 650m or 3B. Default: 650m
 --batch    Sequences per forward pass. Default: 4
 """
@@ -90,7 +95,7 @@ def main() -> None:
                     help="CSV with a 'receptor' column (AA sequences)")
     ap.add_argument("--tag",     default="full",
                     help="Output file suffix (esm2_650m_per_residue_{tag}.npz)")
-    ap.add_argument("--reuse",   default="data/embeddings/proteins/esm2_650m_per_residue_curated.npz",
+    ap.add_argument("--reuse",   default="data/embeddings/proteins/esm2_650m_per_residue_full.npz",
                     help="Existing per-residue npz to copy already-computed entries from. Pass '' to disable.")
     ap.add_argument("--version", default="650m", choices=["650m", "3B"])
     ap.add_argument("--batch",   default=4, type=int)

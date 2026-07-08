@@ -6,7 +6,7 @@ with our own boosting head so the numbers are directly comparable:
   * Their data, their 5 random folds (data/external/lorax_m2or/rand_split_*).
   * Train on the FULL noisy mix (primary + secondary + ec50);
     TEST only on the held-out EC50 pairs (~22% positive) — exactly their split.
-  * Features: ESM2-650M mean-pooled protein  ||  ChemBERTa-77M molecule
+  * Features: putative ESM-1b 650M mean-pooled protein  ||  ChemBERTa-77M molecule
     (their provided embeddings; the paper shows the molecule encoder is
     interchangeable).
   * Head: our `train_boost` — a single XGBoost, NO Hladis quality/class/pair
@@ -25,7 +25,7 @@ AUROC and AUPRC are threshold-free (identical across the boost@* rows).
 
 Writes results/lorax/lorax_compare.csv.
 """
-import pathlib, sys, pickle, warnings
+import pathlib, sys, warnings
 warnings.filterwarnings("ignore")
 import numpy as np, pandas as pd
 from sklearn.metrics import (roc_auc_score, average_precision_score,
@@ -35,9 +35,9 @@ _root = pathlib.Path(__file__).resolve()
 while not (_root / "pyproject.toml").exists():
     _root = _root.parent
 sys.path.insert(0, str(_root))
-from orbind.dataset import load_npz_dict
+from orbind import lorax as L
 
-DATA = _root / "data" / "external" / "lorax_m2or"
+DATA = L.LORAX
 METRIC_KEYS = ["AUROC", "AUPRC", "precision", "recall", "F1", "MCC"]
 
 
@@ -71,12 +71,7 @@ def _metrics_at(y, scores, thr):
 
 
 def _load_embeddings():
-    esm = load_npz_dict(DATA / "esm2_650m_mean_lorax.npz")          # seq -> [1280]
-    with open(DATA / "chemberta_77m_lorax.pkl", "rb") as f:
-        chem = pickle.load(f)                                       # SMILES -> [384]
-    chem = {k: np.asarray(v, dtype=np.float32) for k, v in chem.items()}
-    return esm, chem
-
+    return L.load_embeddings()
 
 def _featurize(df, esm, chem):
     """Build X=[chemberta || esm], y from a split dataframe; drop rows lacking embeddings."""
@@ -133,12 +128,12 @@ def main():
                      **{f"{k}_std": round(std[k], 4) for k in METRIC_KEYS}})
 
     out = pd.DataFrame(rows)
-    res_dir = _root / "results" / "lorax"; res_dir.mkdir(parents=True, exist_ok=True)
+    res_dir = _root / "results" / "full_full" / "article_results"; res_dir.mkdir(parents=True, exist_ok=True)
     out.to_csv(res_dir / "lorax_compare.csv", index=False)
     pd.set_option("display.width", 160)
     print("\n=== our boost on LORAX splits (mean over 5 folds, EC50 test) ===")
     print(out[["method", *METRIC_KEYS]].to_string(index=False))
-    print(f"\nsaved -> results/lorax/lorax_compare.csv")
+    print(f"\nsaved -> results/full_full/article_results/lorax_compare.csv")
 
 
 if __name__ == "__main__":

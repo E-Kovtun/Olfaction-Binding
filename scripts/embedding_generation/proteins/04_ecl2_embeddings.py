@@ -1,5 +1,10 @@
 """Script 04 — ECL2-focused ESM-2 embeddings for olfactory receptors.
 
+STATUS: direction closed — ECL2 embeddings showed no edge over pocket/background
+(see protein-embedding-variants-boost.md); the generated ecl2_*_curated.npz files
+were removed from data/embeddings/proteins/. Script kept for reference / in case
+the direction is revisited; not part of the active pipeline.
+
 Olfactory receptors are class A GPCRs.  The ligand-binding pocket is located
 in extracellular loop 2 (ECL2, between TM4 and TM5) — not spread over the
 entire ~310-residue sequence.  Mean-pooling ESM-2 over ALL residues dilutes
@@ -13,7 +18,7 @@ This script:
      slice, and saves one 1280-d vector per receptor.
 
 Output: data/embeddings/proteins/esm2_650m_ecl2_mean_curated.npz
-        (same format as esm2_650m_mean_curated.npz — keys ids / emb)
+        (same format as esm2_650m_mean_full.npz — keys ids / emb)
 
 Usage
 -----
@@ -221,7 +226,7 @@ def main():
                     default="data/processed/bw_numbering_curated.csv",
                     help="path to bw_numbering_curated.csv (only used with --boundary-method bw)")
     ap.add_argument("--per-residue-npz",
-                    default="data/embeddings/proteins/esm2_650m_per_residue_curated.npz",
+                    default="data/embeddings/proteins/esm2_650m_per_residue_full.npz",
                     help="per-residue embedding npz (only used with --boundary-method bw)")
     args = ap.parse_args()
 

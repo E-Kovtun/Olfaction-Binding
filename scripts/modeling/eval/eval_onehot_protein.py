@@ -44,7 +44,7 @@ def _family(slug: str) -> str:
 def main():
     pairs = pd.read_csv(DATA / "processed" / "pairs_curated.csv")
     gin   = D.load_npz_dict(DATA / "embeddings" / "molecules" / "gin_supervised_contextpred.npz")
-    esm   = D.load_npz_dict(DATA / "embeddings" / "proteins" / "esm2_650m_mean_curated.npz")
+    esm   = D.load_npz_dict(DATA / "embeddings" / "proteins" / "esm2_650m_mean_full.npz")
     recs  = list(esm.keys())
     print(f"pairs={len(pairs)}  molecules={len(gin)}  receptors={len(recs)}")
 

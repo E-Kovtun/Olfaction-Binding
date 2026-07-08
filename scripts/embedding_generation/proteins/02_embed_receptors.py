@@ -1,5 +1,10 @@
 """Script 2 — GENERATE ESM-2 embeddings for the receptors we need.
 
+SUPERSEDED by 05_per_residue_embeddings.py, which generates per-residue
+embeddings AND derives the mean from them in one ESM pass (single source of
+truth — see that script's docstring). Kept for reference / mean-only reruns;
+prefer 05 for anything new.
+
 There is no public database of ESM-2 embeddings for olfactory receptors, so we
 run ESM-2 (650M, esm2_t33_650M_UR50D — same as NOSE/MolOR) over the unique
 sequences and cache one vector per sequence. Mean-pooled over residues -> 1280-d.
@@ -11,7 +16,7 @@ Examples
 --------
 uv run python scripts/embedding_generation/proteins/02_embed_receptors.py \
        --sequences data/processed/proteins/receptor_sequences.csv \
-       --out data/embeddings/proteins/esm2_650m_mean_curated.npz
+       --out data/embeddings/proteins/esm2_650m_mean_full.npz
 """
 import argparse, pathlib
 import numpy as np
@@ -58,7 +63,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--sequences", required=True,
                     help="csv with columns: receptor_id, sequence")
-    ap.add_argument("--out", default="data/embeddings/proteins/esm2_650m_mean_curated.npz")
+    ap.add_argument("--out", default="data/embeddings/proteins/esm2_650m_mean_full.npz")
     ap.add_argument("--version", default="650m", choices=["650m", "3B"])
     args = ap.parse_args()
 

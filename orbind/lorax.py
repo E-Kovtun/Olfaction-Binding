@@ -16,7 +16,9 @@ evaluation regimes are built here so the graph pipeline can mirror curated/full:
                         EC50-only to match the transductive protocol.
 
 Node features (paper: molecule encoder is interchangeable):
-  proteins  — ESM2-650M mean-pooled, keyed by amino-acid sequence.
+  proteins  — putative ESM-1b 650M mean-pooled, keyed by amino-acid sequence.
+              The identity is a working hypothesis: these vectors do not match
+              fresh ESM2-t33 embeddings for the same sequences.
   molecules — ChemBERTa-77M (384-d), keyed by SMILES (GIN covers only 64%).
 """
 from __future__ import annotations
@@ -27,13 +29,31 @@ from orbind.hetero import load_npz_dict, MOL, PROT  # noqa: F401  (re-export con
 
 _root = pathlib.Path(__file__).resolve().parent.parent
 LORAX = _root / "data" / "external" / "lorax_m2or"
+MOLECULE_EMBEDDINGS = _root / "data" / "embeddings" / "molecules"
+CHEMBERTA = MOLECULE_EMBEDDINGS / "chemberta_77m_lorax.pkl"
+ESM = LORAX / "esm1b_650m_mean_lorax.npz"
 
 
-def load_embeddings():
-    esm = load_npz_dict(LORAX / "esm2_650m_mean_lorax.npz")          # seq -> [1280]
-    with open(LORAX / "chemberta_77m_lorax.pkl", "rb") as f:
-        chem = {k: np.asarray(v, dtype=np.float32) for k, v in pickle.load(f).items()}
-    return esm, chem
+def _resolve_embedding_path(path, default):
+    path = pathlib.Path(path) if path is not None else default
+    return path if path.is_absolute() else _root / path
+
+
+def _load_embedding_dict(path):
+    if path.suffix == ".npz":
+        return {k: np.asarray(v, dtype=np.float32)
+                for k, v in load_npz_dict(path).items()}
+    if path.suffix in {".pkl", ".pickle"}:
+        with open(path, "rb") as f:
+            return {k: np.asarray(v, dtype=np.float32) for k, v in pickle.load(f).items()}
+    raise ValueError(f"Unsupported embedding file: {path}")
+
+
+def load_embeddings(protein_path=None, molecule_path=None):
+    """Load default LORAX features or explicitly selected NPZ/pickle features."""
+    protein_path = _resolve_embedding_path(protein_path, ESM)
+    molecule_path = _resolve_embedding_path(molecule_path, CHEMBERTA)
+    return _load_embedding_dict(protein_path), _load_embedding_dict(molecule_path)
 
 
 def _load_fold(fold, esm, chem):

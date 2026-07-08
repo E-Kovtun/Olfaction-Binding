@@ -249,8 +249,8 @@ def main():
     ap.add_argument("--setup", choices=["all", *SETUPS], default="all")
     ap.add_argument("--split", choices=["all", *SPLITS], default="all")
     ap.add_argument("--pairs", default="data/processed/pairs_curated.csv")
-    ap.add_argument("--protein-mean", default="data/embeddings/proteins/esm2_650m_mean_curated.npz")
-    ap.add_argument("--protein-sites", default="data/embeddings/proteins/esm2_650m_per_residue_curated.npz")
+    ap.add_argument("--protein-mean", default="data/embeddings/proteins/esm2_650m_mean_full.npz")
+    ap.add_argument("--protein-sites", default="data/embeddings/proteins/esm2_650m_per_residue_full.npz")
     ap.add_argument("--molecule-mean", default="data/embeddings/molecules/gin_supervised_contextpred.npz")
     ap.add_argument("--molecule-sites", default="data/embeddings/molecules/gin_supervised_contextpred_per_atom.npz")
     ap.add_argument("--out", default=None,
@@ -285,10 +285,10 @@ def main():
     pairs = _limit_pairs(pd.read_csv(_root / args.pairs), args.limit_pairs, args.seed)
     setup_list = list(SETUPS) if args.setup == "all" else [args.setup]
     split_list = list(SPLITS) if args.split == "all" else [args.split]
-    default_out = ("results/tables/attention_smoke_results.csv" if args.limit_pairs
-                   else "results/tables/attention_results.csv")
-    default_ckpt = ("results/checkpoints/attention_smoke" if args.limit_pairs
-                    else "results/checkpoints")
+    default_out = ("results/curated/tables/attention_smoke_results.csv" if args.limit_pairs
+                   else "results/curated/tables/attention_results.csv")
+    default_ckpt = ("results/curated/checkpoints/attention_smoke" if args.limit_pairs
+                    else "results/curated/checkpoints")
     out_path = _root / (args.out or default_out)
     ckpt_dir = _root / (args.checkpoint_dir or default_ckpt)
     ckpt_dir.mkdir(parents=True, exist_ok=True)

@@ -10,6 +10,13 @@ Variants compared (molecule GIN  ||  protein vector):
   background  — ESM-2 mean-pool over residues NOT in BW-22 ∪ ECL2 (1280-d)
   random      — per-row Gaussian noise floor (control)       (1280-d)
 
+NOTE: the ecl2_hydro/ecl2_bw source npz files (esm2_650m_ecl2_*_curated.npz)
+were removed from data/embeddings/proteins/ — the ECL2 investigation showed no
+edge over background/pocket (see protein-embedding-variants-boost.md), so we
+stopped maintaining that derived data. The variants stay documented here for
+context; build_variants() skips them gracefully (with a printed note) if the
+files are absent instead of failing.
+
 Runs head=boost across 3 splits (stratified / group_molecule / group_receptor).
 
     uv run python scripts/modeling/eval/eval_protein_variants.py
@@ -43,13 +50,27 @@ def build_variants() -> dict[str, dict]:
     prot = DATA / "embeddings" / "proteins"
     V: dict[str, dict] = {}
 
-    V["mean"]       = D.load_npz_dict(prot / "esm2_650m_mean_curated.npz")
-    V["ecl2_hydro"] = D.load_npz_dict(prot / "esm2_650m_ecl2_mean_curated.npz")
-    V["ecl2_bw"]    = D.load_npz_dict(prot / "esm2_650m_ecl2_bw_mean_curated.npz")
+    # full (780 receptors) is the single source of truth; restrict to the
+    # curated 409 here (bw_pocket_positions_curated.csv is curated-only anyway)
+    # so we don't waste work deriving pocket/mlp22/concat22/background for
+    # receptors this script's PAIRS (pairs_curated.csv) never uses.
+    mean_full = D.load_npz_dict(prot / "esm2_650m_mean_full.npz")
+    curated_recs = set(pd.read_csv(DATA / "processed" / "pairs_curated.csv")["receptor"])
+    V["mean"] = {k: v for k, v in mean_full.items() if k in curated_recs}
+
+    # ecl2_hydro/ecl2_bw source npz removed (direction closed, see module
+    # docstring) — skip gracefully rather than error if they're absent.
+    for name, fname in [("ecl2_hydro", "esm2_650m_ecl2_mean_curated.npz"),
+                        ("ecl2_bw", "esm2_650m_ecl2_bw_mean_curated.npz")]:
+        fp = prot / fname
+        if fp.exists():
+            V[name] = D.load_npz_dict(fp)
+        else:
+            print(f"  {name}: {fname} not found (removed, direction closed) — skipping")
     keys = list(V["mean"].keys())
 
     # --- per-residue derived variants -------------------------------------
-    pr_npz = np.load(str(prot / "esm2_650m_per_residue_curated.npz"), allow_pickle=False)
+    pr_npz = np.load(str(prot / "esm2_650m_per_residue_full.npz"), allow_pickle=False)
     pos_df = pd.read_csv(DATA / "processed" / "bw_pocket_positions_curated.csv",
                          index_col="receptor")
 
@@ -127,7 +148,8 @@ def main():
 
     V = build_variants()
 
-    order = ["random", "mean", "pocket22", "mlp22", "concat22", "ecl2_hydro", "ecl2_bw", "background"]
+    order = [n for n in ["random", "mean", "pocket22", "mlp22", "concat22",
+                        "ecl2_hydro", "ecl2_bw", "background"] if n == "random" or n in V]
     rows = []
     for name in order:
         is_random = name == "random"

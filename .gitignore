@@ -7,6 +7,7 @@ data/**
 __pycache__/
 *.pyc
 .venv/
+.uv-cache/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -18,18 +19,11 @@ dist/
 # notebooks are source; only their generated side-products are ignored
 notebooks/cache/
 notebooks/.ipynb_checkpoints/
-notebooks/figures/
+notebooks/**/figures/
 
-# training artifacts — keep compact tables/analysis/history, not model binaries
-results/**/checkpoints/
-results/**/*smoke*
-results/**/*.npz
-# Existing graph sweeps used an evaluation protocol we intend to replace.
-# Keep their local CSVs for reference, but do not publish them as final results.
-results/**/tables/gnn_*.csv
-results/**/tables/gat_*.csv
-# Large row-level analysis exports are reproducible; notebooks keep summaries.
-results/analysis/pocket_binding_signal*.csv
+# results are local experiment artifacts; notebooks are the published experiment record
+results/**
+
 *.pt
 *.pth
 *.ckpt

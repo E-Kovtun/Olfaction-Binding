@@ -2,7 +2,7 @@
 name = "orbind"
 version = "0.0.1"
 description = "Curated M2OR olfactory receptor-ligand binding pipeline"
-requires-python = ">=3.10"
+requires-python = ">=3.11,<3.12"
 dependencies = [
     # core data prep (script 01)
     "pandas>=2.0",
@@ -26,6 +26,8 @@ dependencies = [
     "pydantic",
     "biopython>=1.87",
     "shap>=0.49.1",
+    "umap-learn>=0.5",         # 3D projections for embedding-screening notebooks
+    "plotly>=5.20",            # interactive 3D scatter plots in notebooks
 ]
 
 [tool.uv]
@@ -35,4 +37,5 @@ package = false
 [dependency-groups]
 dev = [
     "nbformat>=5.10.4",
+    "jupyterlab>=4,<5",
 ]

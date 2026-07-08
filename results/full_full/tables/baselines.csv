@@ -1,3 +1,0 @@
-regime,AUROC,AUPRC,MCC,F1,precision,recall
-transductive,0.8912,0.755,0.644,0.7265,0.6809,0.7787
-inductive_molecule,0.7698,0.6208,0.4726,0.5567,0.689,0.4669

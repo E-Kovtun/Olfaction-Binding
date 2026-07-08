@@ -1,6 +1,8 @@
-# Structure-based interaction tool — ISOLATED exploration
+# LEGACY — structure-based interaction exploration
 
-> **Isolation rule.** Everything for this direction lives under
+> **Status: legacy.** This exploratory direction is retained for provenance and is not part of the active notebook or modelling pipeline.
+>
+> Everything for this direction lives under
 > `experiments/struct_interaction/` — its own scripts, data, results, logs.
 > It does **not** import from or write to the main `scripts/` or `results/`.
 > Read-only reuse of `data/processed/*` (pairs, sequences) is allowed; nothing
@@ -66,15 +68,14 @@ M2OR becomes external validation, not training data.
   known agonists high.
 - Structures = **download AF2 from AFDB** (local folding ruled out: no openfold,
   no CUDA). Resolve via UniProt gene name, not the unreliable uniprot_id column.
-- Isolation = experiment has its **own venv** `experiments/struct_interaction/.venv`
-  (meeko, rdkit, gemmi, scipy, biopython); main `.venv` untouched.
+- Environment: no separate virtual environment. If this legacy experiment is revisited, add its missing docking dependencies to the root uv project before running it.
 
 ## Log
 
 - setup: scaffold + hypothesis/plan written; 488 odorants/409 receptors confirmed.
 - `01_prep_ligands.py`: 487/488 odorants -> 3D (ETKDGv3+MMFF) in data/ligands.sdf
   (1 embed fail: KGEKLUUHTZCSIP-JFGNBEQYSA-N).
-- isolated venv created; meeko 0.7.1 + gemmi + rdkit + biopython OK.
+- Historical isolated venv used meeko 0.7.1 + gemmi + rdkit + biopython; it has since been removed.
 - `02_fetch_structures.py`: 8 positive-control ORs (OR2W1/OR1A1/OR1G1/OR51E2/
   OR51E1/OR2J2/OR7D4/OR10G4) -> AF2 models via AFDB API; ALL match their M2OR
   receptor at identity=1.000 (AF residue numbering == ours, BW maps directly).

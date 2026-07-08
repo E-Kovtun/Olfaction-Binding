@@ -1,3 +1,0 @@
-dataset,setup,method,split,seed,AUROC,AUPRC,MCC,F1,precision,recall,train,val,test,test_pos,best_epoch,seconds,batch_size
-curated,site_cross,Attn·site-cross,stratified,42,0.8537,0.4032,0.3275,0.3418,0.2161,0.8182,14968,2139,4277,352,27,2203.6,64
-curated,site_cross,Attn·site-cross,group_molecule,42,0.6111,0.2138,0.0759,0.1585,0.09,0.6636,14542,2225,4617,330,11,1012.4,64

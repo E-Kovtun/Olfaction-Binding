@@ -39,3 +39,6 @@ experiments/**/data/**
 # editor / OS noise
 .DS_Store
 Thumbs.db
+
+# server-local queue variants
+scripts/queues/*.local.sh

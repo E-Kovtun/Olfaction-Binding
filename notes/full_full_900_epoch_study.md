@@ -67,6 +67,6 @@ diagnostic test curve is highest.
 
 ## Artifacts
 
-- `results/full_full/history/gnn_signed_q95_inductive_molecule_fold1.csv`
-- `results/full_full/history/gnn_signed_q95_inductive_molecule_fold1.png`
+- `results/graph/full_full/legacy/pre_v5/provisional_and_900_pilot/history/gnn_signed_q95_inductive_molecule_fold1.csv`
+- `results/graph/full_full/legacy/pre_v5/provisional_and_900_pilot/history/gnn_signed_q95_inductive_molecule_fold1.png`
 - `scripts/modeling/train/train_graph_full_full.py`

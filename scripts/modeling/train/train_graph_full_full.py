@@ -8,8 +8,8 @@ noisy mix (primary + secondary + ec50, ~5.7% positive). See the notebook
 graph_evaluation_full_full.ipynb for the protocol write-up.
 
 Node features (the paper shows the molecule encoder is interchangeable):
-  * proteins  — ESM2-650M mean-pooled (same encoder as curated/full), keyed by
-                the raw amino-acid sequence.
+  * proteins  — putative ESM-1b 650M mean-pooled (identity not yet verified), keyed by
+                the raw amino-acid sequence; distinct from curated/full ESM2.
   * molecules — ChemBERTa-77M (384-d), keyed by SMILES. GIN only covers 64% of
                 LORAX molecules, so we use the LORAX-provided ChemBERTa here.
 
@@ -18,6 +18,8 @@ splits directly. Only the unentangled XGBoost probe is reported
 ([raw_mol_emb || graph_prot_emb]); the MLP probe is dropped.
 For transductive runs, --transductive-exp instead reports
 ([graph_mol_emb || graph_prot_emb]). Inductive runs intentionally keep raw molecules.
+Optional --protein-pca-dim/--molecule-pca-dim compression is fit on every node in the
+original train split BEFORE any disjoint division; validation/test-only nodes never fit PCA.
 With --disjoint-probe-train, GNN MP/decoder training and downstream XGBoost fitting
 use disjoint class-stratified halves of the original train labels.
 
@@ -29,7 +31,7 @@ use disjoint class-stratified halves of the original train labels.
 Writes checkpoints to <results-dir>/checkpoints/ in the same shape the
 graph_evaluation notebooks expect (regime == "ec50").
 """
-import argparse, pathlib, pickle, sys, warnings
+import argparse, pathlib, pickle, sys, time, warnings
 warnings.filterwarnings("ignore")
 import numpy as np, pandas as pd, torch
 
@@ -103,12 +105,66 @@ def make_model(arch, mp_mode, args):
                          dropout=args.dropout, mp_mode=mp_mode)
 
 
+def fit_pca_on_full_train(Xm, Xp, train_split, molecule_dim=0, protein_dim=0):
+    """Fit domain PCAs on every node present in the original train split.
+
+    This runs before an optional disjoint GNN/probe split, so shared and disjoint
+    protocols use the same full-train PCA basis for a given regime/fold/seed.
+    Test/validation-only nodes never participate in fitting.
+    """
+    train_pairs = np.concatenate([train_split["pos"], train_split["neg"]], axis=0)
+
+    def project(x, fit_idx, dim, domain):
+        if not dim:
+            return x, None
+        fit_idx = np.unique(fit_idx).astype(np.int64)
+        X = x.numpy().astype(np.float64)
+        Xfit = X[fit_idx]
+        max_rank = min(Xfit.shape[0] - 1, Xfit.shape[1])
+        if dim > max_rank:
+            raise ValueError(f"{domain} PCA dim {dim} exceeds train rank {max_rank}")
+        mean = Xfit.mean(axis=0, keepdims=True)
+        _, explained_s, vt = np.linalg.svd(Xfit - mean, full_matrices=False)
+        components = vt[:dim]
+        transformed = ((X - mean) @ components.T).astype(np.float32)
+        total_var = np.square(explained_s).sum()
+        kept = float(np.square(explained_s[:dim]).sum() / total_var) if total_var else 0.0
+        meta = {"domain": domain, "dim": int(dim), "fit_indices": fit_idx,
+                "fit_n": int(len(fit_idx)), "mean": mean[0].astype(np.float32),
+                "components": components.astype(np.float32),
+                "explained_variance_ratio_sum": kept,
+                "fit_scope": "all nodes in original train before disjoint split"}
+        print(f"  {domain} PCA: {X.shape[1]} -> {dim}, fit on all {len(fit_idx)} train nodes, "
+              f"variance={kept:.4f}")
+        return torch.tensor(transformed, dtype=torch.float), meta
+
+    Xm, mol_meta = project(Xm, train_pairs[:, 0], molecule_dim, "molecule")
+    Xp, prot_meta = project(Xp, train_pairs[:, 1], protein_dim, "protein")
+    return Xm, Xp, {"molecule": mol_meta, "protein": prot_meta}
+
+
 def run(args):
     torch.manual_seed(args.seed)
-    esm, chem = L.load_embeddings()
+    if args.device == "auto":
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    else:
+        device = torch.device(args.device)
+    if device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("--device cuda requested, but CUDA is unavailable in this PyTorch build")
+    if device.type == "cuda":
+        torch.cuda.manual_seed_all(args.seed)
+    print(f"compute device: {device}" +
+          (f" ({torch.cuda.get_device_name(device)})" if device.type == "cuda" else ""))
+    if args.deterministic:
+        torch.use_deterministic_algorithms(True, warn_only=True)
+        torch.set_num_threads(1)
+    esm, chem = L.load_embeddings(args.protein_embeddings, args.molecule_embeddings)
     print(f"embeddings: ESM proteins={len(esm)} | ChemBERTa mols={len(chem)}")
     print(f"\n[fold {args.fold} | {args.regime} | {args.arch} | {args.mp_mode}]")
     Xm, Xp, splits = L.build(args.regime, args.fold, esm, chem, seed=args.seed)
+    Xm, Xp, input_pca = fit_pca_on_full_train(
+        Xm, Xp, splits["train"], molecule_dim=args.molecule_pca_dim,
+        protein_dim=args.protein_pca_dim)
     x_dict = {H.MOL: Xm, H.PROT: Xp}
 
     if args.disjoint_probe_train:
@@ -136,13 +192,23 @@ def run(args):
            "probe_train": H.sup_edges(probe_train),
            "val": H.sup_edges(splits["val"]),
            "test": H.sup_edges(splits["test"])}
+
+    # Keep preprocessing/PCA on CPU, then place the complete full-batch graph on
+    # the preferred accelerator once. Only compact NumPy arrays return to CPU for metrics/XGBoost.
+    x_dict = {k: v.to(device) for k, v in x_dict.items()}
+    eidx = {k: v.to(device) for k, v in eidx.items()}
+    sup = {k: (idx.to(device), y.to(device)) for k, (idx, y) in sup.items()}
     print(f"  GNN train pos/neg={len(gnn_train['pos'])}/{len(gnn_train['neg'])} | "
           f"probe train={len(probe_train['pos'])}/{len(probe_train['neg'])}")
 
-    model = make_model(args.arch, args.mp_mode, args)
+    model = make_model(args.arch, args.mp_mode, args).to(device)
     with torch.no_grad():
         model.encode(x_dict, eidx)              # init lazy params
     opt = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    scheduler = (torch.optim.lr_scheduler.ReduceLROnPlateau(
+        opt, mode="max", factor=args.scheduler_factor,
+        patience=args.scheduler_patience, min_lr=args.scheduler_min_lr)
+        if args.lr_scheduler else None)
     tr_idx, tr_y = sup["train"]
     pw = torch.tensor([(tr_y == 0).sum() / max((tr_y == 1).sum(), 1)])
     loss_fn = torch.nn.BCEWithLogitsLoss(pos_weight=pw)
@@ -160,7 +226,8 @@ def run(args):
 
     variant = variant_name(args)
     history_dir = _root / args.results_dir / "history"
-    run_id = f"{args.arch}_{variant}_{args.regime}_fold{args.fold}"
+    seed_tag = f"gnn{args.seed}_boost{args.boost_seed}"
+    run_id = f"{args.arch}_{variant}_{args.regime}_fold{args.fold}_{seed_tag}"
     history_csv = history_dir / f"{run_id}.csv"
     history_plot = history_dir / f"{run_id}.png"
     history = []
@@ -169,22 +236,55 @@ def run(args):
 
     for ep in range(1, args.epochs + 1):
         model.train(); opt.zero_grad()
-        loss = loss_fn(model(x_dict, eidx, tr_idx), tr_y)
+        train_logits = model(x_dict, eidx, tr_idx)
+        loss = loss_fn(train_logits, tr_y)
         loss.backward()
+        if args.grad_clip > 0:
+            grad_norm = float(torch.nn.utils.clip_grad_norm_(
+                model.parameters(), args.grad_clip))
+        else:
+            grad_norm = float(torch.sqrt(sum(
+                p.grad.detach().pow(2).sum()
+                for p in model.parameters() if p.grad is not None)))
         opt.step()
 
         model.eval()
         with torch.no_grad():
             z_eval = model.encode(x_dict, eidx)
-            val_pred = torch.sigmoid(model.decode(z_eval, sup["val"][0])).numpy()
+            val_logits = model.decode(z_eval, sup["val"][0])
+            val_pred = torch.sigmoid(val_logits).detach().cpu().numpy()
             if args.observe_test:
-                test_pred = torch.sigmoid(model.decode(z_eval, sup["test"][0])).numpy()
+                test_pred = torch.sigmoid(model.decode(z_eval, sup["test"][0])).detach().cpu().numpy()
 
-        val_m = metrics(sup["val"][1].numpy(), val_pred)
-        row = {"epoch": ep, "train_loss": float(loss.detach())}
+        val_m = metrics(sup["val"][1].detach().cpu().numpy(), val_pred)
+        row = {"epoch": ep, "train_loss": float(loss.detach()),
+               "lr": float(opt.param_groups[0]["lr"]),
+               "grad_norm_pre_clip": grad_norm}
         row.update({f"val_{k}": float(v) for k, v in val_m.items()})
+        if args.diagnostics:
+            param_norm = torch.sqrt(sum(
+                p.detach().pow(2).sum() for p in model.parameters()))
+            row.update({
+                "param_norm": float(param_norm),
+                "train_logit_mean": float(train_logits.detach().mean()),
+                "train_logit_std": float(train_logits.detach().std()),
+                "train_logit_absmax": float(train_logits.detach().abs().max()),
+                "val_logit_mean": float(val_logits.mean()),
+                "val_logit_std": float(val_logits.std()),
+                "val_logit_absmax": float(val_logits.abs().max()),
+            })
+            if args.arch == "gnn":
+                with torch.no_grad():
+                    stages = model.encode_history(x_dict, eidx, depth=2)
+                for node_type, values in stages.items():
+                    x0, x1, x2 = values.chunk(3, dim=-1)
+                    for stage_name, stage in (("x0", x0), ("x1", x1), ("x2", x2)):
+                        prefix = f"{node_type}_{stage_name}"
+                        row[f"{prefix}_zero_frac"] = float((stage == 0).float().mean())
+                        row[f"{prefix}_norm_mean"] = float(stage.norm(dim=-1).mean())
+                        row[f"{prefix}_absmax"] = float(stage.abs().max())
         if args.observe_test:
-            test_m = metrics(sup["test"][1].numpy(), test_pred)
+            test_m = metrics(sup["test"][1].detach().cpu().numpy(), test_pred)
             row.update({f"test_{k}": float(v) for k, v in test_m.items()})
         history.append(row)
 
@@ -195,12 +295,24 @@ def run(args):
         else:
             row["is_best"] = False
 
+        if scheduler is not None:
+            scheduler.step(val_m["AUPRC"])
+
         # CSV is updated every epoch so an interrupted 900-epoch run remains useful.
         save_table = pd.DataFrame(history)
         history_csv.parent.mkdir(parents=True, exist_ok=True)
         tmp_csv = history_csv.with_suffix(".tmp.csv")
         save_table.to_csv(tmp_csv, index=False)
-        tmp_csv.replace(history_csv)
+        # os.replace can transiently hit WinError 5 when an AV/indexer briefly
+        # locks the freshly written file; retry, then fall back to a direct write.
+        for _attempt in range(10):
+            try:
+                tmp_csv.replace(history_csv)
+                break
+            except PermissionError:
+                time.sleep(0.3)
+        else:
+            save_table.to_csv(history_csv, index=False)
         if ep % args.plot_every == 0 or ep == args.epochs:
             save_history(history, history_csv, history_plot)
         if ep == 1 or ep % args.log_every == 0 or ep == args.epochs:
@@ -209,6 +321,13 @@ def run(args):
                    f"val AUROC={val_m['AUROC']:.3f} AUPRC={val_m['AUPRC']:.3f}{best_marker}")
             if args.observe_test:
                 log += f" | test AUROC={test_m['AUROC']:.3f} AUPRC={test_m['AUPRC']:.3f}"
+            if args.diagnostics:
+                log += f" | lr={row['lr']:.2e} grad={row['grad_norm_pre_clip']:.2e}"
+                # Per-stage zero fractions exist only for GNN (encode_history).
+                if "molecule_x1_zero_frac" in row:
+                    log += (f" mol_x1_zero={row['molecule_x1_zero_frac']:.3f}"
+                            f" prot_x1_zero={row['protein_x1_zero_frac']:.3f}")
+                log += f" val_logit_std={row['val_logit_std']:.2e}"
             print(log, flush=True)
 
     save_history(history, history_csv, history_plot)
@@ -226,39 +345,65 @@ def run(args):
     print(f"  history -> {history_csv.relative_to(_root)}")
     print(f"  plot    -> {history_plot.relative_to(_root)}")
 
-    # Restore best-val checkpoint before building the probe
-    print(f"  restoring best encoder (epoch {int(best.epoch)}, val AUPRC={best_val_auprc:.4f})")
-    model.load_state_dict({k: v.to(next(model.parameters()).device)
-                           for k, v in best_state.items()})
+    # Snapshot the LAST-epoch weights before restoring best-val, so the final
+    # encoder can be probed too (older runs only ever kept best_state).
+    final_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
 
     # ---- unentangled BOOST probe: [raw chemberta mol || graph-enriched esm prot] ----
-    model.eval()
-    with torch.no_grad():
-        z = (model.encode_history(x_dict, eidx, depth=args.history_depth)
-             if args.history else model.encode(x_dict, eidx))
-    Xm_probe = (z[H.MOL] if args.transductive_exp else x_dict[H.MOL]).numpy()
-    Zp = z[H.PROT].numpy()
-    # The graph probe normally never sees the RAW ESM — only the trained 256-d
-    # proj+ReLU bottleneck (even history concats stages of that bottleneck).
-    # --concat_raw_prot puts the full raw ESM-1280 back alongside z_prot, so we
-    # can tell "graph compresses/loses raw detail" from "graph adds new signal".
-    prot_desc = f"{Zp.shape[1]} {args.arch.upper()}"
-    if args.concat_raw_prot:
-        Xp_raw = x_dict[H.PROT].numpy()
-        Zp = np.concatenate([Xp_raw, Zp], axis=1)
-        prot_desc = f"{Xp_raw.shape[1]} raw ESM + {prot_desc}"
+    # Probe a given encoder state; returns (primary, raw, enriched) test scores. For
+    # transductive we always compute BOTH raw and graph-enriched molecule variants.
+    def probe_with(state, tag):
+        model.load_state_dict({k: v.to(next(model.parameters()).device)
+                               for k, v in state.items()})
+        model.eval()
+        with torch.no_grad():
+            z = (model.encode_history(x_dict, eidx, depth=args.history_depth)
+                 if args.history else model.encode(x_dict, eidx))
+        Xm_probe = (z[H.MOL] if args.transductive_exp else x_dict[H.MOL]).detach().cpu().numpy()
+        Zp = z[H.PROT].detach().cpu().numpy()
+        # The graph probe normally never sees the RAW ESM — only the trained 256-d
+        # proj+ReLU bottleneck. --concat_raw_prot puts the full raw ESM-1280 back
+        # alongside z_prot, to tell "graph compresses raw detail" from "graph adds signal".
+        prot_desc = f"{Zp.shape[1]} {args.arch.upper()}"
+        if args.concat_raw_prot:
+            Xp_raw = x_dict[H.PROT].detach().cpu().numpy()
+            Zp = np.concatenate([Xp_raw, Zp], axis=1)
+            prot_desc = f"{Xp_raw.shape[1]} raw ESM + {prot_desc}"
 
-    def feats(idx):
-        return np.concatenate([Xm_probe[idx[0].numpy()], Zp[idx[1].numpy()]], axis=1)
+        def feats(Xm, idx):
+            return np.concatenate([Xm[idx[0].detach().cpu().numpy()], Zp[idx[1].detach().cpu().numpy()]], axis=1)
 
-    Xtr, ytr = feats(sup["probe_train"][0]), sup["probe_train"][1].numpy()
-    Xte, yte = feats(sup["test"][0]),  sup["test"][1].numpy()
-    mol_desc = f"{args.arch.upper()}-enriched" if args.transductive_exp else "raw ChemBERTa"
-    print(f"  unentangled features: {Xtr.shape[1]}d "
-          f"(mol {Xm_probe.shape[1]} {mol_desc} + prot {prot_desc})")
-    scores = train_boost(Xtr, ytr, Xte, seed=args.seed)
-    r = metrics(yte, scores)
-    print("  unentangled_boost EC50-TEST " + " ".join(f"{k}={v:.3f}" for k, v in r.items()))
+        ytr = sup["probe_train"][1].detach().cpu().numpy()
+        yte = sup["test"][1].detach().cpu().numpy()
+        mol_desc = f"{args.arch.upper()}-enriched" if args.transductive_exp else "raw ChemBERTa"
+        sc = train_boost(feats(Xm_probe, sup["probe_train"][0]), ytr,
+                         feats(Xm_probe, sup["test"][0]), seed=args.boost_seed)
+        print(f"  [{tag}] unentangled_boost EC50-TEST "
+              f"({Xm_probe.shape[1] + Zp.shape[1]}d: mol {Xm_probe.shape[1]} {mol_desc} "
+              f"+ prot {prot_desc}) "
+              + " ".join(f"{k}={v:.3f}" for k, v in metrics(yte, sc).items()))
+        sc_raw = sc_enr = None
+        if args.regime == "transductive":
+            Xm_raw, Xm_enr = (x_dict[H.MOL].detach().cpu().numpy(),
+                              z[H.MOL].detach().cpu().numpy())
+            sc_raw = (sc if not args.transductive_exp
+                      else train_boost(feats(Xm_raw, sup["probe_train"][0]), ytr,
+                                       feats(Xm_raw, sup["test"][0]), seed=args.boost_seed))
+            sc_enr = (sc if args.transductive_exp
+                      else train_boost(feats(Xm_enr, sup["probe_train"][0]), ytr,
+                                       feats(Xm_enr, sup["test"][0]), seed=args.boost_seed))
+        return sc, sc_raw, sc_enr
+
+    scores = scores_raw = scores_enriched = None
+    if args.probe_checkpoint in ("best", "both"):
+        print(f"  probing best encoder (epoch {int(best.epoch)}, val AUPRC={best_val_auprc:.4f})")
+        scores, scores_raw, scores_enriched = probe_with(
+            best_state, f"best-val e{int(best.epoch)}")
+
+    scores_final = scores_final_raw = scores_final_enriched = None
+    if args.probe_checkpoint in ("last", "both"):
+        scores_final, scores_final_raw, scores_final_enriched = probe_with(
+            final_state, "last-epoch")
 
     # ---- save in the shape graph_evaluation_full_full expects ----
     # variant fully identifies the run within (regime, arch):
@@ -268,7 +413,8 @@ def run(args):
     ckpt = {
         "label": f"{variant}_unentangled_boost", "variant": variant,
         "head": "unentangled_boost", "regime": args.regime,
-        "arch": args.arch, "fold": args.fold,
+        "arch": args.arch, "fold": args.fold, "seed": args.seed,
+        "gnn_seed": args.seed, "boost_seed": args.boost_seed,
         "config": {"mp_mode": args.mp_mode, "mol_quality_q": q, "history": args.history,
                    "history_depth": args.history_depth if args.history else 0,
                    "concat_raw_prot": args.concat_raw_prot,
@@ -276,18 +422,59 @@ def run(args):
                    "molecule_features": "graph_enriched" if args.transductive_exp else "raw",
                    "disjoint_probe_train": args.disjoint_probe_train,
                    "probe_train_frac": args.probe_train_frac,
+                   "diagnostics": args.diagnostics,
+                   "grad_clip": args.grad_clip,
+                   "lr_scheduler": args.lr_scheduler,
+                   "scheduler_patience": args.scheduler_patience,
+                   "scheduler_factor": args.scheduler_factor,
+                   "scheduler_min_lr": args.scheduler_min_lr,
+                   "deterministic": args.deterministic,
+                   "device_requested": args.device, "device_resolved": str(device),
+                   "probe_checkpoint": args.probe_checkpoint,
+                   "epochs": args.epochs, "lr": args.lr,
+                   "protein_embeddings": args.protein_embeddings,
+                   "molecule_embeddings": args.molecule_embeddings,
+                   "protein_pca_dim": args.protein_pca_dim,
+                   "molecule_pca_dim": args.molecule_pca_dim,
+                   "pca_fit_scope": "full original train before disjoint split",
                    "hidden": args.hidden if args.arch == "gnn" else args.gat_hidden},
-        "gnn_train_sup": sup["train"],
-        "probe_train_sup": sup["probe_train"],
-        "test_sup": sup["test"], "test_scores": scores,
+        "input_pca": input_pca,
+        "gnn_train_sup": tuple(t.detach().cpu() for t in sup["train"]),
+        "probe_train_sup": tuple(t.detach().cpu() for t in sup["probe_train"]),
+        "test_sup": tuple(t.detach().cpu() for t in sup["test"]), "test_scores": scores,
+        # For transductive runs both probe variants are always computed; inductive = None.
+        "test_scores_raw": scores_raw,
+        "test_scores_enriched": scores_enriched,
+        # Same probe on the final (last-epoch) encoder, for best-vs-last comparison.
+        "test_scores_final": scores_final,
+        "test_scores_final_raw": scores_final_raw,
+        "test_scores_final_enriched": scores_final_enriched,
+        # Encoder weights at best-val epoch and at the final epoch.
+        "best_state": best_state,
+        "final_state": final_state,
         "decoder_history": history,
         "decoder_history_csv": str(history_csv.relative_to(_root)),
     }
     rd = _root / args.results_dir / "checkpoints"; rd.mkdir(parents=True, exist_ok=True)
-    fname = f"{prefix}_{variant}_unentangled_boost_{args.regime}_fold{args.fold}.pt"
+    fname = (f"{prefix}_{variant}_unentangled_boost_{args.regime}_fold{args.fold}_"
+             f"{seed_tag}.pt")
     torch.save(ckpt, rd / fname)
-    print(f"  checkpoint -> {args.results_dir}/checkpoints/{fname}")
-    return r
+    print(f"  result bundle -> {args.results_dir}/checkpoints/{fname}")
+
+    model_dir = _root / args.results_dir / "models"; model_dir.mkdir(parents=True, exist_ok=True)
+    snapshot_meta = {
+        "arch": args.arch, "mp_mode": args.mp_mode, "regime": args.regime,
+        "fold": args.fold, "gnn_seed": args.seed, "boost_seed": args.boost_seed,
+        "epochs": args.epochs, "best_epoch": int(best.epoch),
+        "best_val_AUPRC": float(best_val_auprc), "variant": variant,
+        "config": ckpt["config"], "input_pca": input_pca,
+    }
+    torch.save({**snapshot_meta, "checkpoint": "best_val_auprc", "state_dict": best_state},
+               model_dir / f"{run_id}__best_val_auprc.pt")
+    torch.save({**snapshot_meta, "checkpoint": "last", "epoch": args.epochs,
+                "state_dict": final_state}, model_dir / f"{run_id}__last.pt")
+    print(f"  model snapshots -> {args.results_dir}/models/{run_id}__{{best_val_auprc,last}}.pt")
+    return ckpt
 
 
 def main():
@@ -320,23 +507,56 @@ def main():
                          "ONLY for gnn_training_diagnostics.ipynb. "
                          "NEVER use during HP sweeps — test leaks into your mental model.")
     ap.add_argument("--fold",    type=int, default=1, choices=[1, 2, 3, 4, 5])
-    ap.add_argument("--results-dir", default="results/full_full/")
+    ap.add_argument("--results-dir", default="results/graph/full_full_manual/")
+    ap.add_argument("--protein-embeddings", default=None,
+                    help="Protein embedding NPZ (absolute or relative to repository root)")
+    ap.add_argument("--molecule-embeddings", default=None,
+                    help="Molecule embedding NPZ/pickle (absolute or relative to repository root)")
+    ap.add_argument("--protein-pca-dim", type=int, default=0,
+                    help="PCA protein inputs to this dimension; fit on all original train nodes")
+    ap.add_argument("--molecule-pca-dim", type=int, default=0,
+                    help="PCA molecule inputs to this dimension; fit on all original train nodes")
     ap.add_argument("--hidden",     type=int,   default=256)   # GNN width
     ap.add_argument("--gat_hidden", type=int,   default=128)   # GAT width
     ap.add_argument("--heads",      type=int,   default=4)
     ap.add_argument("--dropout",    type=float, default=0.3)
     ap.add_argument("--lr",         type=float, default=5e-3)
+    ap.add_argument("--grad-clip", type=float, default=0.0,
+                    help="Clip total gradient norm to this value (0=off)")
+    ap.add_argument("--lr-scheduler", action="store_true",
+                    help="Reduce LR when validation AUPRC stops improving")
+    ap.add_argument("--scheduler-patience", type=int, default=100)
+    ap.add_argument("--scheduler-factor", type=float, default=0.5)
+    ap.add_argument("--scheduler-min-lr", type=float, default=1e-5)
+    ap.add_argument("--diagnostics", action="store_true",
+                    help="Persist gradient/logit/parameter and per-stage embedding statistics")
+    ap.add_argument("--deterministic", action="store_true",
+                    help="Use deterministic Torch algorithms (warn-only) and one CPU thread")
     ap.add_argument("--epochs",     type=int,   default=1500)
     ap.add_argument("--log-every",  type=int,   default=10,
                     help="Print compact validation/test status every N epochs")
     ap.add_argument("--plot-every", type=int,   default=25,
                     help="Refresh the history PNG every N epochs (CSV is saved every epoch)")
     ap.add_argument("--seed",       type=int,   default=42)
+    ap.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto",
+                    help="GNN compute device; auto prefers CUDA and falls back to CPU")
+    ap.add_argument("--boost-seed", type=int, default=None,
+                    help="Independent XGBoost seed (default: same as --seed for legacy runs)")
+    ap.add_argument("--probe-checkpoint", choices=["best", "last", "both"], default="both",
+                    help="Encoder checkpoint(s) evaluated by downstream XGBoost")
     args = ap.parse_args()
+    if args.boost_seed is None:
+        args.boost_seed = args.seed
     if args.transductive_exp and args.regime != "transductive":
         ap.error("--transductive-exp is only valid with --regime transductive")
     if not 0.0 < args.probe_train_frac < 1.0:
         ap.error("--probe-train-frac must be between 0 and 1")
+    if args.grad_clip < 0:
+        ap.error("--grad-clip must be non-negative")
+    if args.protein_pca_dim < 0 or args.molecule_pca_dim < 0:
+        ap.error("PCA dimensions must be non-negative (0 disables PCA)")
+    if args.lr_scheduler and not 0.0 < args.scheduler_factor < 1.0:
+        ap.error("--scheduler-factor must be between 0 and 1")
     run(args)
 
 

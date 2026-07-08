@@ -1,7 +1,7 @@
 # notebooks/graph/
 
 Evaluation of the **heterogeneous bipartite GNN/GAT link predictor** (molecule ↔ protein)
-across our three dataset variants, plus a mechanism analysis.
+across the curated and full_full dataset variants, plus mechanism analyses.
 
 > **Protocol status — exploratory, rerun required.** Existing graph checkpoints,
 > tables, plots, and notebook outputs must not be treated as final benchmark results.
@@ -44,7 +44,6 @@ and result variants carry the `_disjoint` suffix.
 | notebook | dataset | regimes | what it shows |
 |----------|---------|---------|---------------|
 | `graph_evaluation_curated.ipynb`  | curated (409 rec / 21k pairs) | transductive + inductive_molecule | MP-mode / arch / quality / history sweeps vs no-graph XGBoost (GIN‖ESM) |
-| `graph_evaluation_full.ipynb`     | full (780 rec / 30k pairs)    | transductive + inductive_molecule | same sweeps on the larger noisy set |
 | `graph_evaluation_full_full.ipynb`| full_full (LORAX/Hladis release) | transductive + inductive_molecule | LORAX folds; **EC50-only test**; ChemBERTa‖ESM; the main sweep grid + D (quality) + E (history) + F (best+history-depth) |
 | `graph_inductive-transductive_analysis.ipynb` | full_full | both | **mechanism**: the `rawp` ablation (`[ChemBERTa ‖ raw ESM ‖ z_prot]`) that disentangles "graph compresses away raw ESM" from "graph adds transferable signal" |
 | `gnn_training_diagnostics.ipynb` | full_full | inductive_molecule | **900-epoch training curves** (val vs test per epoch, loss, correlation scatter, key-epoch table); shows why 300-epoch early stop is suboptimal |
@@ -64,7 +63,7 @@ and result variants carry the `_disjoint` suffix.
 
 ## Data sources
 
-`scripts/modeling/train/train_gnn_link.py`, `train_gat_link.py` → `results/{checkpoints,tables}/`
-and `results/full/...`; `train_graph_full_full.py` → `results/full_full/checkpoints/`;
+`scripts/modeling/train/train_gnn_link.py`, `train_gat_link.py` → `results/curated/{checkpoints,tables}/`
+and `results/full/...`; `train_graph_full_full.py` → an explicit directory under `results/graph/` (default `results/graph/full_full_manual/`);
 `scripts/modeling/eval/eval_full_full_baseline.py` → `results/full_full/tables/baselines.csv`;
-`eval_on_lorax_splits.py` → `results/lorax/lorax_compare.csv`.
+`eval_on_lorax_splits.py` → `results/full_full/article_results/lorax_compare.csv`.

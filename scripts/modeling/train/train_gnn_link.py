@@ -207,7 +207,7 @@ def main():
     ap.add_argument("--probe-train-frac", type=float, default=0.5,
                     help="Fraction of train labels reserved for the probe in disjoint mode")
     ap.add_argument("--pairs",       default="data/processed/pairs_curated.csv")
-    ap.add_argument("--prot",        default="data/embeddings/proteins/esm2_650m_mean_curated.npz")
+    ap.add_argument("--prot",        default="data/embeddings/proteins/esm2_650m_mean_full.npz")
     ap.add_argument("--mol",         default="data/embeddings/molecules/gin_supervised_contextpred.npz")
     ap.add_argument("--results-dir", default="results/",
                     help="Dataset results root; checkpoints go to <dir>/checkpoints, "

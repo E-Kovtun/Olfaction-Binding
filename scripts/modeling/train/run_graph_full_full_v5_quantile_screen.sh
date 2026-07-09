@@ -69,6 +69,38 @@ write_status() {
   printf '%s\t%s\t%s\t%s\n' "$status" "$stem" "$log" "$(date '+%Y-%m-%d %H:%M:%S')" > "$STATUS_DIR/$stem.status"
 }
 
+run_stage() {
+  local log="$1"
+  if [[ ! -f "$log" ]]; then
+    echo "STARTING"
+    return 0
+  fi
+  if grep -qE 'Traceback|RuntimeError|Error' "$log"; then
+    echo "ERROR"
+  elif grep -q 'model snapshots ->' "$log"; then
+    echo "DONE/SAVED"
+  elif grep -q 'result bundle ->' "$log"; then
+    echo "SAVING_MODELS"
+  elif grep -q '\[last-epoch\] unentangled_boost' "$log"; then
+    echo "BOOST_LAST_DONE"
+  elif grep -q '\[last-epoch\] fitting XGBoost probe' "$log"; then
+    echo "BOOST_LAST"
+  elif grep -q 'probing best encoder' "$log"; then
+    if grep -q '\[best-val.*unentangled_boost' "$log"; then
+      echo "PREPARE_LAST"
+    elif grep -q '\[best-val.*fitting XGBoost probe' "$log"; then
+      echo "BOOST_BEST"
+    else
+      echo "PREPARE_BEST"
+    fi
+  elif grep -q 'best val AUPRC' "$log"; then
+    echo "PREPARE_PROBES"
+  elif grep -qE 'epoch[[:space:]]+[0-9]+' "$log"; then
+    echo "TRAIN"
+  else
+    echo "SETUP"
+  fi
+}
 latest_log_line() {
   local log="$1"
   if [[ ! -f "$log" ]]; then
@@ -76,7 +108,7 @@ latest_log_line() {
     return 0
   fi
   local line
-  line=$(grep -E 'epoch[[:space:]]+[0-9]+|best val|Traceback|RuntimeError|Error|result bundle' "$log" | tail -n 1 || true)
+  line=$(grep -E 'epoch[[:space:]]+[0-9]+|best val|probing best encoder|fitting XGBoost probe|\[best-val|\[last-epoch\]|result bundle|model snapshots|Traceback|RuntimeError|Error' "$log" | tail -n 1 || true)
   if [[ -z "$line" ]]; then
     line=$(tail -n 1 "$log" 2>/dev/null || true)
   fi
@@ -119,7 +151,8 @@ dashboard() {
         stem="${row%%|*}"
         log="${row#*|}"
         latest="$(latest_log_line "$log")"
-        printf '  %-78s\n    %s\n' "$stem" "$latest"
+        stage="$(run_stage "$log")"
+        printf '  %-12s %-78s\n    %s\n' "$stage" "$stem" "$latest"
       done
     fi
     echo

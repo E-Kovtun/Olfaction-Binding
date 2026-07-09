@@ -32,16 +32,20 @@ export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-4}"
 mkdir -p "$LOG_DIR" "$STATUS_DIR"
 rm -f "$STATUS_DIR"/*.status
 
-# Same repeat semantics as v5 architecture_screen:
-# transductive: genuine LoRaX folds 1/2/3 with seeds 42/43/44
-# inductive_molecule: independent cold-molecule split seeds 42/43/44; fold=1 is the source container
+# Repeat semantics for the v5 quantile screen:
+# transductive: genuine LoRaX folds 1..5
+# inductive_molecule: independent cold-molecule split seeds 42..46; fold=1 is the source container
 REPEATS=(
   "transductive 1 42 1042"
   "transductive 2 43 1043"
   "transductive 3 44 1044"
+  "transductive 4 45 1045"
+  "transductive 5 46 1046"
   "inductive_molecule 1 42 1042"
   "inductive_molecule 1 43 1043"
   "inductive_molecule 1 44 1044"
+  "inductive_molecule 1 45 1045"
+  "inductive_molecule 1 46 1046"
 )
 
 ARCHES=("gnn")

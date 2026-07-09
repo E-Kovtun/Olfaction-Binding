@@ -1,22 +1,27 @@
 #!/usr/bin/env bash
 set -euo pipefail
+shopt -s nullglob
 
 # Run GNN full_full quantile screen on one GPU.
-# Default is conservative serial execution. Set MAX_PARALLEL=2 to try light
-# parallelization on an A100, then watch nvidia-smi for memory/utilization.
+# Detailed logs are written per run. By default the terminal shows a compact
+# dashboard; set QUIET=0 to stream raw logs to the terminal via tee.
 #
 # Examples:
 #   bash scripts/modeling/train/run_graph_full_full_v5_quantile_screen.sh
-#   MAX_PARALLEL=2 bash scripts/modeling/train/run_graph_full_full_v5_quantile_screen.sh
+#   MAX_PARALLEL=20 bash scripts/modeling/train/run_graph_full_full_v5_quantile_screen.sh
+#   QUIET=0 MAX_PARALLEL=2 bash scripts/modeling/train/run_graph_full_full_v5_quantile_screen.sh
 #   DRY_RUN=1 bash scripts/modeling/train/run_graph_full_full_v5_quantile_screen.sh
 
 RESULT_DIR="${RESULT_DIR:-results/graph/full_full/v5/quantile_screen/training}"
 LOG_DIR="$RESULT_DIR/logs"
+STATUS_DIR="$RESULT_DIR/run_status"
 EPOCHS="${EPOCHS:-900}"
 LR="${LR:-3e-3}"
 GRAD_CLIP="${GRAD_CLIP:-1.0}"
 MAX_PARALLEL="${MAX_PARALLEL:-1}"
 DRY_RUN="${DRY_RUN:-0}"
+QUIET="${QUIET:-1}"
+DASHBOARD_INTERVAL="${DASHBOARD_INTERVAL:-5}"
 DEVICE="${DEVICE:-cuda}"
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export CUDA_VISIBLE_DEVICES
@@ -24,7 +29,8 @@ export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}"
 export MKL_NUM_THREADS="${MKL_NUM_THREADS:-4}"
 export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-4}"
 
-mkdir -p "$LOG_DIR"
+mkdir -p "$LOG_DIR" "$STATUS_DIR"
+rm -f "$STATUS_DIR"/*.status
 
 # Same repeat semantics as v5 architecture_screen:
 # transductive: genuine LoRaX folds 1/2/3 with seeds 42/43/44
@@ -41,6 +47,7 @@ REPEATS=(
 ARCHES=("gnn")
 MP_MODES=("all_edges" "signed")
 QUANTILES=("0" "0.87" "0.95" "0.99")
+TOTAL_RUNS=$((${#REPEATS[@]} * ${#ARCHES[@]} * ${#MP_MODES[@]} * ${#QUANTILES[@]}))
 
 q_tag() {
   case "$1" in
@@ -55,6 +62,83 @@ q_tag() {
   esac
 }
 
+write_status() {
+  local status="$1"
+  local stem="$2"
+  local log="$3"
+  printf '%s\t%s\t%s\t%s\n' "$status" "$stem" "$log" "$(date '+%Y-%m-%d %H:%M:%S')" > "$STATUS_DIR/$stem.status"
+}
+
+latest_log_line() {
+  local log="$1"
+  if [[ ! -f "$log" ]]; then
+    echo "log not created yet"
+    return 0
+  fi
+  local line
+  line=$(grep -E 'epoch[[:space:]]+[0-9]+|best val|Traceback|RuntimeError|Error|result bundle' "$log" | tail -n 1 || true)
+  if [[ -z "$line" ]]; then
+    line=$(tail -n 1 "$log" 2>/dev/null || true)
+  fi
+  echo "$line"
+}
+
+dashboard() {
+  local total="$1"
+  while true; do
+    local done=0 failed=0 skipped=0 running=0 pending=0 seen=0
+    local running_rows=()
+    local failed_rows=()
+    local status stem log ts
+
+    for f in "$STATUS_DIR"/*.status; do
+      [[ -e "$f" ]] || continue
+      IFS=$'\t' read -r status stem log ts < "$f" || true
+      seen=$((seen + 1))
+      case "$status" in
+        DONE) done=$((done + 1)) ;;
+        FAILED) failed=$((failed + 1)); failed_rows+=("$stem") ;;
+        SKIPPED) skipped=$((skipped + 1)) ;;
+        RUNNING) running=$((running + 1)); running_rows+=("$stem|$log") ;;
+      esac
+    done
+    pending=$((total - seen))
+    if [[ "$pending" -lt 0 ]]; then pending=0; fi
+
+    printf '\033[H\033[2J'
+    echo "full_full v5 quantile screen | $(date '+%Y-%m-%d %H:%M:%S')"
+    echo "total=$total done=$done skipped=$skipped failed=$failed running=$running pending=$pending max_parallel=$MAX_PARALLEL"
+    echo "logs: $LOG_DIR"
+    echo
+    echo "RUNNING"
+    if [[ "${#running_rows[@]}" -eq 0 ]]; then
+      echo "  none"
+    else
+      local row latest
+      for row in "${running_rows[@]}"; do
+        stem="${row%%|*}"
+        log="${row#*|}"
+        latest="$(latest_log_line "$log")"
+        printf '  %-78s\n    %s\n' "$stem" "$latest"
+      done
+    fi
+    echo
+    echo "FAILED"
+    if [[ "${#failed_rows[@]}" -eq 0 ]]; then
+      echo "  none"
+    else
+      printf '  %s\n' "${failed_rows[@]}"
+    fi
+    echo
+    echo "Tip: tail one log with: tail -f $LOG_DIR/<run>.log"
+
+    if [[ "$((done + skipped + failed))" -ge "$total" ]]; then
+      break
+    fi
+    sleep "$DASHBOARD_INTERVAL"
+  done
+}
+
 run_one() {
   local regime="$1"
   local fold="$2"
@@ -64,7 +148,7 @@ run_one() {
   local mp="$6"
   local q="$7"
 
-  local qt variant stem artifact log
+  local qt variant stem artifact log rc
   qt="$(q_tag "$q")"
   variant="${mp}${qt}"
   stem="${arch}_${variant}_${regime}_fold${fold}_gnn${gnn_seed}_boost${boost_seed}"
@@ -72,48 +156,109 @@ run_one() {
   log="${LOG_DIR}/${stem}.log"
 
   if [[ -f "$artifact" ]]; then
-    echo "SKIP $stem"
+    write_status "SKIPPED" "$stem" "$log"
+    [[ "$QUIET" == "1" ]] || echo "SKIP $stem"
     return 0
   fi
 
-  echo "RUN  $stem -> $log"
+  write_status "RUNNING" "$stem" "$log"
   if [[ "$DRY_RUN" == "1" ]]; then
-    echo uv run python scripts/modeling/train/train_graph_full_full.py \
+    {
+      echo uv run python scripts/modeling/train/train_graph_full_full.py \
+        --arch "$arch" --mp_mode "$mp" --mol_quality_q "$q" \
+        --regime "$regime" --fold "$fold" \
+        --epochs "$EPOCHS" --lr "$LR" --grad-clip "$GRAD_CLIP" \
+        --device "$DEVICE" --seed "$gnn_seed" --boost-seed "$boost_seed" \
+        --probe-checkpoint both --results-dir "$RESULT_DIR"
+    } > "$log"
+    write_status "DONE" "$stem" "$log"
+    return 0
+  fi
+
+  set +e
+  if [[ "$QUIET" == "1" ]]; then
+    uv run python scripts/modeling/train/train_graph_full_full.py \
       --arch "$arch" --mp_mode "$mp" --mol_quality_q "$q" \
       --regime "$regime" --fold "$fold" \
       --epochs "$EPOCHS" --lr "$LR" --grad-clip "$GRAD_CLIP" \
       --device "$DEVICE" --seed "$gnn_seed" --boost-seed "$boost_seed" \
-      --probe-checkpoint both --results-dir "$RESULT_DIR"
-    return 0
+      --probe-checkpoint both --results-dir "$RESULT_DIR" > "$log" 2>&1
+    rc=$?
+  else
+    uv run python scripts/modeling/train/train_graph_full_full.py \
+      --arch "$arch" --mp_mode "$mp" --mol_quality_q "$q" \
+      --regime "$regime" --fold "$fold" \
+      --epochs "$EPOCHS" --lr "$LR" --grad-clip "$GRAD_CLIP" \
+      --device "$DEVICE" --seed "$gnn_seed" --boost-seed "$boost_seed" \
+      --probe-checkpoint both --results-dir "$RESULT_DIR" 2>&1 | tee "$log"
+    rc=${PIPESTATUS[0]}
   fi
+  set -e
 
-  uv run python scripts/modeling/train/train_graph_full_full.py \
-    --arch "$arch" --mp_mode "$mp" --mol_quality_q "$q" \
-    --regime "$regime" --fold "$fold" \
-    --epochs "$EPOCHS" --lr "$LR" --grad-clip "$GRAD_CLIP" \
-    --device "$DEVICE" --seed "$gnn_seed" --boost-seed "$boost_seed" \
-    --probe-checkpoint both --results-dir "$RESULT_DIR" 2>&1 | tee "$log"
+  if [[ "$rc" -eq 0 ]]; then
+    write_status "DONE" "$stem" "$log"
+  else
+    write_status "FAILED" "$stem" "$log"
+  fi
+  return "$rc"
+}
+
+RUNNING_PIDS=()
+prune_pids() {
+  local alive=()
+  local pid
+  for pid in "${RUNNING_PIDS[@]}"; do
+    if kill -0 "$pid" 2>/dev/null; then
+      alive+=("$pid")
+    fi
+  done
+  RUNNING_PIDS=("${alive[@]}")
 }
 
 wait_for_slot() {
-  while [[ "$(jobs -pr | wc -l)" -ge "$MAX_PARALLEL" ]]; do
-    wait -n
+  while true; do
+    prune_pids
+    if [[ "${#RUNNING_PIDS[@]}" -lt "$MAX_PARALLEL" ]]; then
+      break
+    fi
+    sleep 2
   done
 }
 
-total=0
+MONITOR_PID=""
+if [[ "$QUIET" == "1" ]]; then
+  dashboard "$TOTAL_RUNS" &
+  MONITOR_PID="$!"
+  trap '[[ -n "${MONITOR_PID:-}" ]] && kill "$MONITOR_PID" 2>/dev/null || true' EXIT
+fi
+
 for repeat in "${REPEATS[@]}"; do
   read -r regime fold gnn_seed boost_seed <<< "$repeat"
   for arch in "${ARCHES[@]}"; do
     for mp in "${MP_MODES[@]}"; do
       for q in "${QUANTILES[@]}"; do
-        total=$((total + 1))
         wait_for_slot
         run_one "$regime" "$fold" "$gnn_seed" "$boost_seed" "$arch" "$mp" "$q" &
+        RUNNING_PIDS+=("$!")
       done
     done
   done
 done
 
-wait
-echo "quantile screen finished; scheduled runs: $total"
+fail=0
+for pid in "${RUNNING_PIDS[@]}"; do
+  if ! wait "$pid"; then
+    fail=1
+  fi
+done
+
+if [[ -n "$MONITOR_PID" ]]; then
+  wait "$MONITOR_PID" || true
+fi
+
+if [[ "$fail" -ne 0 ]]; then
+  echo "quantile screen finished with failures; inspect logs in $LOG_DIR" >&2
+  exit 1
+fi
+
+echo "quantile screen finished successfully; scheduled runs: $TOTAL_RUNS"

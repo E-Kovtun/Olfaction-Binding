@@ -15,19 +15,26 @@ dependencies = [
     "xgboost>=2.0,<3.0",           # MP boosting head (ProSmith/LORAX-style)
     "ipykernel>=6",           # run the screening notebook on the project .venv
     "matplotlib>=3.7",        # notebook plots (similarity heatmaps, etc.)
-    # pretrained GIN from LORAX (gin_supervised_*) via dgllife — needs dgl,
-    # which is built only against torch<=2.2 and the old setuptools.extern namespace
+    # graph training/evaluation
     "torch>=2.2,<2.3",
-    "dgl==2.2.1",
-    "dgllife>=0.3.2",
     "setuptools<71",
-    "torchdata<0.8",          # dgl 2.2.1 imports torchdata.datapipes (removed in >=0.10)
-    "pyyaml",                 # dgl graphbolt undeclared deps
+    "pyyaml",
     "pydantic",
     "biopython>=1.87",
     "shap>=0.49.1",
     "umap-learn>=0.5",         # 3D projections for embedding-screening notebooks
     "plotly>=5.20",            # interactive 3D scatter plots in notebooks
+]
+
+[project.optional-dependencies]
+# Optional legacy molecule-GIN tooling. DGL wheels are platform-specific and
+# are not needed for full_full graph training/evaluation, so keep this out of
+# the default environment. Install explicitly only when running dgllife/GIN
+# embedding scripts.
+gin = [
+    "dgl==2.2.1",
+    "dgllife>=0.3.2",
+    "torchdata<0.8",          # dgl 2.2.1 imports torchdata.datapipes (removed in >=0.10)
 ]
 
 [tool.uv]

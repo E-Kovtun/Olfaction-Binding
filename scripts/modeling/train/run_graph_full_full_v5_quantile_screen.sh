@@ -81,6 +81,14 @@ run_stage() {
   fi
   if grep -qE 'Traceback|RuntimeError|Error' "$log"; then
     echo "ERROR"
+  elif grep -q 'UPDATED_CHECKPOINT' "$log"; then
+    echo "DONE/REPAIRED"
+  elif grep -q 'SKIP_HAS_BEST' "$log"; then
+    echo "DONE/HAS_BEST"
+  elif grep -q 'BEST_VAL_PROBE' "$log"; then
+    echo "REPAIR_BEST"
+  elif grep -q 'REPAIR_BEST' "$log"; then
+    echo "REPAIR_SETUP"
   elif grep -q 'model snapshots ->' "$log"; then
     echo "DONE/SAVED"
   elif grep -q 'result bundle ->' "$log"; then
@@ -112,7 +120,7 @@ latest_log_line() {
     return 0
   fi
   local line
-  line=$(grep -E 'epoch[[:space:]]+[0-9]+|best val|probing best encoder|fitting XGBoost probe|\[best-val|\[last-epoch\]|result bundle|model snapshots|Traceback|RuntimeError|Error' "$log" | tail -n 1 || true)
+  line=$(grep -E 'epoch[[:space:]]+[0-9]+|best val|probing best encoder|fitting XGBoost probe|REPAIR_BEST|BEST_VAL_PROBE|UPDATED_CHECKPOINT|SKIP_HAS_BEST|\[best-val|\[last-epoch\]|result bundle|model snapshots|Traceback|RuntimeError|Error' "$log" | tail -n 1 || true)
   if [[ -z "$line" ]]; then
     line=$(tail -n 1 "$log" 2>/dev/null || true)
   fi
@@ -185,17 +193,43 @@ run_one() {
   local mp="$6"
   local q="$7"
 
-  local qt variant stem artifact log rc
+  local qt variant stem artifact log repair_log rc
   qt="$(q_tag "$q")"
   variant="${mp}${qt}"
   stem="${arch}_${variant}_${regime}_fold${fold}_gnn${gnn_seed}_boost${boost_seed}"
   artifact="${RESULT_DIR}/checkpoints/${arch}_${variant}_unentangled_boost_${regime}_fold${fold}_gnn${gnn_seed}_boost${boost_seed}.pt"
   log="${LOG_DIR}/${stem}.log"
+  repair_log="${LOG_DIR}/${stem}.best_val_repair.log"
 
   if [[ -f "$artifact" ]]; then
-    write_status "SKIPPED" "$stem" "$log"
-    [[ "$QUIET" == "1" ]] || echo "SKIP $stem"
-    return 0
+    write_status "RUNNING" "$stem" "$repair_log"
+    if [[ "$DRY_RUN" == "1" ]]; then
+      {
+        echo uv run python scripts/modeling/eval/eval_graph_full_full_quantile_best.py \
+          --checkpoint "$artifact" --device "$DEVICE"
+      } > "$repair_log"
+      write_status "DONE" "$stem" "$repair_log"
+      return 0
+    fi
+
+    set +e
+    if [[ "$QUIET" == "1" ]]; then
+      uv run python scripts/modeling/eval/eval_graph_full_full_quantile_best.py \
+        --checkpoint "$artifact" --device "$DEVICE" > "$repair_log" 2>&1
+      rc=$?
+    else
+      uv run python scripts/modeling/eval/eval_graph_full_full_quantile_best.py \
+        --checkpoint "$artifact" --device "$DEVICE" 2>&1 | tee "$repair_log"
+      rc=${PIPESTATUS[0]}
+    fi
+    set -e
+
+    if [[ "$rc" -eq 0 ]]; then
+      write_status "DONE" "$stem" "$repair_log"
+    else
+      write_status "FAILED" "$stem" "$repair_log"
+    fi
+    return "$rc"
   fi
 
   write_status "RUNNING" "$stem" "$log"

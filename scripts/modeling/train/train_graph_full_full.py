@@ -8,9 +8,9 @@ noisy mix (primary + secondary + ec50, ~5.7% positive). See the notebook
 graph_evaluation_full_full.ipynb for the protocol write-up.
 
 Node features (the paper shows the molecule encoder is interchangeable):
-  * proteins  — putative ESM-1b 650M mean-pooled (identity not yet verified), keyed by
+  * proteins  РІР‚вЂќ putative ESM-1b 650M mean-pooled (identity not yet verified), keyed by
                 the raw amino-acid sequence; distinct from curated/full ESM2.
-  * molecules — ChemBERTa-77M (384-d), keyed by SMILES. GIN only covers 64% of
+  * molecules РІР‚вЂќ ChemBERTa-77M (384-d), keyed by SMILES. GIN only covers 64% of
                 LORAX molecules, so we use the LORAX-provided ChemBERTa here.
 
 Message passing uses TRAIN edges only; supervision uses the LORAX train/val/test
@@ -89,7 +89,7 @@ def save_history(history, csv_path, plot_path):
     for ax in axes[1]:
         ax.set_xlabel("epoch")
     suptitle = ("Validation vs test history (--observe_test)" if has_test
-                else "Validation history (test hidden — no --observe_test)")
+                else "Validation history (test hidden РІР‚вЂќ no --observe_test)")
     fig.suptitle(suptitle)
     fig.tight_layout()
     tmp_plot = plot_path.with_suffix(".tmp.png")
@@ -210,7 +210,9 @@ def run(args):
         patience=args.scheduler_patience, min_lr=args.scheduler_min_lr)
         if args.lr_scheduler else None)
     tr_idx, tr_y = sup["train"]
-    pw = torch.tensor([(tr_y == 0).sum() / max((tr_y == 1).sum(), 1)])
+    neg_count = (tr_y == 0).sum().float()
+    pos_count = (tr_y == 1).sum().float().clamp_min(1.0)
+    pw = (neg_count / pos_count).reshape(1).to(device)
     loss_fn = torch.nn.BCEWithLogitsLoss(pos_weight=pw)
 
     if args.observe_test:
@@ -361,7 +363,7 @@ def run(args):
                  if args.history else model.encode(x_dict, eidx))
         Xm_probe = (z[H.MOL] if args.transductive_exp else x_dict[H.MOL]).detach().cpu().numpy()
         Zp = z[H.PROT].detach().cpu().numpy()
-        # The graph probe normally never sees the RAW ESM — only the trained 256-d
+        # The graph probe normally never sees the RAW ESM РІР‚вЂќ only the trained 256-d
         # proj+ReLU bottleneck. --concat_raw_prot puts the full raw ESM-1280 back
         # alongside z_prot, to tell "graph compresses raw detail" from "graph adds signal".
         prot_desc = f"{Zp.shape[1]} {args.arch.upper()}"
@@ -490,7 +492,7 @@ def main():
     ap.add_argument("--history_depth", type=int, default=2, choices=[1, 2],
                     help="History depth: 2=[x0||x1||x2] (last MP), 1=[x0||x1] (first MP)")
     ap.add_argument("--concat_raw_prot", action="store_true",
-                    help="Probe on [raw ESM-1280 || z_prot] — gives the probe the full "
+                    help="Probe on [raw ESM-1280 || z_prot] РІР‚вЂќ gives the probe the full "
                          "raw protein embedding the graph bottleneck otherwise discards")
     ap.add_argument("--transductive-exp", "--transductive_exp", "-transductive_exp",
                     dest="transductive_exp", action="store_true",
@@ -505,7 +507,7 @@ def main():
     ap.add_argument("--observe_test", action="store_true",
                     help="[DIAGNOSTICS ONLY] Log test-set metrics every epoch. "
                          "ONLY for gnn_training_diagnostics.ipynb. "
-                         "NEVER use during HP sweeps — test leaks into your mental model.")
+                         "NEVER use during HP sweeps РІР‚вЂќ test leaks into your mental model.")
     ap.add_argument("--fold",    type=int, default=1, choices=[1, 2, 3, 4, 5])
     ap.add_argument("--results-dir", default="results/graph/full_full_manual/")
     ap.add_argument("--protein-embeddings", default=None,

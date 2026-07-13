@@ -3,8 +3,9 @@
 This is a constrained variant of the mixed-granularity attention screen.  A mean
 ESM protein vector queries per-site GIN molecule tokens, the normalized attention
 weights are computed explicitly, and the final prediction is the maximum
-attention weight.  Training combines BCE on that max weight with a margin loss:
-negative pairs should have all weights below ``neg_threshold`` and positive pairs
+excess attention score over the uniform baseline.  Training combines BCE on that score with a margin loss:
+negative pairs should have all weights below `
+eg_threshold`` and positive pairs
 should have at least one weight above ``pos_threshold``.
 """
 from __future__ import annotations
@@ -20,7 +21,7 @@ import numpy as np
 import pandas as pd
 import torch
 from torch import nn
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
 ROOT = pathlib.Path(__file__).resolve()
 while not (ROOT / "pyproject.toml").exists():
@@ -105,7 +106,12 @@ class MaxAttentionScore(nn.Module):
 
     def forward(self, protein, sites, mask):
         weights = self.attention_weights(protein, sites, mask)
-        return weights.max(dim=1).values, weights
+        raw_max = weights.max(dim=1).values
+        n_sites = (~mask).sum(dim=1).to(weights.dtype).clamp_min(1.0)
+        uniform = 1.0 / n_sites
+        # Score in [0, 1]: 0 is uniform attention, 1 is all mass on one site.
+        excess_max = ((raw_max - uniform) / (1.0 - uniform).clamp_min(1e-6)).clamp(0.0, 1.0)
+        return excess_max, weights, raw_max
 
 
 def attention_loss(p, y, args):
@@ -132,15 +138,16 @@ def metric_at(y, p, threshold=0.5):
 @torch.inference_mode()
 def predict(model, loader, device):
     model.eval()
-    ys, ps, entropies = [], [], []
+    ys, ps, raw_maxes, entropies = [], [], [], []
     for protein, sites, y, mask in loader:
-        p, w = model(protein.to(device), sites.to(device), mask.to(device))
+        p, w, raw_max = model(protein.to(device), sites.to(device), mask.to(device))
         valid = (~mask.to(device)).float()
         entropy = -(w.clamp_min(1e-12).log() * w * valid).sum(1) / valid.sum(1).log().clamp_min(1e-6)
         ys.append(y.numpy())
         ps.append(p.cpu().numpy())
+        raw_maxes.append(raw_max.cpu().numpy())
         entropies.append(entropy.cpu().numpy())
-    return np.concatenate(ys), np.concatenate(ps), np.concatenate(entropies)
+    return np.concatenate(ys), np.concatenate(ps), np.concatenate(raw_maxes), np.concatenate(entropies)
 
 
 def train_model(model, train_loader, val_loader, test_loader, args, device):
@@ -152,13 +159,13 @@ def train_model(model, train_loader, val_loader, test_loader, args, device):
         losses = []
         for protein, sites, y, mask in train_loader:
             opt.zero_grad(set_to_none=True)
-            p, _ = model(protein.to(device), sites.to(device), mask.to(device))
+            p, _, _ = model(protein.to(device), sites.to(device), mask.to(device))
             loss = attention_loss(p, y.to(device), args)
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad)
             opt.step()
             losses.append(float(loss.detach().cpu()))
-        yv, pv, _ = predict(model, val_loader, device)
+        yv, pv, _, _ = predict(model, val_loader, device)
         ap = D.metrics(yv, pv)["AUPRC"]
         print(f"    epoch {epoch:03d}: loss={np.mean(losses):.4f} val_AUPRC={ap:.4f}", flush=True)
         if ap > best_ap + args.min_delta:
@@ -169,8 +176,8 @@ def train_model(model, train_loader, val_loader, test_loader, args, device):
             if stale >= args.patience:
                 break
     model.load_state_dict(best_state)
-    yt, pt, ent = predict(model, test_loader, device)
-    return yt, pt, ent, best_epoch, model
+    yt, pt, raw_max, ent = predict(model, test_loader, device)
+    return yt, pt, raw_max, ent, best_epoch, model
 
 
 def main():
@@ -187,10 +194,12 @@ def main():
     ap.add_argument("--dim", type=int, default=64)
     ap.add_argument("--temperature", type=float, default=1.0)
     ap.add_argument("--dropout", type=float, default=0.1)
-    ap.add_argument("--neg-threshold", type=float, default=0.15)
-    ap.add_argument("--pos-threshold", type=float, default=0.25)
+    ap.add_argument("--neg-threshold", type=float, default=0.2)
+    ap.add_argument("--pos-threshold", type=float, default=0.4)
     ap.add_argument("--margin-weight", type=float, default=1.0)
     ap.add_argument("--decision-threshold", type=float, default=None)
+    ap.add_argument("--pos-fraction", type=float, default=None,
+                    help="Target positive fraction in train batches via WeightedRandomSampler")
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--weight-decay", type=float, default=1e-4)
     ap.add_argument("--clip-grad", type=float, default=1.0)
@@ -204,6 +213,8 @@ def main():
         raise ValueError("neg-threshold must be lower than pos-threshold")
     if args.decision_threshold is None:
         args.decision_threshold = args.pos_threshold
+    if args.pos_fraction is not None and not (0.0 < args.pos_fraction < 1.0):
+        raise ValueError("pos-fraction must be between 0 and 1")
     seed_all(args.seed)
     device = torch.device("cuda" if args.device == "auto" and torch.cuda.is_available() else
                           ("cpu" if args.device == "auto" else args.device))
@@ -223,30 +234,50 @@ def main():
         records = pd.read_csv(metrics_path).to_dict("records")
 
     for regime in regime_list:
-        key = (regime, MODEL_NAME, args.seed, args.neg_threshold, args.pos_threshold)
-        if any((r["regime"], r["model"], int(r["seed"]), float(r["neg_threshold"]), float(r["pos_threshold"])) == key for r in records) and not args.force:
+        key = (regime, MODEL_NAME, args.seed, args.neg_threshold, args.pos_threshold, args.pos_fraction)
+        if any((r["regime"], r["model"], int(r["seed"]), float(r["neg_threshold"]), float(r["pos_threshold"]), None if pd.isna(r.get("pos_fraction", np.nan)) else float(r.get("pos_fraction"))) == key for r in records) and not args.force:
             print(f"SKIP cached {key}")
             continue
         start = time.time()
         print(f"RUN {regime} {MODEL_NAME} seed={args.seed} device={device} neg_t={args.neg_threshold} pos_t={args.pos_threshold}", flush=True)
         tr, va, te = split_indices(pairs, regime, args.seed, args.test_size, args.val_size)
-        loader = lambda idx, shuffle=False: DataLoader(
-            PairDataset(pairs, idx, proteins, sites), batch_size=args.batch_size, shuffle=shuffle,
-            collate_fn=collate, pin_memory=device.type == "cuda")
+
+        def loader(idx, shuffle=False, train=False):
+            ds = PairDataset(pairs, idx, proteins, sites)
+            sampler = None
+            if train and args.pos_fraction is not None:
+                labels = pairs.iloc[np.asarray(idx)].label.to_numpy(dtype=np.int64)
+                n_pos = int(labels.sum())
+                n_neg = int(len(labels) - n_pos)
+                if n_pos == 0 or n_neg == 0:
+                    raise ValueError(f"Cannot use pos-fraction sampler with n_pos={n_pos}, n_neg={n_neg}")
+                weights = np.where(labels == 1, args.pos_fraction / n_pos, (1.0 - args.pos_fraction) / n_neg)
+                gen = torch.Generator()
+                gen.manual_seed(args.seed + 12345)
+                sampler = WeightedRandomSampler(torch.as_tensor(weights, dtype=torch.double), num_samples=len(labels), replacement=True, generator=gen)
+                shuffle = False
+            return DataLoader(ds, batch_size=args.batch_size, shuffle=shuffle if sampler is None else False,
+                              sampler=sampler, collate_fn=collate, pin_memory=device.type == "cuda")
+
+        train_labels = pairs.iloc[np.asarray(tr)].label.to_numpy(dtype=np.float32)
+        train_pos_fraction = float(train_labels.mean())
         model = MaxAttentionScore(args.dim, args.temperature, args.dropout)
-        yt, pt, entropy, best_epoch, fitted = train_model(model, loader(tr, True), loader(va), loader(te), args, device)
+        yt, pt, raw_max, entropy, best_epoch, fitted = train_model(model, loader(tr, True, True), loader(va), loader(te), args, device)
         rec = {"regime": regime, "model": MODEL_NAME, "seed": args.seed,
                "neg_threshold": args.neg_threshold, "pos_threshold": args.pos_threshold,
                "margin_weight": args.margin_weight, "decision_threshold": args.decision_threshold,
+               "train_pos_fraction": train_pos_fraction, "pos_fraction": args.pos_fraction,
                **metric_at(yt, pt, args.decision_threshold),
-               "mean_max_weight": float(np.mean(pt)), "pos_mean_max_weight": float(np.mean(pt[yt == 1])) if np.any(yt == 1) else np.nan,
-               "neg_mean_max_weight": float(np.mean(pt[yt == 0])) if np.any(yt == 0) else np.nan,
+               "mean_excess_max": float(np.mean(pt)), "pos_mean_excess_max": float(np.mean(pt[yt == 1])) if np.any(yt == 1) else np.nan,
+               "neg_mean_excess_max": float(np.mean(pt[yt == 0])) if np.any(yt == 0) else np.nan,
+               "mean_raw_max_weight": float(np.mean(raw_max)),
                "mean_attention_entropy": float(np.mean(entropy)),
                "best_epoch": best_epoch, "seconds": round(time.time() - start, 1), "n_test": len(te)}
-        records = [r for r in records if not ((r["regime"], r["model"], int(r["seed"]), float(r["neg_threshold"]), float(r["pos_threshold"])) == key)] + [rec]
+        records = [r for r in records if not ((r["regime"], r["model"], int(r["seed"]), float(r["neg_threshold"]), float(r["pos_threshold"]), None if pd.isna(r.get("pos_fraction", np.nan)) else float(r.get("pos_fraction"))) == key)] + [rec]
         pd.DataFrame(records).sort_values(["regime", "model", "seed"]).to_csv(metrics_path, index=False)
-        suffix = f"{regime}_{MODEL_NAME}_seed{args.seed}_neg{args.neg_threshold:g}_pos{args.pos_threshold:g}"
-        np.savez_compressed(out / f"pred_{suffix}.npz", y=yt, p=pt, attention_entropy=entropy)
+        posfrac_tag = "natural" if args.pos_fraction is None else f"pf{args.pos_fraction:g}"
+        suffix = f"{regime}_{MODEL_NAME}_seed{args.seed}_neg{args.neg_threshold:g}_pos{args.pos_threshold:g}_{posfrac_tag}"
+        np.savez_compressed(out / f"pred_{suffix}.npz", y=yt, p=pt, raw_max_attention=raw_max, attention_entropy=entropy)
         torch.save({"state_dict": fitted.state_dict(), "config": vars(args), "regime": regime,
                     "model": MODEL_NAME, "seed": args.seed}, out / f"model_{suffix}.pt")
         print("  " + " ".join(f"{k}={rec[k]:.3f}" for k in ("AUROC", "AUPRC", "MCC", "F1")), flush=True)

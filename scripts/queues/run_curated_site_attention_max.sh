@@ -10,7 +10,7 @@ shopt -s nullglob
 # Examples:
 #   bash scripts/queues/run_curated_site_attention_max.sh
 #   MAX_PARALLEL=2 bash scripts/queues/run_curated_site_attention_max.sh
-#   NEG_THRESHOLD=0.12 POS_THRESHOLD=0.30 bash scripts/queues/run_curated_site_attention_max.sh
+#   POS_FRACTION=0.5 NEG_THRESHOLD=0.20 POS_THRESHOLD=0.40 bash scripts/queues/run_curated_site_attention_max.sh
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
@@ -30,9 +30,10 @@ BATCH_SIZE="${BATCH_SIZE:-128}"
 DIM="${DIM:-64}"
 TEMPERATURE="${TEMPERATURE:-1.0}"
 DROPOUT="${DROPOUT:-0.1}"
-NEG_THRESHOLD="${NEG_THRESHOLD:-0.15}"
-POS_THRESHOLD="${POS_THRESHOLD:-0.25}"
+NEG_THRESHOLD="${NEG_THRESHOLD:-0.2}"
+POS_THRESHOLD="${POS_THRESHOLD:-0.4}"
 MARGIN_WEIGHT="${MARGIN_WEIGHT:-1.0}"
+POS_FRACTION="${POS_FRACTION:-0.5}"
 DECISION_THRESHOLD="${DECISION_THRESHOLD:-}"
 REGIME="${REGIME:-all}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}"
@@ -85,7 +86,7 @@ dashboard() {
     printf '\033[H\033[2J'
     echo "curated attention max-score | $(date '+%H:%M:%S') | device=$DEVICE"
     echo "total=$total done=$done failed=$failed running=$running pending=$pending max_parallel=$MAX_PARALLEL"
-    echo "epochs=$EPOCHS patience=$PATIENCE batch=$BATCH_SIZE dim=$DIM neg_t=$NEG_THRESHOLD pos_t=$POS_THRESHOLD margin=$MARGIN_WEIGHT"
+    echo "epochs=$EPOCHS patience=$PATIENCE batch=$BATCH_SIZE dim=$DIM neg_t=$NEG_THRESHOLD pos_t=$POS_THRESHOLD margin=$MARGIN_WEIGHT pos_fraction=$POS_FRACTION"
     echo "logs: $LOG_DIR"
     echo
     echo "RUNNING"
@@ -133,6 +134,7 @@ run_one_seed() {
     --neg-threshold "$NEG_THRESHOLD" \
     --pos-threshold "$POS_THRESHOLD" \
     --margin-weight "$MARGIN_WEIGHT" \
+    --pos-fraction "$POS_FRACTION" \
     "${extra_args[@]}" \
     --seed "$seed" \
     --regime "$REGIME" > "$log" 2>&1
@@ -191,7 +193,9 @@ result_dir = Path(sys.argv[2])
 metric_files = sorted(runs_dir.glob('seed_*/metrics.csv'))
 if metric_files:
     df = pd.concat([pd.read_csv(path) for path in metric_files], ignore_index=True)
-    subset = ['regime', 'model', 'seed', 'neg_threshold', 'pos_threshold']
+    if 'pos_fraction' not in df.columns:
+        df['pos_fraction'] = pd.NA
+    subset = ['regime', 'model', 'seed', 'neg_threshold', 'pos_threshold', 'pos_fraction']
     df = df.drop_duplicates(subset=subset, keep='last')
     df = df.sort_values(['regime', 'model', 'seed']).reset_index(drop=True)
     out = result_dir / 'metrics.csv'

@@ -179,7 +179,7 @@ def train_torch(model, train_loader, val_loader, test_loader, args, device):
             if stale >= args.patience: break
     model.load_state_dict(best_state)
     yt, pt = predict(model, test_loader, device)
-    return yt, pt, best_epoch, best_state
+    return yt, pt, best_epoch, model
 
 
 def run_xgb(X, y, tr, va, te, args):

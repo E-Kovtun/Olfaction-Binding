@@ -11,10 +11,16 @@ driver) is shared between the two, so each model's own definition stays
 fully independent and directly editable.
 
 Both are supervised, pair-level sources: each trains its own model on
-train_idx's labels. To avoid leaking a row's own label into the "feature"
-handed back for train rows, train predictions are produced out-of-fold
+train_idx's labels (via a scalar noisy-OR/LSE prediction head, BCE loss).
+The *feature* handed back to the boosting stage, though, is not that scalar
+prediction -- it's the pooled 2*dim hidden representation the head would
+otherwise collapse to one number (`model.embed`, weighted by the same
+noisy-OR/LSE pooling weights), so the boosting stage gets an actual
+embedding ("cls token") rather than a degenerate 1-d re-statement of the
+model's own prediction. To avoid leaking a row's own label into that
+embedding for train rows, train embeddings are produced out-of-fold
 (stratified K-fold retraining internally, each fold gets its own inner
-train/val split for early stopping); val/test predictions come from one
+train/val split for early stopping); val/test embeddings come from one
 model fit on the whole of train_idx (which never touches val/test, so no
 leakage there either).
 """
@@ -83,12 +89,26 @@ def _make_loader(df, proteins, sites, batch_size, pos_fraction, seed, train):
 
 @torch.inference_mode()
 def _predict(model, loader, device):
+    """Scalar probabilities -- used only for AUPRC-based early stopping during
+    training, never handed back as the extractor's feature (see `_embed`)."""
     model.eval()
     ps = []
     for protein, sites, _, mask in loader:
         logits = model(protein.to(device), sites.to(device), mask.to(device))
         ps.append(torch.sigmoid(logits).detach().cpu().numpy())
     return np.concatenate(ps)
+
+
+@torch.inference_mode()
+def _embed(model, loader, device):
+    """Pooled pre-head embedding (model.embed) -- this is the actual feature
+    handed back to the boosting stage, not the scalar prediction."""
+    model.eval()
+    es = []
+    for protein, sites, _, mask in loader:
+        e = model.embed(protein.to(device), sites.to(device), mask.to(device))
+        es.append(e.detach().cpu().numpy())
+    return np.concatenate(es, axis=0)
 
 
 def _train_and_predict(build_model, train_df, val_df, test_df, proteins, sites, hp, device):
@@ -128,7 +148,7 @@ def _train_and_predict(build_model, train_df, val_df, test_df, proteins, sites, 
                 break
     if best_state is not None:
         model.load_state_dict(best_state)
-    return _predict(model, val_loader, device), _predict(model, test_loader, device), model
+    return _embed(model, val_loader, device), _embed(model, test_loader, device), model
 
 
 def _run_oof(ext, pairs: pd.DataFrame, train_idx, val_idx, test_idx, seed: int, checkpoint_dir=None):
@@ -169,14 +189,14 @@ def _run_oof(ext, pairs: pd.DataFrame, train_idx, val_idx, test_idx, seed: int, 
         fit_pos, innerval_pos = train_test_split(
             np.arange(len(inner_df)), test_size=ext.inner_val_fraction,
             random_state=seed + ext.seed_offset + fold_i, stratify=inner_df["label"].to_numpy())
-        _, p_holdout, _ = _train_and_predict(ext._build_model, inner_df.iloc[fit_pos], inner_df.iloc[innerval_pos],
+        _, e_holdout, _ = _train_and_predict(ext._build_model, inner_df.iloc[fit_pos], inner_df.iloc[innerval_pos],
                                               holdout_df, ext._proteins, ext._sites,
                                               ext._hp(seed + ext.seed_offset + fold_i), device)
-        return holdout_pos, p_holdout
+        return holdout_pos, e_holdout
 
     skf = StratifiedKFold(n_splits=ext.n_folds, shuffle=True, random_state=seed + ext.seed_offset)
     fold_splits = list(skf.split(train_df, y_train))
-    p_train = np.full(len(train_df), np.nan, dtype=np.float32)
+    p_train = np.full((len(train_df), ext.dim_out), np.nan, dtype=np.float32)
 
     with ThreadPoolExecutor(max_workers=ext.n_folds + 1) as pool:
         whole_future = pool.submit(whole_train_job)
@@ -184,40 +204,55 @@ def _run_oof(ext, pairs: pd.DataFrame, train_idx, val_idx, test_idx, seed: int, 
                         for i, (inner_pos, holdout_pos) in enumerate(fold_splits)]
         p_val, p_test, whole_model = whole_future.result()
         for f in fold_futures:
-            holdout_pos, p_holdout = f.result()
-            p_train[holdout_pos] = p_holdout
+            holdout_pos, e_holdout = f.result()
+            p_train[holdout_pos] = e_holdout
 
     if checkpoint_dir is not None:
         checkpoint_path = pathlib.Path(checkpoint_dir) / f"attn_{ext.name}.pt"
         torch.save(whole_model.state_dict(), checkpoint_path)
 
     assert not np.isnan(p_train).any(), "OOF pass left some train rows unfilled"
-    return (p_train.reshape(-1, 1).astype(np.float32),
-            p_val.reshape(-1, 1).astype(np.float32),
-            p_test.reshape(-1, 1).astype(np.float32))
+    return p_train.astype(np.float32), p_val.astype(np.float32), p_test.astype(np.float32)
 
 
 # --------------------------------------------------------------------------- MilNoisyOrExtractor
 
 class _NoisyOrSiteModel(nn.Module):
-    """Per-site logits -> noisy-OR combine ("at least one site fires")."""
+    """Per-site logits -> noisy-OR combine ("at least one site fires").
+
+    `forward` (scalar logit, used only for training/early-stopping) and
+    `embed` (pooled 2*dim hidden vector, the actual feature handed to the
+    boosting stage) share the same per-site hidden representation -- `embed`
+    just pools it with noisy-OR-style weights instead of collapsing it to
+    one probability."""
 
     def __init__(self, dim: int, dropout: float):
         super().__init__()
         self.protein = nn.Sequential(nn.Linear(1280, dim), nn.LayerNorm(dim), nn.GELU(), nn.Dropout(dropout))
         self.site = nn.Sequential(nn.Linear(300, dim), nn.LayerNorm(dim), nn.GELU(), nn.Dropout(dropout))
-        self.head = nn.Sequential(nn.Linear(3 * dim, 2 * dim), nn.GELU(), nn.Dropout(dropout), nn.Linear(2 * dim, 1))
+        self.hidden = nn.Sequential(nn.Linear(3 * dim, 2 * dim), nn.GELU(), nn.Dropout(dropout))
+        self.out = nn.Linear(2 * dim, 1)
 
-    def forward(self, protein, sites, mask):
+    def _site_hidden_and_logits(self, protein, sites, mask):
         p = self.protein(protein)
         s = self.site(sites)
         p_rep = p.unsqueeze(1).expand_as(s)
-        logits = self.head(torch.cat([s, p_rep, s * p_rep], dim=-1)).squeeze(-1)
-        logits = logits.masked_fill(mask, -torch.inf)
+        h = self.hidden(torch.cat([s, p_rep, s * p_rep], dim=-1))
+        logits = self.out(h).squeeze(-1).masked_fill(mask, -torch.inf)
+        return h, logits
+
+    def forward(self, protein, sites, mask):
+        _, logits = self._site_hidden_and_logits(protein, sites, mask)
         probs = torch.sigmoid(logits).masked_fill(mask, 0.0)
         log_no_hit = torch.log1p(-probs.clamp(max=1.0 - 1e-6)).sum(1)
         p_hit = 1.0 - torch.exp(log_no_hit)
         return torch.logit(p_hit.clamp(1e-6, 1.0 - 1e-6))
+
+    def embed(self, protein, sites, mask):
+        h, logits = self._site_hidden_and_logits(protein, sites, mask)
+        probs = torch.sigmoid(logits).masked_fill(mask, 0.0)
+        w = probs / probs.sum(dim=1, keepdim=True).clamp_min(1e-6)
+        return (h * w.unsqueeze(-1)).sum(dim=1)
 
 
 @dataclass
@@ -239,10 +274,11 @@ class MilNoisyOrExtractor:
     inner_val_fraction: float = 0.1
     seed_offset: int = 5000
     pooling: str = "noisy_or"
-    dim_out: int = field(init=False, default=1)
+    dim_out: int = field(init=False, default=0)
     model_name: str = field(init=False, default="mil_noisy_or")
 
     def __post_init__(self):
+        self.dim_out = 2 * self.dim
         self._proteins = D.load_npz_dict(self.protein_path)
         self._sites = D.load_npz_dict(self.molecule_sites_path)
         self.path = f"{self.protein_path} + {self.molecule_sites_path}"
@@ -268,23 +304,39 @@ class MilNoisyOrExtractor:
 # --------------------------------------------------------------------------- MilLseExtractor
 
 class _LseSiteModel(nn.Module):
-    """Per-site logits -> temperature-scaled log-sum-exp combine (smooth max)."""
+    """Per-site logits -> temperature-scaled log-sum-exp combine (smooth max).
+
+    `forward` (scalar logit, used only for training/early-stopping) and
+    `embed` (pooled 2*dim hidden vector, the actual feature handed to the
+    boosting stage) share the same per-site hidden representation -- `embed`
+    pools it with the same softmax-over-temperature weights LSE implies,
+    instead of collapsing it to one probability."""
 
     def __init__(self, dim: int, dropout: float, temperature: float):
         super().__init__()
         self.protein = nn.Sequential(nn.Linear(1280, dim), nn.LayerNorm(dim), nn.GELU(), nn.Dropout(dropout))
         self.site = nn.Sequential(nn.Linear(300, dim), nn.LayerNorm(dim), nn.GELU(), nn.Dropout(dropout))
-        self.head = nn.Sequential(nn.Linear(3 * dim, 2 * dim), nn.GELU(), nn.Dropout(dropout), nn.Linear(2 * dim, 1))
+        self.hidden = nn.Sequential(nn.Linear(3 * dim, 2 * dim), nn.GELU(), nn.Dropout(dropout))
+        self.out = nn.Linear(2 * dim, 1)
         self.temperature = temperature
 
-    def forward(self, protein, sites, mask):
+    def _site_hidden_and_logits(self, protein, sites, mask):
         p = self.protein(protein)
         s = self.site(sites)
         p_rep = p.unsqueeze(1).expand_as(s)
-        logits = self.head(torch.cat([s, p_rep, s * p_rep], dim=-1)).squeeze(-1)
-        logits = logits.masked_fill(mask, -torch.inf)
+        h = self.hidden(torch.cat([s, p_rep, s * p_rep], dim=-1))
+        logits = self.out(h).squeeze(-1).masked_fill(mask, -torch.inf)
+        return h, logits
+
+    def forward(self, protein, sites, mask):
+        _, logits = self._site_hidden_and_logits(protein, sites, mask)
         n = (~mask).sum(1).clamp_min(1).to(logits.dtype)
         return self.temperature * (torch.logsumexp(logits / self.temperature, dim=1) - n.log())
+
+    def embed(self, protein, sites, mask):
+        h, logits = self._site_hidden_and_logits(protein, sites, mask)
+        w = torch.softmax(logits / self.temperature, dim=1)
+        return (h * w.unsqueeze(-1)).sum(dim=1)
 
 
 @dataclass
@@ -307,10 +359,11 @@ class MilLseExtractor:
     inner_val_fraction: float = 0.1
     seed_offset: int = 5000
     pooling: str = "lse"
-    dim_out: int = field(init=False, default=1)
+    dim_out: int = field(init=False, default=0)
     model_name: str = field(init=False, default="mil_lse")
 
     def __post_init__(self):
+        self.dim_out = 2 * self.dim
         self._proteins = D.load_npz_dict(self.protein_path)
         self._sites = D.load_npz_dict(self.molecule_sites_path)
         self.path = f"{self.protein_path} + {self.molecule_sites_path}"

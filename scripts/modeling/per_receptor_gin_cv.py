@@ -28,7 +28,7 @@ OUT.parent.mkdir(parents=True, exist_ok=True)
 
 
 def main():
-    GIN = D.load_npz_dict(ROOT / "data" / "embeddings" / "molecules" / "gin_supervised_contextpred.npz")
+    GIN = D.load_npz_dict(ROOT / "data" / "embeddings" / "molecules" / "gin_supervised_contextpred_all_m2or.npz")
     PAIRS = pd.read_csv(ROOT / "data" / "processed" / "pairs_curated.csv")
     PAIRS = PAIRS[PAIRS["inchikey"].isin(GIN)]
 

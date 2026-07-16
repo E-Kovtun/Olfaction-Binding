@@ -19,7 +19,7 @@ The default PyTorch build installed on this workstation is CPU-only. GPU executi
 
 ## External data
 
-`data/` is not versioned. Unpack the external data bundle into the repository so that paths begin with `data/processed/`, `data/embeddings/`, and, for LORAX experiments, `data/external/lorax_m2or/`. The current code deliberately uses repository-relative paths rather than machine-specific absolute paths.
+`data/` is not versioned. Unpack the external data bundle into the repository so that paths begin with `data/processed/`, `data/embeddings/`, and, for the full_full/LORAX `transductive` splits, `data/splits_indexes/lorax_m2or/` (see that folder's README for why these 5 folds are kept as their own borrowed split rather than merged into our own conventions). The current code deliberately uses repository-relative paths rather than machine-specific absolute paths.
 
 Until the data bundle receives a formal manifest, the notebooks themselves are the most precise record of the files required by each experiment.
 

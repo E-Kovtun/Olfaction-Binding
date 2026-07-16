@@ -58,9 +58,9 @@ def _fat_run_dir(seed):
 # swamps the discriminative signal in the Linear projection + SAGE mean-aggregation. So the
 # FAT config trains/probes on STANDARDISED copies (per-dim mean-subtract + /sd), matching
 # what the MLP baseline does. This is scoped to the enrichment experiment only.
-_RAW_PROT_FULL = "data/external/lorax_m2or/esm1b_650m_mean_lorax.npz"
+_RAW_PROT_FULL = "data/embeddings/proteins/esm1b_650m_mean.npz"
 _RAW_MOL_FULL = "data/embeddings/molecules/chemberta_77m_lorax.pkl"
-_STD_PROT = "data/embeddings/proteins/esm1b_650m_mean_lorax_std.pkl"
+_STD_PROT = "data/embeddings/proteins/esm1b_650m_mean_std.pkl"
 _STD_MOL = "data/embeddings/molecules/chemberta_77m_lorax_std.pkl"
 
 

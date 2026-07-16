@@ -28,7 +28,7 @@ from orbind.dataset import metrics
 MOL, PROT = H.MOL, H.PROT
 METRICS = ["AUROC", "AUPRC", "MCC", "F1"]
 HIDDEN = 64
-PROT_C = "data/embeddings/proteins/esm1b_650m_mean_lorax_pca32.npz"
+PROT_C = "data/embeddings/proteins/esm1b_650m_mean_pca32.npz"
 MOL_C = "data/embeddings/molecules/chemberta_77m_lorax_pca16.npz"
 RUNS = _root / "results/graph/full_full/compression/h64/runs"
 OUT = _root / "results/graph/full_full/compression/h64/tables/feature_spectrum_by_seed.csv"

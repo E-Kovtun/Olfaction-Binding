@@ -36,7 +36,7 @@ def boost_lowmem(Xtr, ytr, Xte, seed=42, max_bin=MAX_BIN):
 
 
 pairs = pd.read_csv(DATA / "processed" / "pairs_curated.csv")
-gin   = D.load_npz_dict(DATA / "embeddings" / "molecules" / "gin_supervised_contextpred.npz")
+gin   = D.load_npz_dict(DATA / "embeddings" / "molecules" / "gin_supervised_contextpred_all_m2or.npz")
 
 V = build_variants()
 prot = V["concat22"]

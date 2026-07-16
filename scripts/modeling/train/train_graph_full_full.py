@@ -1,6 +1,6 @@
 """Train the bipartite link predictor (GNN or GAT) on the FULL_FULL dataset.
 
-full_full = the LORAX / Hladis M2OR release (data/external/lorax_m2or), the most
+full_full = the LORAX / Hladis M2OR release (data/splits_indexes/lorax_m2or), the most
 complete variant we have. Unlike curated/full we do NOT make our own random
 splits: we respect LORAX's pre-defined folds, where the test set is EC50-only
 (highest-quality, dose-response, ~22% positive) while train/val are the full

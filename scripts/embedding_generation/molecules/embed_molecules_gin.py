@@ -17,7 +17,7 @@ uv run python scripts/embedding_generation/molecules/embed_molecules_gin.py \
        --molecules data/processed/molecules/molecule_smiles.csv \
        --model gin_supervised_contextpred \
        --out data/embeddings/molecules/gin_contextpred.npz \
-       --node-out data/embeddings/molecules/gin_supervised_contextpred_per_atom.npz
+       --node-out data/embeddings/molecules/gin_supervised_contextpred_all_m2or_per_atom.npz
 
 The optional node output stores the same 300-d GIN representations before mean
 pooling, one variable-length ``[n_atoms, 300]`` array per molecule.

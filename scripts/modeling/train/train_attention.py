@@ -249,10 +249,10 @@ def main():
     ap.add_argument("--setup", choices=["all", *SETUPS], default="all")
     ap.add_argument("--split", choices=["all", *SPLITS], default="all")
     ap.add_argument("--pairs", default="data/processed/pairs_curated.csv")
-    ap.add_argument("--protein-mean", default="data/embeddings/proteins/esm2_650m_mean_full.npz")
+    ap.add_argument("--protein-mean", default="data/embeddings/proteins/esm2_650m_mean.npz")
     ap.add_argument("--protein-sites", default="data/embeddings/proteins/esm2_650m_per_residue_full.npz")
-    ap.add_argument("--molecule-mean", default="data/embeddings/molecules/gin_supervised_contextpred.npz")
-    ap.add_argument("--molecule-sites", default="data/embeddings/molecules/gin_supervised_contextpred_per_atom.npz")
+    ap.add_argument("--molecule-mean", default="data/embeddings/molecules/gin_supervised_contextpred_all_m2or.npz")
+    ap.add_argument("--molecule-sites", default="data/embeddings/molecules/gin_supervised_contextpred_all_m2or_per_atom.npz")
     ap.add_argument("--out", default=None,
                     help="CSV path (default: production table; a separate smoke table with --limit-pairs)")
     ap.add_argument("--checkpoint-dir", default=None)
@@ -310,7 +310,7 @@ def main():
                 f"missing {m_path}; generate it with:\n"
                 "uv run python scripts/embedding_generation/molecules/embed_molecules_gin.py "
                 "--molecules data/processed/molecules/molecule_smiles.csv "
-                "--node-out data/embeddings/molecules/gin_supervised_contextpred_per_atom.npz")
+                "--node-out data/embeddings/molecules/gin_supervised_contextpred_all_m2or_per_atom.npz")
         protein, molecule = load(p_path), load(m_path)
         mask = pairs.receptor.isin(protein) & pairs.inchikey.isin(molecule)
         p = pairs.loc[mask].reset_index(drop=True)

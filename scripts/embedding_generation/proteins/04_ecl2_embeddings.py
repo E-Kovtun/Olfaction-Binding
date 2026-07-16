@@ -18,7 +18,7 @@ This script:
      slice, and saves one 1280-d vector per receptor.
 
 Output: data/embeddings/proteins/esm2_650m_ecl2_mean_curated.npz
-        (same format as esm2_650m_mean_full.npz — keys ids / emb)
+        (same format as esm2_650m_mean.npz — keys ids / emb)
 
 Usage
 -----

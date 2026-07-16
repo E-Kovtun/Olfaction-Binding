@@ -58,8 +58,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--head", default="all", choices=["mlp", "boost", "all"])
     ap.add_argument("--pairs", default="data/processed/pairs_curated.csv")
-    ap.add_argument("--prot", default="data/embeddings/proteins/esm2_650m_mean_full.npz")
-    ap.add_argument("--mol", default="data/embeddings/molecules/gin_supervised_contextpred.npz")
+    ap.add_argument("--prot", default="data/embeddings/proteins/esm2_650m_mean.npz")
+    ap.add_argument("--mol", default="data/embeddings/molecules/gin_supervised_contextpred_all_m2or.npz")
     ap.add_argument("--out-dir", default="results/curated/",
                     help="Dataset results root; tables go to <dir>/tables (use results/full/ for the full dataset)")
     ap.add_argument("--test-size", type=float, default=0.2)

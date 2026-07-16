@@ -67,7 +67,7 @@ def main():
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
 
-    GIN = D.load_npz_dict(ROOT / "data" / "embeddings" / "molecules" / "gin_supervised_contextpred.npz")
+    GIN = D.load_npz_dict(ROOT / "data" / "embeddings" / "molecules" / "gin_supervised_contextpred_all_m2or.npz")
     PAIRS = pd.read_csv(ROOT / "data" / "processed" / "pairs_curated.csv")
     PAIRS = PAIRS[PAIRS["inchikey"].isin(GIN)].reset_index(drop=True)
     y_all = PAIRS["label"].to_numpy()

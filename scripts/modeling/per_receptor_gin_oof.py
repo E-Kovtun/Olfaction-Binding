@@ -42,7 +42,7 @@ def loo_base_rate(y: np.ndarray) -> np.ndarray:
 
 
 def main():
-    GIN = D.load_npz_dict(ROOT / "data" / "embeddings" / "molecules" / "gin_supervised_contextpred.npz")
+    GIN = D.load_npz_dict(ROOT / "data" / "embeddings" / "molecules" / "gin_supervised_contextpred_all_m2or.npz")
     PAIRS = pd.read_csv(ROOT / "data" / "processed" / "pairs_curated.csv")
     PAIRS = PAIRS[PAIRS["inchikey"].isin(GIN)]
     n_pairs_total = len(PAIRS)

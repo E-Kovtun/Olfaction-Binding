@@ -3,7 +3,7 @@
 Reproduces the LORAX Table 3 evaluation protocol (McConachie et al., ICLR 2026)
 with our own boosting head so the numbers are directly comparable:
 
-  * Their data, their 5 random folds (data/external/lorax_m2or/rand_split_*).
+  * Their data, their 5 random folds (data/splits_indexes/lorax_m2or/rand_split_*).
   * Train on the FULL noisy mix (primary + secondary + ec50);
     TEST only on the held-out EC50 pairs (~22% positive) — exactly their split.
   * Features: putative ESM-1b 650M mean-pooled protein  ||  ChemBERTa-77M molecule

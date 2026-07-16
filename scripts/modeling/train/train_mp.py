@@ -7,8 +7,8 @@ Weighted in two senses:
 Run (after embeddings exist):
   uv run python scripts/modeling/train/train_mp.py \
       --pairs data/processed/pairs_curated.csv \
-      --prot  data/embeddings/proteins/esm2_650m_mean_full.npz \
-      --mol   data/embeddings/molecules/gin_supervised_contextpred.npz \
+      --prot  data/embeddings/proteins/esm2_650m_mean.npz \
+      --mol   data/embeddings/molecules/gin_supervised_contextpred_all_m2or.npz \
       --split stratified            # or group_receptor
 """
 import argparse, pathlib, sys
@@ -48,8 +48,8 @@ def metrics(y, p):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--pairs", default="data/processed/pairs_curated.csv")
-    ap.add_argument("--prot", default="data/embeddings/proteins/esm2_650m_mean_full.npz")
-    ap.add_argument("--mol", default="data/embeddings/molecules/gin_supervised_contextpred.npz")
+    ap.add_argument("--prot", default="data/embeddings/proteins/esm2_650m_mean.npz")
+    ap.add_argument("--mol", default="data/embeddings/molecules/gin_supervised_contextpred_all_m2or.npz")
     ap.add_argument("--split", default="stratified",
                     choices=["stratified", "group_receptor", "group_molecule"])
     ap.add_argument("--test-size", type=float, default=0.2)

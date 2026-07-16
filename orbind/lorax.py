@@ -1,6 +1,6 @@
 """Data helpers for the FULL_FULL dataset (LORAX / Hladis M2OR release).
 
-full_full lives in data/external/lorax_m2or as 5 pre-defined random folds. Two
+full_full lives in data/splits_indexes/lorax_m2or as 5 pre-defined random folds. Two
 evaluation regimes are built here so the graph pipeline can mirror curated/full:
 
   transductive        — use the LORAX fold as-is. MP graph + supervision = train
@@ -28,10 +28,11 @@ import numpy as np, pandas as pd, torch
 from orbind.hetero import load_npz_dict, MOL, PROT  # noqa: F401  (re-export convenience)
 
 _root = pathlib.Path(__file__).resolve().parent.parent
-LORAX = _root / "data" / "external" / "lorax_m2or"
+LORAX = _root / "data" / "splits_indexes" / "lorax_m2or"
 MOLECULE_EMBEDDINGS = _root / "data" / "embeddings" / "molecules"
+PROTEIN_EMBEDDINGS = _root / "data" / "embeddings" / "proteins"
 CHEMBERTA = MOLECULE_EMBEDDINGS / "chemberta_77m_lorax.pkl"
-ESM = LORAX / "esm1b_650m_mean_lorax.npz"
+ESM = PROTEIN_EMBEDDINGS / "esm1b_650m_mean.npz"
 
 
 def _resolve_embedding_path(path, default):

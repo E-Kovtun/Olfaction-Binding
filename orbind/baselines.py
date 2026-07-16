@@ -52,7 +52,10 @@ def train_mlp(Xtr, ytr, Xte, seed=42, hidden=(512, 128), dropout=0.3, lr=1e-3, e
         return torch.sigmoid(model(Xte).squeeze(-1)).numpy()
 
 
-def train_boost(Xtr, ytr, Xte, seed=42):
+def fit_boost(Xtr, ytr, seed=42):
+    """Fit and return the classifier (not just its predictions), so callers
+    that need scores on more than one held-out set (e.g. val AND test) don't
+    have to refit."""
     import xgboost as xgb
     import torch
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -73,7 +76,11 @@ def train_boost(Xtr, ytr, Xte, seed=42):
         print("  XGBoost CUDA unavailable; retrying boost head on CPU", flush=True)
         clf = make_classifier("cpu")
         clf.fit(Xtr, ytr)
-    return clf.predict_proba(Xte)[:, 1]
+    return clf
+
+
+def train_boost(Xtr, ytr, Xte, seed=42):
+    return fit_boost(Xtr, ytr, seed=seed).predict_proba(Xte)[:, 1]
 
 
 HEADS = {"mlp": train_mlp, "boost": train_boost}

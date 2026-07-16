@@ -54,7 +54,7 @@ def build_variants() -> dict[str, dict]:
     # curated 409 here (bw_pocket_positions_curated.csv is curated-only anyway)
     # so we don't waste work deriving pocket/mlp22/concat22/background for
     # receptors this script's PAIRS (pairs_curated.csv) never uses.
-    mean_full = D.load_npz_dict(prot / "esm2_650m_mean_full.npz")
+    mean_full = D.load_npz_dict(prot / "esm2_650m_mean.npz")
     curated_recs = set(pd.read_csv(DATA / "processed" / "pairs_curated.csv")["receptor"])
     V["mean"] = {k: v for k, v in mean_full.items() if k in curated_recs}
 
@@ -143,7 +143,7 @@ def build_variants() -> dict[str, dict]:
 
 def main():
     pairs = pd.read_csv(DATA / "processed" / "pairs_curated.csv")
-    gin   = D.load_npz_dict(DATA / "embeddings" / "molecules" / "gin_supervised_contextpred.npz")
+    gin   = D.load_npz_dict(DATA / "embeddings" / "molecules" / "gin_supervised_contextpred_all_m2or.npz")
     print(f"pairs={len(pairs)}  molecules={len(gin)}")
 
     V = build_variants()

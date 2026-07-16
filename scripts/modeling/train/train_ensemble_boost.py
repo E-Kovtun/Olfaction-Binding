@@ -43,7 +43,10 @@ results/ensemble_logs/<run_id>/:
 --max-parallel N runs repeats concurrently as separate OS processes (own CUDA
 context each); OOF folds inside a pair-level source are always run
 concurrently regardless (see orbind/attention_extractor.py), independent of
-this flag.
+this flag. With >1 GPU visible (or --gpus explicitly given), repeats are
+pinned round-robin one GPU per worker process via CUDA_VISIBLE_DEVICES --
+each worker keeps its GPU for every repeat it picks up. With <=1 GPU, no
+pinning happens and all workers share the default device as before.
 
 Examples
 --------
@@ -77,6 +80,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import multiprocessing
+import os
 import pathlib
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -133,6 +138,32 @@ def parse_source_arg(raw: str):
     return name, extractor
 
 
+def _detect_gpus(explicit):
+    """GPU ids to round-robin repeats across, or None (no pinning needed --
+    either the user gave none/one explicitly, or there's <=1 visible GPU)."""
+    if explicit is not None:
+        return explicit if len(explicit) > 1 else None
+    try:
+        import torch
+        n = torch.cuda.device_count()
+    except Exception:
+        n = 0
+    return list(range(n)) if n > 1 else None
+
+
+def _pin_worker_gpu(gpu_ids, counter, lock):
+    """ProcessPoolExecutor initializer: each worker process claims the next
+    GPU id round-robin and restricts itself to it via CUDA_VISIBLE_DEVICES,
+    set before any CUDA-touching code (torch/xgboost) runs in this process.
+    Workers are long-lived, so a worker keeps the same GPU across every
+    repeat it picks up -- no per-task reassignment needed."""
+    with lock:
+        idx = counter.value
+        counter.value += 1
+    gpu = gpu_ids[idx % len(gpu_ids)]
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu)
+
+
 class _Tee:
     """Writes to several streams at once -- lets a repeat's own log file
     capture its prints while they still show up live in the console."""
@@ -163,7 +194,9 @@ def _run_one_repeat(regime, pairs, extractors, combos, split, repeat, test_size,
         old_stdout = sys.stdout
         sys.stdout = _Tee(old_stdout, logf)
         try:
-            print(f"=== repeat {repeat} ===", flush=True)
+            gpu_note = os.environ.get("CUDA_VISIBLE_DEVICES")
+            tag = f" (pinned to GPU {gpu_note})" if gpu_note is not None else ""
+            print(f"=== repeat {repeat} ==={tag}", flush=True)
             if regime == "curated_full":
                 result = run_ensemble(pairs, extractors, combos, split_kind=split, seed=repeat,
                                        test_size=test_size, val_size=val_size,
@@ -201,6 +234,10 @@ def main() -> None:
                      help="run this many repeats concurrently, each in its own OS process "
                           "(separate CUDA context). Default 1 (sequential). "
                           "Independent of OOF parallelism, which is always on inside each repeat.")
+    ap.add_argument("--gpus", type=int, nargs="+", default=None,
+                     help="GPU ids to round-robin repeats across when --max-parallel > 1, "
+                          "e.g. --gpus 0 1. Default: auto-detect all visible GPUs; "
+                          "with 0 or 1 visible, no pinning (all workers share the default device).")
 
     g1 = ap.add_argument_group("curated_full")
     g1.add_argument("--pairs", default="data/processed/pairs_curated.csv")
@@ -275,9 +312,19 @@ def _run(args, run_dir) -> None:
                                          args.on_missing, args.full_full_mode, run_dir, save_checkpoints)
             collect(repeat, result)
     else:
-        print(f"\nrunning {len(repeats)} repeats, up to {args.max_parallel} concurrently "
-              f"(separate processes; each writes logs/repeat_{{R}}.log)...", flush=True)
-        with ProcessPoolExecutor(max_workers=args.max_parallel) as pool:
+        gpu_ids = _detect_gpus(args.gpus)
+        pool_kwargs = {"max_workers": args.max_parallel}
+        if gpu_ids:
+            print(f"\nrunning {len(repeats)} repeats, up to {args.max_parallel} concurrently "
+                  f"(separate processes; each writes logs/repeat_{{R}}.log; "
+                  f"pinned round-robin across GPUs {gpu_ids})...", flush=True)
+            manager = multiprocessing.Manager()
+            pool_kwargs["initializer"] = _pin_worker_gpu
+            pool_kwargs["initargs"] = (gpu_ids, manager.Value("i", 0), manager.Lock())
+        else:
+            print(f"\nrunning {len(repeats)} repeats, up to {args.max_parallel} concurrently "
+                  f"(separate processes; each writes logs/repeat_{{R}}.log)...", flush=True)
+        with ProcessPoolExecutor(**pool_kwargs) as pool:
             futures = {
                 pool.submit(_run_one_repeat, args.regime, pairs, extractors, args.combos, args.split, repeat,
                             args.test_size, args.val_size, args.weight_method, args.on_missing,

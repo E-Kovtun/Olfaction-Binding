@@ -83,6 +83,68 @@ def train_boost(Xtr, ytr, Xte, seed=42):
     return fit_boost(Xtr, ytr, seed=seed).predict_proba(Xte)[:, 1]
 
 
+def tune_boost(Xtr, ytr, Xva, yva, seed=42, n_trials=30):
+    """Per-combo XGBoost hyperparameter search (optuna, TPE sampler -- same
+    idea as ProSmith/LORAX's own hyperopt random search over a near-identical
+    space, just with a smarter sampler): each trial fits on train, scores
+    val AUPRC, the best trial's params get one final train-only refit (so
+    the returned classifier's val predictions stay honest for downstream
+    ensemble-weight fitting, same contract as the fixed-hyperparameter
+    `fit_boost`).
+
+    Returns `(classifier, study)` -- the caller decides what to do with the
+    optuna `study` (e.g. persist `study.trials_dataframe()`, the full
+    per-trial hyperparameters + val-AUPRC history, or just read
+    `study.best_value`/`study.best_params`)."""
+    import optuna
+    import torch
+    import xgboost as xgb
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    spw = float((ytr == 0).sum() / max((ytr == 1).sum(), 1))
+
+    def make_classifier(params, device):
+        weight_mult = params.pop("scale_pos_weight_mult")
+        return xgb.XGBClassifier(
+            **params, scale_pos_weight=spw * weight_mult,
+            eval_metric="aucpr", tree_method="hist", device=device,
+            n_jobs=-1, random_state=seed)
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    def objective(trial):
+        params = dict(
+            n_estimators=trial.suggest_int("n_estimators", 30, 1000),
+            max_depth=trial.suggest_int("max_depth", 3, 14),
+            learning_rate=trial.suggest_float("learning_rate", 0.01, 0.5, log=True),
+            reg_lambda=trial.suggest_float("reg_lambda", 0.0, 5.0),
+            reg_alpha=trial.suggest_float("reg_alpha", 0.0, 5.0),
+            min_child_weight=trial.suggest_float("min_child_weight", 0.1, 15.0),
+            max_delta_step=trial.suggest_float("max_delta_step", 0.0, 5.0),
+            subsample=trial.suggest_float("subsample", 0.5, 1.0),
+            colsample_bytree=trial.suggest_float("colsample_bytree", 0.5, 1.0),
+            scale_pos_weight_mult=trial.suggest_float("scale_pos_weight_mult", 0.5, 1.5),
+        )
+        try:
+            clf = make_classifier(dict(params), device)
+            clf.fit(Xtr, ytr)
+        except xgb.core.XGBoostError:
+            clf = make_classifier(dict(params), "cpu")
+            clf.fit(Xtr, ytr)
+        p_va = clf.predict_proba(Xva)[:, 1]
+        return D.metrics(yva, p_va)["AUPRC"]
+
+    study = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=seed))
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+
+    clf = make_classifier(dict(study.best_params), device)
+    try:
+        clf.fit(Xtr, ytr)
+    except xgb.core.XGBoostError:
+        clf = make_classifier(dict(study.best_params), "cpu")
+        clf.fit(Xtr, ytr)
+    return clf, study
+
+
 HEADS = {"mlp": train_mlp, "boost": train_boost}
 
 

@@ -42,7 +42,7 @@ import numpy as np
 import pandas as pd
 
 from . import dataset as D
-from .baselines import fit_boost
+from .baselines import fit_boost, tune_boost
 
 
 # --------------------------------------------------------------------------- extractors
@@ -227,9 +227,19 @@ def run_ensemble(pairs: pd.DataFrame, extractors: dict[str, object], combo_spec:
                   train_idx: np.ndarray | None = None, val_idx: np.ndarray | None = None,
                   test_idx: np.ndarray | None = None,
                   on_missing: str = "raise",
-                  checkpoint_dir: "pathlib.Path | str | None" = None) -> dict:
+                  checkpoint_dir: "pathlib.Path | str | None" = None,
+                  tune_boost_hp: bool = False, n_trials: int = 30) -> dict:
     """Fit one boosting head per combo (concatenating its extractors'
     features), fit ensemble weights on validation, evaluate on test.
+
+    `tune_boost_hp`: if True, each combo's boosting head is tuned independently
+    via `orbind.baselines.tune_boost` (optuna, `n_trials` per combo) instead of
+    the fixed-hyperparameter `fit_boost` -- mirrors ProSmith/LORAX's own
+    per-head hyperopt search (see `orbind/baselines.py::tune_boost` for the
+    exact space), just with optuna's TPE sampler instead of their random
+    search. Off by default -- fixed hyperparameters are far cheaper to
+    iterate with, and tuning multiplies runtime by roughly `n_trials` per
+    combo per repeat.
 
     `checkpoint_dir`, if given, gets one XGBoost booster per combo
     (`boost_{combo}.json`, via the sklearn wrapper's own `save_model`) plus
@@ -313,7 +323,15 @@ def run_ensemble(pairs: pd.DataFrame, extractors: dict[str, object], combo_spec:
         Xtr = np.concatenate([get(n)[0] for n in combo], axis=1)
         Xva = np.concatenate([get(n)[1] for n in combo], axis=1)
         Xte = np.concatenate([get(n)[2] for n in combo], axis=1)
-        clf = fit_boost(Xtr, y_tr, seed=seed)
+        if tune_boost_hp:
+            clf, study = tune_boost(Xtr, y_tr, Xva, y_va, seed=seed, n_trials=n_trials)
+            print(f"  tune[{'+'.join(combo):>20}]: {n_trials} trials, "
+                  f"best val AUPRC={study.best_value:.3f}, params={study.best_params}", flush=True)
+            if checkpoint_dir is not None:
+                study.trials_dataframe().to_csv(
+                    checkpoint_dir / f"optuna_{'+'.join(combo)}.csv", index=False)
+        else:
+            clf = fit_boost(Xtr, y_tr, seed=seed)
         if checkpoint_dir is not None:
             # save the underlying Booster directly -- this xgboost version's
             # sklearn-wrapper .save_model() needs `_estimator_type`, which

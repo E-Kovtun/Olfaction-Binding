@@ -83,7 +83,7 @@ def train_boost(Xtr, ytr, Xte, seed=42):
     return fit_boost(Xtr, ytr, seed=seed).predict_proba(Xte)[:, 1]
 
 
-def tune_boost(Xtr, ytr, Xva, yva, seed=42, n_trials=30):
+def tune_boost(Xtr, ytr, Xva, yva, seed=42, n_trials=30, storage=None, study_name=None):
     """Per-combo XGBoost hyperparameter search (optuna, TPE sampler -- same
     idea as ProSmith/LORAX's own hyperopt random search over a near-identical
     space, just with a smarter sampler): each trial fits on train, scores
@@ -91,6 +91,12 @@ def tune_boost(Xtr, ytr, Xva, yva, seed=42, n_trials=30):
     the returned classifier's val predictions stay honest for downstream
     ensemble-weight fitting, same contract as the fixed-hyperparameter
     `fit_boost`).
+
+    `storage`/`study_name`: if given (a SQLAlchemy storage URL, e.g.
+    "sqlite:///run_dir/optuna_studies.db"), the study is persisted there
+    instead of living only in-process -- lets `optuna-dashboard` show every
+    combo's/repeat's progress live while several repeats run concurrently in
+    separate processes, all writing to the same file.
 
     Returns `(classifier, study)` -- the caller decides what to do with the
     optuna `study` (e.g. persist `study.trials_dataframe()`, the full
@@ -133,7 +139,8 @@ def tune_boost(Xtr, ytr, Xva, yva, seed=42, n_trials=30):
         p_va = clf.predict_proba(Xva)[:, 1]
         return D.metrics(yva, p_va)["AUPRC"]
 
-    study = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=seed))
+    study = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=seed),
+                                 storage=storage, study_name=study_name, load_if_exists=True)
     study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
 
     clf = make_classifier(dict(study.best_params), device)

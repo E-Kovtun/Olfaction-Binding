@@ -218,7 +218,7 @@ class _Tee:
 
 def _run_one_repeat(regime, pairs, extractors, combos, split, repeat, test_size, val_size,
                      weight_method, on_missing, full_full_mode, run_dir, save_checkpoints,
-                     tune_boost_hp, n_trials):
+                     tune_boost_hp, n_trials, optuna_storage):
     """One repeat's full run_ensemble call -- top-level (not a closure) so it
     can be pickled and sent to a separate process by --max-parallel. Owns its
     own log file and checkpoint subdir regardless of which process runs it."""
@@ -240,14 +240,16 @@ def _run_one_repeat(regime, pairs, extractors, combos, split, repeat, test_size,
                                        test_size=test_size, val_size=val_size,
                                        weight_method=weight_method, on_missing=on_missing,
                                        checkpoint_dir=checkpoint_dir,
-                                       tune_boost_hp=tune_boost_hp, n_trials=n_trials)
+                                       tune_boost_hp=tune_boost_hp, n_trials=n_trials,
+                                       optuna_storage=optuna_storage, run_id=str(repeat))
             else:
                 train_idx, val_idx, test_idx = load_split(full_full_mode, repeat)
                 result = run_ensemble(pairs, extractors, combos,
                                        train_idx=train_idx, val_idx=val_idx, test_idx=test_idx,
                                        weight_method=weight_method, on_missing=on_missing,
                                        checkpoint_dir=checkpoint_dir,
-                                       tune_boost_hp=tune_boost_hp, n_trials=n_trials)
+                                       tune_boost_hp=tune_boost_hp, n_trials=n_trials,
+                                       optuna_storage=optuna_storage, run_id=str(repeat))
         finally:
             sys.stdout = old_stdout
     return repeat, result
@@ -340,6 +342,13 @@ def _run(args, run_dir) -> None:
 
     save_checkpoints = not args.skip_checkpoints
 
+    optuna_storage = None
+    if args.tune_boost:
+        db_path = (run_dir / "optuna_studies.db").as_posix()
+        optuna_storage = f"sqlite:///{db_path}"
+        print(f"\noptuna storage: {optuna_storage}")
+        print(f"  live dashboard: optuna-dashboard {optuna_storage!r}")
+
     def collect(repeat, result):
         for combo, m in result["combos"].items():
             rows.append({"repeat": repeat, "kind": "combo", "name": "+".join(combo), **m})
@@ -357,7 +366,7 @@ def _run(args, run_dir) -> None:
             _, result = _run_one_repeat(args.regime, pairs, extractors, args.combos, args.split, repeat,
                                          args.test_size, args.val_size, args.weight_method,
                                          args.on_missing, args.full_full_mode, run_dir, save_checkpoints,
-                                         args.tune_boost, args.n_trials)
+                                         args.tune_boost, args.n_trials, optuna_storage)
             collect(repeat, result)
     else:
         gpu_ids = _detect_gpus(args.gpus)
@@ -383,7 +392,7 @@ def _run(args, run_dir) -> None:
                 pool.submit(_run_one_repeat, args.regime, pairs, extractors, args.combos, args.split, repeat,
                             args.test_size, args.val_size, args.weight_method, args.on_missing,
                             args.full_full_mode, run_dir, save_checkpoints,
-                            args.tune_boost, args.n_trials): repeat
+                            args.tune_boost, args.n_trials, optuna_storage): repeat
                 for repeat in repeats
             }
             for f in as_completed(futures):

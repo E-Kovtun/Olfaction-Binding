@@ -228,7 +228,8 @@ def run_ensemble(pairs: pd.DataFrame, extractors: dict[str, object], combo_spec:
                   test_idx: np.ndarray | None = None,
                   on_missing: str = "raise",
                   checkpoint_dir: "pathlib.Path | str | None" = None,
-                  tune_boost_hp: bool = False, n_trials: int = 30) -> dict:
+                  tune_boost_hp: bool = False, n_trials: int = 30,
+                  optuna_storage: str | None = None, run_id: str | None = None) -> dict:
     """Fit one boosting head per combo (concatenating its extractors'
     features), fit ensemble weights on validation, evaluate on test.
 
@@ -240,6 +241,14 @@ def run_ensemble(pairs: pd.DataFrame, extractors: dict[str, object], combo_spec:
     search. Off by default -- fixed hyperparameters are far cheaper to
     iterate with, and tuning multiplies runtime by roughly `n_trials` per
     combo per repeat.
+
+    `optuna_storage`/`run_id`: only used when `tune_boost_hp` is set. Pass a
+    SQLAlchemy storage URL (e.g. "sqlite:///run_dir/optuna_studies.db") to
+    persist every combo's study there under a
+    `repeat{run_id}_combo{combo}` name (falls back to `seed` if `run_id` is
+    omitted) instead of keeping it in-process only -- lets `optuna-dashboard`
+    show live progress across every repeat/combo, even with several repeats
+    running concurrently in separate processes and writing to the same file.
 
     `checkpoint_dir`, if given, gets one XGBoost booster per combo
     (`boost_{combo}.json`, via the sklearn wrapper's own `save_model`) plus
@@ -324,7 +333,9 @@ def run_ensemble(pairs: pd.DataFrame, extractors: dict[str, object], combo_spec:
         Xva = np.concatenate([get(n)[1] for n in combo], axis=1)
         Xte = np.concatenate([get(n)[2] for n in combo], axis=1)
         if tune_boost_hp:
-            clf, study = tune_boost(Xtr, y_tr, Xva, y_va, seed=seed, n_trials=n_trials)
+            study_name = f"repeat{run_id if run_id is not None else seed}_combo{'+'.join(combo)}"
+            clf, study = tune_boost(Xtr, y_tr, Xva, y_va, seed=seed, n_trials=n_trials,
+                                     storage=optuna_storage, study_name=study_name)
             print(f"  tune[{'+'.join(combo):>20}]: {n_trials} trials, "
                   f"best val AUPRC={study.best_value:.3f}, params={study.best_params}", flush=True)
             if checkpoint_dir is not None:

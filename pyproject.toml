@@ -25,6 +25,7 @@ dependencies = [
     "umap-learn>=0.5",         # 3D projections for embedding-screening notebooks
     "plotly>=5.20",            # interactive 3D scatter plots in notebooks
     "optuna>=4.9.0",
+    "optuna-dashboard>=0.20.0",
 ]
 
 [project.optional-dependencies]

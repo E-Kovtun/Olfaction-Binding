@@ -350,12 +350,18 @@ def _run(args, run_dir) -> None:
             collect(repeat, result)
     else:
         gpu_ids = _detect_gpus(args.gpus)
-        pool_kwargs = {"max_workers": args.max_parallel}
+        # "spawn", not the platform default -- on Linux that default is "fork", and
+        # _detect_gpus above already touched torch.cuda in this (parent) process to
+        # count devices; forking a child that inherits an initialized CUDA context
+        # is unsupported and fails with "CUDA error: initialization error". Windows
+        # already defaults to spawn, which is why this only surfaces on Linux.
+        ctx = multiprocessing.get_context("spawn")
+        pool_kwargs = {"max_workers": args.max_parallel, "mp_context": ctx}
         if gpu_ids:
             print(f"\nrunning {len(repeats)} repeats, up to {args.max_parallel} concurrently "
                   f"(separate processes; each writes logs/repeat_{{R}}.log; "
                   f"pinned round-robin across GPUs {gpu_ids})...", flush=True)
-            manager = multiprocessing.Manager()
+            manager = ctx.Manager()
             pool_kwargs["initializer"] = _pin_worker_gpu
             pool_kwargs["initargs"] = (gpu_ids, manager.Value("i", 0), manager.Lock())
         else:

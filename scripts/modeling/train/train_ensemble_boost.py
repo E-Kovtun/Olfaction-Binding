@@ -7,14 +7,20 @@ mini-language refers to. Two families of source type:
   esm, gin              -- label-independent, entity-level lookups
                             ("name=type:path[:model_name[:pooling]]").
   attn_noisy_or, attn_lse -- supervised, pair-level "cls" sources (see
-                            orbind/attention_extractor.py). Each trains its
-                            own small torch model with honest out-of-fold
-                            train predictions (K-fold refits, run concurrently
-                            by default) and one whole-train fit for val/test.
-                            Bare "name=type" uses its baked-in embedding paths
-                            (LoRaX ESM-1b mean + our per-atom GIN); pass
-                            "name=type:protein_path:molecule_sites_path" to
-                            override them.
+                            orbind/attention_extractor.py). Each trains
+                            n_models (default 5) independently-seeded
+                            whole-train torch models -- always concurrent --
+                            and concatenates their pooled embeddings; every
+                            model embeds train/val/test alike (accepting
+                            mild train-row leakage, bounded by early
+                            stopping, same tradeoff ProSmith's own cls model
+                            makes). n_models=1 reduces to ProSmith's exact
+                            scheme. Bare "name=type" uses its baked-in
+                            embedding paths (LoRaX ESM-1b mean + our per-atom
+                            GIN) and n_models=5; pass
+                            "name=type:protein_path:molecule_sites_path:n_models"
+                            to override any of them (leave a field blank to
+                            keep its default, e.g. "cls=attn_lse:::1").
 
 Two regimes, two split "traditions" (see orbind/dataset.py vs orbind/regimes.py
 for why they aren't unified):
@@ -37,12 +43,12 @@ results/ensemble_logs/<run_id>/:
                             even when --max-parallel runs it in another process
   metrics.csv             -- one row per (repeat, combo) + (repeat, ensemble method)
   checkpoints/repeat_{R}/
-    boost_{combo}.json     -- one XGBoost booster per combo (unless --skip-checkpoints)
-    attn_{source}.pt       -- whole-train-fit torch state_dict, per pair-level source
+    boost_{combo}.json           -- one XGBoost booster per combo (unless --skip-checkpoints)
+    attn_{source}_model{k}.pt     -- one torch state_dict per model, per pair-level source
 
 --max-parallel N runs repeats concurrently as separate OS processes (own CUDA
-context each); OOF folds inside a pair-level source are always run
-concurrently regardless (see orbind/attention_extractor.py), independent of
+context each); a pair-level source's n_models are always trained concurrently
+regardless (see orbind/attention_extractor.py), independent of
 this flag. With >1 GPU visible (or --gpus explicitly given), repeats are
 pinned round-robin one GPU per worker process via CUDA_VISIBLE_DEVICES --
 each worker keeps its GPU for every repeat it picks up. With <=1 GPU, no
@@ -75,6 +81,17 @@ all three together -- on full_full/transductive, all 5 folds, 3 at a time::
         --source prot=esm:data/embeddings/proteins/esm1b_650m_mean.npz:esm1b_t33_650M_UR50S \\
         --source mol=gin:data/embeddings/molecules/gin_supervised_contextpred_all_m2or.npz \\
         --combos "1 2 3 12 13 23 123" --on-missing drop
+
+Same, but cls as a single ProSmith-style model (n_models=1) instead of the
+default 5-model bagging ensemble -- note the blank protein/molecule-path
+fields to keep their defaults::
+
+    uv run python scripts/modeling/train/train_ensemble_boost.py \\
+        --regime full_full --full-full-mode transductive --max-parallel 3 \\
+        --source cls=attn_noisy_or:::1 \\
+        --source prot=esm:data/embeddings/proteins/esm1b_650m_mean.npz:esm1b_t33_650M_UR50S \\
+        --source mol=gin:data/embeddings/molecules/gin_supervised_contextpred_all_m2or.npz \\
+        --combos "1 2 3 12 13 23 123" --on-missing drop
 """
 from __future__ import annotations
 
@@ -97,18 +114,26 @@ sys.path.insert(0, str(_root))
 from orbind.ensemble import EsmExtractor, GinExtractor, run_ensemble
 from orbind.regimes import full_full_pairs, load_split
 from orbind.attention_extractor import MilNoisyOrExtractor, MilLseExtractor
+from orbind.gnn_extractor import GnnSignedExtractor
 
 # entity-level: "name=type:path[:model_name[:pooling]]" -- a static npz lookup.
 TYPE_FACTORIES = {"esm": EsmExtractor, "gin": GinExtractor}
 # pair-level, supervised: "name=type" (bakes in its own embedding paths/hparams;
 # optionally "name=type:protein_path:molecule_sites_path" to override them).
 ATTENTION_FACTORIES = {"attn_noisy_or": MilNoisyOrExtractor, "attn_lse": MilLseExtractor}
+# pair-level, supervised, graph-based: "name=type" (bakes in mean-pooled ESM/GIN
+# paths; "name=type:protein_path:molecule_path[:n_models]" to override).
+GNN_FACTORIES = {"gnn_signed": GnnSignedExtractor}
 DEFAULT_REPEATS = {"transductive": [1, 2, 3, 4, 5], "inductive_molecule": [42, 43, 44, 45, 46]}
 
 
 def parse_source_arg(raw: str):
     """"name=type:path[:model_name[:pooling]]" (entity-level) or
-    "name=type[:protein_path:molecule_sites_path]" (attention, pair-level) -> (name, extractor)."""
+    "name=type[:protein_path:molecule_sites_path[:n_models]]" (attention,
+    pair-level) -> (name, extractor). n_models=1 is ProSmith's own scheme
+    (one whole-train model embeds train/val/test); n_models>1 (default 5)
+    bags that many independently-seeded models -- see attention_extractor's
+    module docstring for why this replaced true OOF fold-holdout retraining."""
     if "=" not in raw:
         raise argparse.ArgumentTypeError(f"--source {raw!r} must look like name=type[:...]")
     name, rest = raw.split("=", 1)
@@ -121,11 +146,23 @@ def parse_source_arg(raw: str):
             kwargs["protein_path"] = parts[1]
         if len(parts) > 2 and parts[2]:
             kwargs["molecule_sites_path"] = parts[2]
+        if len(parts) > 3 and parts[3]:
+            kwargs["n_models"] = int(parts[3])
         return name, ATTENTION_FACTORIES[type_](name=name, **kwargs)
+
+    if type_ in GNN_FACTORIES:
+        kwargs = {}
+        if len(parts) > 1 and parts[1]:
+            kwargs["protein_path"] = parts[1]
+        if len(parts) > 2 and parts[2]:
+            kwargs["molecule_path"] = parts[2]
+        if len(parts) > 3 and parts[3]:
+            kwargs["n_models"] = int(parts[3])
+        return name, GNN_FACTORIES[type_](name=name, **kwargs)
 
     if type_ not in TYPE_FACTORIES:
         raise argparse.ArgumentTypeError(
-            f"unknown source type {type_!r}, have {list(TYPE_FACTORIES) + list(ATTENTION_FACTORIES)}")
+            f"unknown source type {type_!r}, have {list(TYPE_FACTORIES) + list(ATTENTION_FACTORIES) + list(GNN_FACTORIES)}")
     if len(parts) < 2:
         raise argparse.ArgumentTypeError(f"--source {raw!r} must look like name=type:path")
     path = parts[1]

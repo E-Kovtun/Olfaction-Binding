@@ -346,6 +346,13 @@ def _run(args, run_dir) -> None:
     if args.tune_boost:
         db_path = (run_dir / "optuna_studies.db").as_posix()
         optuna_storage = f"sqlite:///{db_path}"
+        # Create the schema (tables) right now, before any repeat starts --
+        # otherwise it's only lazily created on the first real tune_boost
+        # call (which may be minutes away, behind the cls model's own
+        # training), and `optuna-dashboard` opened before that point fails
+        # with "no such table: version_info" on the still-schemaless file.
+        import optuna as _optuna
+        _optuna.create_study(storage=optuna_storage, study_name="_init", load_if_exists=True)
         print(f"\noptuna storage: {optuna_storage}")
         print(f"  live dashboard: optuna-dashboard {optuna_storage!r}")
 

@@ -327,16 +327,17 @@ def run_ensemble(pairs: pd.DataFrame, extractors: dict[str, object], combo_spec:
                                                            checkpoint_dir=checkpoint_dir)
         return cache[name]
 
+    repeat_tag = run_id if run_id is not None else seed
     combo_metrics, val_preds, test_preds = {}, {}, {}
     for combo in combos:
         Xtr = np.concatenate([get(n)[0] for n in combo], axis=1)
         Xva = np.concatenate([get(n)[1] for n in combo], axis=1)
         Xte = np.concatenate([get(n)[2] for n in combo], axis=1)
         if tune_boost_hp:
-            study_name = f"repeat{run_id if run_id is not None else seed}_combo{'+'.join(combo)}"
+            study_name = f"repeat{repeat_tag}_combo{'+'.join(combo)}"
             clf, study = tune_boost(Xtr, y_tr, Xva, y_va, seed=seed, n_trials=n_trials,
                                      storage=optuna_storage, study_name=study_name)
-            print(f"  tune[{'+'.join(combo):>20}]: {n_trials} trials, "
+            print(f"  [repeat {repeat_tag}] tune[{'+'.join(combo):>20}]: {n_trials} trials, "
                   f"best val AUPRC={study.best_value:.3f}, params={study.best_params}", flush=True)
             if checkpoint_dir is not None:
                 study.trials_dataframe().to_csv(
@@ -352,7 +353,7 @@ def run_ensemble(pairs: pd.DataFrame, extractors: dict[str, object], combo_spec:
         p_te = clf.predict_proba(Xte)[:, 1]
         val_preds[combo], test_preds[combo] = p_va, p_te
         combo_metrics[combo] = D.metrics(y_te, p_te)
-        print(f"  combo {'+'.join(combo):>20s}: dim={Xtr.shape[1]:4d} "
+        print(f"  [repeat {repeat_tag}] combo {'+'.join(combo):>20s}: dim={Xtr.shape[1]:4d} "
               + " ".join(f"{k}={v:.3f}" for k, v in combo_metrics[combo].items()), flush=True)
 
     combiners = fit_ensemble_weights(val_preds, y_va, method=weight_method)
@@ -361,7 +362,8 @@ def run_ensemble(pairs: pd.DataFrame, extractors: dict[str, object], combo_spec:
         p_final = combiner.predict(test_preds)
         ensemble_metrics[m] = D.metrics(y_te, p_final)
         weights[m] = combiner.weights
-        print(f"  ensemble[{m}]: " + " ".join(f"{k}={v:.3f}" for k, v in ensemble_metrics[m].items()), flush=True)
+        print(f"  [repeat {repeat_tag}] ensemble[{m}]: "
+              + " ".join(f"{k}={v:.3f}" for k, v in ensemble_metrics[m].items()), flush=True)
 
     return {
         "combos": combo_metrics,

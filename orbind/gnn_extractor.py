@@ -138,16 +138,29 @@ class _SignedSage(nn.Module):
 
 def _train_one(build_model, x_mol, x_prot, pos_eidx, neg_eidx,
                 mol_idx_train, prot_idx_train, y_train,
-                mol_idx_val, prot_idx_val, y_val, hp, device):
+                mol_idx_val, prot_idx_val, y_val, hp, device, checkpoint_path=None):
     """Full-batch training loop (the whole graph is small enough to fit in
     one forward/backward per epoch): BCE loss on train-row decodes, early
     stopping on real-val AUPRC, ReduceLROnPlateau (this architecture is
     known to collapse under a flat high LR -- see orbind/hetero.py history
-    and notes/ -- lr=1e-3 + grad-clip + plateau scheduling is the fix)."""
+    and notes/ -- lr=1e-3 + grad-clip + plateau scheduling is the fix).
+
+    If `checkpoint_path` already exists on disk, training is skipped
+    entirely: the state_dict is loaded and only the final encode pass runs
+    -- lets a resumed run reuse a previously-trained model instance instead
+    of retraining it from scratch."""
     model = build_model().to(device)
     x_mol_d, x_prot_d = x_mol.to(device), x_prot.to(device)
     pos_eidx_d = {k: v.to(device) for k, v in pos_eidx.items()}
     neg_eidx_d = {k: v.to(device) for k, v in neg_eidx.items()}
+
+    if checkpoint_path is not None and checkpoint_path.exists():
+        model.load_state_dict(torch.load(checkpoint_path, map_location=device))
+        model.eval()
+        with torch.no_grad():
+            z = model.encode(x_mol_d, x_prot_d, pos_eidx_d, neg_eidx_d)
+            return z[MOL].cpu().numpy(), z[PROT].cpu().numpy(), model
+
     mi_tr = torch.as_tensor(mol_idx_train, dtype=torch.long, device=device)
     pi_tr = torch.as_tensor(prot_idx_train, dtype=torch.long, device=device)
     y_tr = torch.as_tensor(y_train, dtype=torch.float32, device=device)
@@ -222,9 +235,12 @@ def _run_models(ext, pairs: pd.DataFrame, train_idx, val_idx, test_idx, seed: in
 
     def model_job(m):
         hp = ext._hp(seed + ext.seed_offset * m)
+        checkpoint_path = (pathlib.Path(checkpoint_dir) / f"gnn_{ext.name}_model{m}.pt"
+                            if checkpoint_dir is not None else None)
         z_mol, z_prot, model = _train_one(ext._build_model, x_mol, x_prot, pos_eidx, neg_eidx,
                                            mol_idx_train, prot_idx_train, y_train,
-                                           mol_idx_val, prot_idx_val, y_val, hp, device)
+                                           mol_idx_val, prot_idx_val, y_val, hp, device,
+                                           checkpoint_path=checkpoint_path)
         return m, z_mol, z_prot, model
 
     with ThreadPoolExecutor(max_workers=ext.n_models) as pool:
@@ -234,7 +250,8 @@ def _run_models(ext, pairs: pd.DataFrame, train_idx, val_idx, test_idx, seed: in
     if checkpoint_dir is not None:
         for m, _, _, model in results:
             path = pathlib.Path(checkpoint_dir) / f"gnn_{ext.name}_model{m}.pt"
-            torch.save(model.state_dict(), path)
+            if not path.exists():
+                torch.save(model.state_dict(), path)
 
     def features_for(idx):
         sub = pairs.iloc[idx]

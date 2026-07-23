@@ -100,6 +100,7 @@ import json
 import multiprocessing
 import os
 import pathlib
+import shutil
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
@@ -356,7 +357,23 @@ def _run(args, run_dir) -> None:
         print(f"\noptuna storage: {optuna_storage}")
         print(f"  live dashboard: optuna-dashboard {optuna_storage!r}")
 
+    # metrics.csv is written incrementally, one repeat at a time, so a run
+    # killed partway through (e.g. server preemption) doesn't lose already-
+    # finished repeats -- rerunning the same command later only has to redo
+    # (cheaply, thanks to checkpoint/optuna reuse -- see attention_extractor's
+    # and gnn_extractor's checkpoint_path handling and baselines.tune_boost's
+    # trial-count resume) whatever this repeat's combos hadn't finished yet.
+    # A repeat's rows fully replace any earlier rows for that same repeat
+    # (this run's --combos is authoritative for what "done" means now); any
+    # existing metrics.csv is preserved first as metrics.csv.bak.
+    metrics_path = run_dir / "metrics.csv"
+    all_rows = []
+    if metrics_path.exists():
+        shutil.copy(metrics_path, run_dir / "metrics.csv.bak")
+        all_rows = pd.read_csv(metrics_path).to_dict("records")
+
     def collect(repeat, result):
+        rows = []
         for combo, m in result["combos"].items():
             rows.append({"repeat": repeat, "kind": "combo", "name": "+".join(combo), **m})
         for method, m in result["ensemble"].items():
@@ -365,8 +382,10 @@ def _run(args, run_dir) -> None:
                 "repeat": repeat, "kind": "ensemble", "name": f"ensemble[{method}]", **m,
                 "weights": json.dumps({"+".join(c): round(v, 4) for c, v in w.items()}),
             })
+        all_rows[:] = [r for r in all_rows if r["repeat"] != repeat] + rows
+        pd.DataFrame(all_rows).to_csv(metrics_path, index=False)
+        print(f"  wrote -> {metrics_path} ({len(all_rows)} rows so far)", flush=True)
 
-    rows = []
     if args.max_parallel <= 1:
         for repeat in repeats:
             print(f"\n--- repeat {repeat} (see logs/repeat_{repeat}.log) ---", flush=True)
@@ -408,9 +427,8 @@ def _run(args, run_dir) -> None:
                 print(f"--- repeat {repeat} done (see logs/repeat_{repeat}.log) ---", flush=True)
                 collect(repeat, result)
 
-    df = pd.DataFrame(rows)
-    df.to_csv(run_dir / "metrics.csv", index=False)
-    print(f"\nwrote -> {run_dir / 'metrics.csv'} ({len(df)} rows)")
+    df = pd.DataFrame(all_rows)
+    print(f"\nfinal -> {metrics_path} ({len(df)} rows)")
     print(df.groupby(["kind", "name"])[["AUROC", "AUPRC", "MCC", "F1"]].mean().round(3))
     if save_checkpoints:
         print(f"checkpoints -> {run_dir / 'checkpoints'}/repeat_*/")

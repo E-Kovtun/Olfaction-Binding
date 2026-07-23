@@ -98,6 +98,12 @@ def tune_boost(Xtr, ytr, Xva, yva, seed=42, n_trials=30, storage=None, study_nam
     combo's/repeat's progress live while several repeats run concurrently in
     separate processes, all writing to the same file.
 
+    Resumable: if `storage` already holds a study named `study_name` with
+    `n_done` completed trials, only `max(0, n_trials - n_done)` more trials
+    run -- so re-running with the same run folder (same sqlite file) and
+    the same or a higher `n_trials` picks up mid-tuning instead of starting
+    over or padding trials on top of an already-finished budget.
+
     Returns `(classifier, study)` -- the caller decides what to do with the
     optuna `study` (e.g. persist `study.trials_dataframe()`, the full
     per-trial hyperparameters + val-AUPRC history, or just read
@@ -141,7 +147,10 @@ def tune_boost(Xtr, ytr, Xva, yva, seed=42, n_trials=30, storage=None, study_nam
 
     study = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=seed),
                                  storage=storage, study_name=study_name, load_if_exists=True)
-    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+    n_done = sum(1 for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE)
+    remaining = max(0, n_trials - n_done)
+    if remaining > 0:
+        study.optimize(objective, n_trials=remaining, show_progress_bar=False)
 
     clf = make_classifier(dict(study.best_params), device)
     try:

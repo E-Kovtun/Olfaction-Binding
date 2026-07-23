@@ -139,15 +139,24 @@ def _embed(model, loader, device):
     return np.concatenate(es, axis=0)
 
 
-def _train_and_predict(build_model, train_df, val_df, test_df, proteins, sites, hp, device):
+def _train_and_predict(build_model, train_df, val_df, test_df, proteins, sites, hp, device, checkpoint_path=None):
     """Generic epoch loop (BCE loss, AdamW, early stopping on val AUPRC).
     `build_model()` supplies the extractor-specific nn.Module -- this
-    function itself has no opinion on architecture."""
-    train_loader = _make_loader(train_df, proteins, sites, hp["batch_size"], hp["pos_fraction"], hp["seed"], train=True)
+    function itself has no opinion on architecture.
+
+    If `checkpoint_path` already exists on disk, training is skipped
+    entirely: the state_dict is loaded and only the (cheap) embed passes
+    run -- lets a resumed run reuse a previously-trained model instance
+    instead of retraining it from scratch."""
     val_loader = _make_loader(val_df, proteins, sites, hp["batch_size"], None, hp["seed"], train=False)
     test_loader = _make_loader(test_df, proteins, sites, hp["batch_size"], None, hp["seed"], train=False)
 
     model = build_model().to(device)
+    if checkpoint_path is not None and checkpoint_path.exists():
+        model.load_state_dict(torch.load(checkpoint_path, map_location=device))
+        return _embed(model, val_loader, device), _embed(model, test_loader, device), model
+
+    train_loader = _make_loader(train_df, proteins, sites, hp["batch_size"], hp["pos_fraction"], hp["seed"], train=True)
     y_train = train_df["label"].to_numpy(dtype=np.float32)
     pos = float(y_train.sum())
     pos_weight = torch.tensor([(len(y_train) - pos) / max(pos, 1.0)], device=device)
@@ -210,8 +219,11 @@ def _run_models(ext, pairs: pd.DataFrame, train_idx, val_idx, test_idx, seed: in
 
     def model_job(m):
         hp = ext._hp(seed + ext.seed_offset * m)
+        checkpoint_path = (pathlib.Path(checkpoint_dir) / f"attn_{ext.name}_model{m}.pt"
+                            if checkpoint_dir is not None else None)
         e_val, e_test, model = _train_and_predict(ext._build_model, train_df, val_df, test_df,
-                                                    ext._proteins, ext._sites, hp, device)
+                                                    ext._proteins, ext._sites, hp, device,
+                                                    checkpoint_path=checkpoint_path)
         train_loader = _make_loader(train_df, ext._proteins, ext._sites, hp["batch_size"], None, hp["seed"], train=False)
         e_train = _embed(model, train_loader, device)
         return m, e_train, e_val, e_test, model
@@ -223,7 +235,8 @@ def _run_models(ext, pairs: pd.DataFrame, train_idx, val_idx, test_idx, seed: in
     if checkpoint_dir is not None:
         for m, _, _, _, model in results:
             checkpoint_path = pathlib.Path(checkpoint_dir) / f"attn_{ext.name}_model{m}.pt"
-            torch.save(model.state_dict(), checkpoint_path)
+            if not checkpoint_path.exists():
+                torch.save(model.state_dict(), checkpoint_path)
 
     p_train = np.concatenate([r[1] for r in results], axis=1)
     p_val = np.concatenate([r[2] for r in results], axis=1)

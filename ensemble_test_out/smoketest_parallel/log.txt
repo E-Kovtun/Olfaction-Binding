@@ -1,0 +1,2 @@
+source 'prot': type=EntityExtractor model=esm2_t33_650M_UR50D pooling=mean dim_out=16 path=tmp_test_prot.npz
+source 'mol': type=EntityExtractor model=gin_supervised_contextpred pooling=mean dim_out=8 path=tmp_test_mol.npz

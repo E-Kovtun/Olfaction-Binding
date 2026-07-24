@@ -1,0 +1,29 @@
+{
+  "regime": "curated_full",
+  "sources": [
+    "prot=esm:tmp_test_prot.npz",
+    "mol=gin:tmp_test_mol.npz"
+  ],
+  "combos": "1 2 12",
+  "weight_method": "both",
+  "on_missing": "raise",
+  "tune_boost": false,
+  "n_trials": 30,
+  "out_dir": "ensemble_test_out",
+  "run_name": "smoketest_parallel",
+  "skip_checkpoints": true,
+  "max_parallel": 2,
+  "gpus": null,
+  "pairs": "tmp_test_pairs.csv",
+  "split": "stratified",
+  "seeds": [
+    1,
+    2,
+    3,
+    4
+  ],
+  "test_size": 0.2,
+  "val_size": 0.2,
+  "full_full_mode": "transductive",
+  "repeats": null
+}

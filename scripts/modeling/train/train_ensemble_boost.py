@@ -102,7 +102,6 @@ import os
 import pathlib
 import shutil
 import sys
-from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
 
 import pandas as pd
@@ -189,19 +188,6 @@ def _detect_gpus(explicit):
     return list(range(n)) if n > 1 else None
 
 
-def _pin_worker_gpu(gpu_ids, counter, lock):
-    """ProcessPoolExecutor initializer: each worker process claims the next
-    GPU id round-robin and restricts itself to it via CUDA_VISIBLE_DEVICES,
-    set before any CUDA-touching code (torch/xgboost) runs in this process.
-    Workers are long-lived, so a worker keeps the same GPU across every
-    repeat it picks up -- no per-task reassignment needed."""
-    with lock:
-        idx = counter.value
-        counter.value += 1
-    gpu = gpu_ids[idx % len(gpu_ids)]
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu)
-
-
 class _Tee:
     """Writes to several streams at once -- lets a repeat's own log file
     capture its prints while they still show up live in the console."""
@@ -254,6 +240,14 @@ def _run_one_repeat(regime, pairs, extractors, combos, split, repeat, test_size,
         finally:
             sys.stdout = old_stdout
     return repeat, result
+
+
+def _run_one_repeat_to_queue(q, *call_args):
+    """Wraps _run_one_repeat for a plain multiprocessing.Process worker (see
+    the GPU-pinning note in _run() for why this replaced ProcessPoolExecutor's
+    initializer-based pinning): puts (repeat, result) on `q` instead of
+    returning it, since a bare Process has no return-value channel."""
+    q.put(_run_one_repeat(*call_args))
 
 
 def main() -> None:
@@ -402,30 +396,49 @@ def _run(args, run_dir) -> None:
         # is unsupported and fails with "CUDA error: initialization error". Windows
         # already defaults to spawn, which is why this only surfaces on Linux.
         ctx = multiprocessing.get_context("spawn")
-        pool_kwargs = {"max_workers": args.max_parallel, "mp_context": ctx}
+
+        # Deliberately NOT ProcessPoolExecutor(initializer=...): that initializer
+        # only runs *after* the child has already imported this module to be able
+        # to unpickle the initializer/task callables in the first place, and that
+        # import chain (torch_geometric -> torch_scatter/torch_sparse) can touch
+        # CUDA and bind the process to the default device before the initializer
+        # ever gets a chance to restrict CUDA_VISIBLE_DEVICES -- confirmed on the
+        # real server: the pinning log line printed the right GPU per repeat, but
+        # nvidia-smi showed every worker on GPU0 regardless. Setting the env var
+        # in the *parent*, immediately before each ctx.Process(...).start(), bakes
+        # it into that child's environment before its interpreter (and therefore
+        # any import) even begins, which does work.
         if gpu_ids:
             print(f"\nrunning {len(repeats)} repeats, up to {args.max_parallel} concurrently "
                   f"(separate processes; each writes logs/repeat_{{R}}.log; "
-                  f"pinned round-robin across GPUs {gpu_ids})...", flush=True)
-            manager = ctx.Manager()
-            pool_kwargs["initializer"] = _pin_worker_gpu
-            pool_kwargs["initargs"] = (gpu_ids, manager.Value("i", 0), manager.Lock())
+                  f"pinned round-robin across GPUs {gpu_ids} via CUDA_VISIBLE_DEVICES set "
+                  f"before each process starts)...", flush=True)
         else:
             print(f"\nrunning {len(repeats)} repeats, up to {args.max_parallel} concurrently "
                   f"(separate processes; each writes logs/repeat_{{R}}.log)...", flush=True)
-        with ProcessPoolExecutor(**pool_kwargs) as pool:
-            futures = {
-                pool.submit(_run_one_repeat, args.regime, pairs, extractors, args.combos, args.split, repeat,
-                            args.test_size, args.val_size, args.weight_method, args.on_missing,
-                            args.full_full_mode, run_dir, save_checkpoints,
-                            args.tune_boost, args.n_trials, optuna_storage): repeat
-                for repeat in repeats
-            }
-            for f in as_completed(futures):
-                repeat = futures[f]
-                _, result = f.result()
-                print(f"--- repeat {repeat} done (see logs/repeat_{repeat}.log) ---", flush=True)
-                collect(repeat, result)
+
+        for start in range(0, len(repeats), args.max_parallel):
+            chunk = list(enumerate(repeats))[start:start + args.max_parallel]
+            procs = []
+            for i, repeat in chunk:
+                gpu = gpu_ids[i % len(gpu_ids)] if gpu_ids else None
+                if gpu is not None:
+                    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu)
+                q = ctx.Queue()
+                p = ctx.Process(target=_run_one_repeat_to_queue, args=(q, args.regime, pairs, extractors,
+                                                                        args.combos, args.split, repeat,
+                                                                        args.test_size, args.val_size,
+                                                                        args.weight_method, args.on_missing,
+                                                                        args.full_full_mode, run_dir,
+                                                                        save_checkpoints, args.tune_boost,
+                                                                        args.n_trials, optuna_storage))
+                p.start()
+                procs.append((repeat, p, q))
+            for repeat, p, q in procs:
+                r_repeat, result = q.get()
+                p.join()
+                print(f"--- repeat {r_repeat} done (see logs/repeat_{r_repeat}.log) ---", flush=True)
+                collect(r_repeat, result)
 
     df = pd.DataFrame(all_rows)
     print(f"\nfinal -> {metrics_path} ({len(df)} rows)")

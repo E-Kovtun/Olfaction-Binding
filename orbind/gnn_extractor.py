@@ -21,15 +21,23 @@ Leakage handling: uses the same n_models bagging pattern as
 attention_extractor.py, not this project's own GNN pipeline's
 --disjoint-probe-train split. Every one of `n_models` independently-seeded
 whole-graph encoders sees ALL of train_idx's pairs as message-passing edges
-(accepting mild train-row leakage, bounded by early stopping on real val --
-the encoder "knows" a training edge exists, the same tradeoff ProSmith's own
-cls model and our attention cls sources already make), then embeds every
-node in the graph through itself; the N models' [molecule_embedding ||
-protein_embedding] vectors are concatenated. This sidesteps the
-basis-alignment problem a true fold-holdout OOF scheme would have (see
-attention_extractor.py's module docstring for the full argument): every
-model embeds every split, so there's no missing/misaligned block to
-reconcile.
+(accepting mild train-row leakage -- the encoder "knows" a training edge
+exists, the same tradeoff ProSmith's own cls model and our attention cls
+sources already make), then embeds every node in the graph through itself;
+the N models' [molecule_embedding || protein_embedding] vectors are
+concatenated. This sidesteps the basis-alignment problem a true
+fold-holdout OOF scheme would have (see attention_extractor.py's module
+docstring for the full argument): every model embeds every split, so
+there's no missing/misaligned block to reconcile.
+
+Training protocol matches the actual v5 graph-architecture-screen runs
+(scripts/modeling/train/run_graph_full_full_v5.ps1: lr=3e-3, epochs=900,
+`--probe-checkpoint last`, no `--lr-scheduler`) rather than this project's
+earlier anti-collapse fix (lr=1e-3 + grad-clip + ReduceLROnPlateau +
+best-val checkpoint selection, see notes/ and orbind/hetero.py history) --
+fixed epoch count, no early stopping, no LR scheduler, last epoch's weights
+are always what gets kept. Grad-clip (1.0) is kept from the anti-collapse
+fix since v5's own command also passes `--grad-clip 1.0`.
 """
 from __future__ import annotations
 
@@ -104,10 +112,17 @@ def _edge_index_dict(pos, neg):
 class _SignedSage(nn.Module):
     """Two-layer heterogeneous GraphSAGE. Positive and negative edges are
     message-passed through separate SAGEConv stacks per layer, then
-    subtracted (ReLU(pos - neg) after layer 1, pos - neg after layer 2) --
-    sign is encoded structurally by which stack an edge flows through, not
-    by a learned sign scalar. A 3-layer MLP decodes a (molecule, protein)
-    node-embedding pair to one binding logit."""
+    subtracted (LeakyReLU(pos - neg) after layer 1, pos - neg after layer 2)
+    -- sign is encoded structurally by which stack an edge flows through,
+    not by a learned sign scalar. LeakyReLU (not plain ReLU) everywhere in
+    this module: a unit whose pre-activation goes negative under plain ReLU
+    gets zero gradient and can never recover, which is what plain ReLU
+    contributed to in the collapse this architecture is known for (see
+    notes/ and orbind/hetero.py history, [[gnn-collapse-fix]]) -- a small
+    negative-side slope keeps every unit's gradient alive. A 3-layer MLP
+    decodes a (molecule, protein) node-embedding pair to one binding logit."""
+
+    LEAK = 0.1
 
     def __init__(self, mol_dim: int, prot_dim: int, hidden: int, dropout: float):
         super().__init__()
@@ -118,16 +133,17 @@ class _SignedSage(nn.Module):
         self.conv2 = HeteroConv({ETYPE: SAGEConv((-1, -1), hidden), RTYPE: SAGEConv((-1, -1), hidden)}, aggr="sum")
         self.conv2_neg = HeteroConv({ETYPE_NEG: SAGEConv((-1, -1), hidden), RTYPE_NEG: SAGEConv((-1, -1), hidden)}, aggr="sum")
         self.dec = nn.Sequential(
-            nn.Linear(2 * hidden, hidden), nn.ReLU(), nn.Dropout(dropout),
-            nn.Linear(hidden, hidden // 2), nn.ReLU(), nn.Dropout(dropout),
+            nn.Linear(2 * hidden, hidden), nn.LeakyReLU(self.LEAK), nn.Dropout(dropout),
+            nn.Linear(hidden, hidden // 2), nn.LeakyReLU(self.LEAK), nn.Dropout(dropout),
             nn.Linear(hidden // 2, 1),
         )
 
     def encode(self, x_mol, x_prot, pos_eidx, neg_eidx):
-        x = {MOL: F.relu(self.proj_mol(x_mol)), PROT: F.relu(self.proj_prot(x_prot))}
+        x = {MOL: F.leaky_relu(self.proj_mol(x_mol), self.LEAK),
+             PROT: F.leaky_relu(self.proj_prot(x_prot), self.LEAK)}
         x_p = self.conv1(x, pos_eidx)
         x_n = self.conv1_neg(x, neg_eidx)
-        x = {k: F.relu(x_p[k] - x_n.get(k, torch.zeros_like(x_p[k]))) for k in x_p}
+        x = {k: F.leaky_relu(x_p[k] - x_n.get(k, torch.zeros_like(x_p[k])), self.LEAK) for k in x_p}
         x_p = self.conv2(x, pos_eidx)
         x_n = self.conv2_neg(x, neg_eidx)
         return {k: x_p[k] - x_n.get(k, torch.zeros_like(x_p[k])) for k in x_p}
@@ -137,13 +153,15 @@ class _SignedSage(nn.Module):
 
 
 def _train_one(build_model, x_mol, x_prot, pos_eidx, neg_eidx,
-                mol_idx_train, prot_idx_train, y_train,
-                mol_idx_val, prot_idx_val, y_val, hp, device, checkpoint_path=None):
+                mol_idx_train, prot_idx_train, y_train, hp, device, checkpoint_path=None):
     """Full-batch training loop (the whole graph is small enough to fit in
-    one forward/backward per epoch): BCE loss on train-row decodes, early
-    stopping on real-val AUPRC, ReduceLROnPlateau (this architecture is
-    known to collapse under a flat high LR -- see orbind/hetero.py history
-    and notes/ -- lr=1e-3 + grad-clip + plateau scheduling is the fix).
+    one forward/backward per epoch): BCE loss on train-row decodes, fixed
+    epoch count, no early stopping, no LR scheduler -- matches the actual v5
+    graph-screen protocol (scripts/modeling/train/run_graph_full_full_v5.ps1:
+    lr=3e-3, epochs=900, `--probe-checkpoint last`, no `--lr-scheduler` flag),
+    not the earlier anti-collapse fix (lr=1e-3 + ReduceLROnPlateau + best-val
+    checkpoint) this module used before -- the last epoch's weights are
+    always what gets kept, val is not consulted during training at all.
 
     If `checkpoint_path` already exists on disk, training is skipped
     entirely: the state_dict is loaded and only the final encode pass runs
@@ -164,16 +182,12 @@ def _train_one(build_model, x_mol, x_prot, pos_eidx, neg_eidx,
     mi_tr = torch.as_tensor(mol_idx_train, dtype=torch.long, device=device)
     pi_tr = torch.as_tensor(prot_idx_train, dtype=torch.long, device=device)
     y_tr = torch.as_tensor(y_train, dtype=torch.float32, device=device)
-    mi_va = torch.as_tensor(mol_idx_val, dtype=torch.long, device=device)
-    pi_va = torch.as_tensor(prot_idx_val, dtype=torch.long, device=device)
 
     pos = float(y_train.sum())
     pos_weight = torch.tensor([(len(y_train) - pos) / max(pos, 1.0)], device=device)
     loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
     opt = torch.optim.Adam(model.parameters(), lr=hp["lr"], weight_decay=hp["weight_decay"])
-    sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode="max", factor=0.5, patience=hp["sched_patience"])
 
-    best_ap, best_state, stale = -np.inf, None, 0
     for _ in range(hp["epochs"]):
         model.train()
         opt.zero_grad(set_to_none=True)
@@ -182,22 +196,6 @@ def _train_one(build_model, x_mol, x_prot, pos_eidx, neg_eidx,
         loss.backward()
         nn.utils.clip_grad_norm_(model.parameters(), hp["clip_grad"])
         opt.step()
-
-        model.eval()
-        with torch.no_grad():
-            z = model.encode(x_mol_d, x_prot_d, pos_eidx_d, neg_eidx_d)
-            p_val = torch.sigmoid(model.decode(z, mi_va, pi_va)).cpu().numpy()
-        ap = D.metrics(y_val, p_val)["AUPRC"]
-        sched.step(ap)
-        if ap > best_ap + hp["min_delta"]:
-            best_ap, stale = ap, 0
-            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
-        else:
-            stale += 1
-            if stale >= hp["patience"]:
-                break
-    if best_state is not None:
-        model.load_state_dict(best_state)
 
     model.eval()
     with torch.no_grad():
@@ -225,11 +223,6 @@ def _run_models(ext, pairs: pd.DataFrame, train_idx, val_idx, test_idx, seed: in
     prot_idx_train = train_df["receptor"].map(prot_to_i).to_numpy().copy()
     y_train = train_df["label"].to_numpy(dtype=np.float32)
 
-    val_df = pairs.iloc[val_idx]
-    mol_idx_val = val_df["inchikey"].map(mol_to_i).to_numpy().copy()
-    prot_idx_val = val_df["receptor"].map(prot_to_i).to_numpy().copy()
-    y_val = val_df["label"].to_numpy(dtype=np.float32)
-
     pos, neg = _mp_edges(pairs, train_idx, mol_to_i, prot_to_i, ext.q)
     pos_eidx, neg_eidx = _edge_index_dict(pos, neg)
 
@@ -238,8 +231,7 @@ def _run_models(ext, pairs: pd.DataFrame, train_idx, val_idx, test_idx, seed: in
         checkpoint_path = (pathlib.Path(checkpoint_dir) / f"gnn_{ext.name}_model{m}.pt"
                             if checkpoint_dir is not None else None)
         z_mol, z_prot, model = _train_one(ext._build_model, x_mol, x_prot, pos_eidx, neg_eidx,
-                                           mol_idx_train, prot_idx_train, y_train,
-                                           mol_idx_val, prot_idx_val, y_val, hp, device,
+                                           mol_idx_train, prot_idx_train, y_train, hp, device,
                                            checkpoint_path=checkpoint_path)
         return m, z_mol, z_prot, model
 
@@ -271,13 +263,10 @@ class GnnSignedExtractor:
     hidden: int = 256
     dropout: float = 0.3
     q: float = 0.99
-    lr: float = 1e-3
+    lr: float = 3e-3
     weight_decay: float = 1e-4
     clip_grad: float = 1.0
-    min_delta: float = 1e-4
-    epochs: int = 300
-    patience: int = 30
-    sched_patience: int = 8
+    epochs: int = 900
     n_models: int = 5
     seed_offset: int = 5000
     pooling: str = "signed_sage"
@@ -297,8 +286,7 @@ class GnnSignedExtractor:
 
     def _hp(self, seed):
         return dict(lr=self.lr, weight_decay=self.weight_decay, clip_grad=self.clip_grad,
-                    min_delta=self.min_delta, epochs=self.epochs, patience=self.patience,
-                    sched_patience=self.sched_patience, seed=seed)
+                    epochs=self.epochs, seed=seed)
 
     def covered(self, pairs, idx):
         prot = pairs["receptor"].to_numpy()[idx]

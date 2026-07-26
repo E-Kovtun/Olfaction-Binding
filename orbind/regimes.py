@@ -77,6 +77,40 @@ def inductive_molecule_indices(seed: int, lorax_dir: str = LORAX_DIR, pool_fold:
     return train_idx, val_idx, test_idx
 
 
+def inductive_molecule_v5_indices(seed: int, lorax_dir: str = LORAX_DIR, pool_fold: int = 1,
+                                   test_frac: float = 0.2, val_frac: float = 0.1):
+    """Cold-molecule split reproducing `orbind.lorax.build_inductive_molecule`
+    *exactly* -- the split the v5 graph screen actually ran, as opposed to
+    `inductive_molecule_indices` above (our own later variant: 30% holdout,
+    stratified by whether a molecule has any positive, 2/3-1/3 test/val).
+
+    v5's rule: molecules with EC50 data are the testable pool; an unstratified
+    `np.random.default_rng(seed).permutation` puts the first 20% in test and the
+    next 10% in val; train is every pool row (any quality) whose molecule is in
+    neither. Val/test keep only EC50-quality rows of their molecules.
+
+    Position-for-position identical to lorax's version despite lorax building
+    its own frame: lorax first drops duplicate
+    (SMILES, Protein sequence, _DataQuality) rows and rows lacking an
+    embedding, but on this pool both are no-ops (46563 rows survive dedup, and
+    ChemBERTa/ESM-1b cover every molecule/receptor), and the molecule-level
+    draw only ever depends on the *set* of unique EC50 SMILES, which dedup
+    cannot change."""
+    pool = load_full_full_pool(lorax_dir, pool_fold)
+    ec50 = pool.loc[pool["_DataQuality"].eq("ec50")]
+    testable = np.array(sorted(ec50["SMILES"].unique()))
+    perm = np.random.default_rng(seed).permutation(len(testable))
+    n_te, n_va = int(test_frac * len(testable)), int(val_frac * len(testable))
+    test_mols = set(testable[perm[:n_te]])
+    val_mols = set(testable[perm[n_te:n_te + n_va]])
+
+    smiles, is_ec50 = pool["SMILES"], pool["_DataQuality"].eq("ec50")
+    train_idx = np.where(~smiles.isin(test_mols | val_mols))[0].astype(np.int64)
+    val_idx = np.where(smiles.isin(val_mols) & is_ec50)[0].astype(np.int64)
+    test_idx = np.where(smiles.isin(test_mols) & is_ec50)[0].astype(np.int64)
+    return train_idx, val_idx, test_idx
+
+
 def build_split_index_store(folds=(1, 2, 3, 4, 5), inductive_seeds=(42, 43, 44, 45, 46),
                              lorax_dir: str = LORAX_DIR, pool_fold: int = 1) -> dict[str, np.ndarray]:
     """All persisted index arrays, keyed `{regime}_{repeat}_{split}`."""
@@ -91,12 +125,18 @@ def build_split_index_store(folds=(1, 2, 3, 4, 5), inductive_seeds=(42, 43, 44, 
         store[f"inductive_molecule_{seed}_train"] = tr
         store[f"inductive_molecule_{seed}_val"] = va
         store[f"inductive_molecule_{seed}_test"] = te
+    for seed in inductive_seeds:
+        tr, va, te = inductive_molecule_v5_indices(seed, lorax_dir, pool_fold)
+        store[f"inductive_molecule_v5_{seed}_train"] = tr
+        store[f"inductive_molecule_v5_{seed}_val"] = va
+        store[f"inductive_molecule_v5_{seed}_test"] = te
     return store
 
 
 def load_split(regime: str, repeat: int, path: str = "data/processed/full_full_split_indices.npz"):
-    """Read back one (train_idx, val_idx, test_idx) triple for `regime` ("transductive"
-    or "inductive_molecule") and `repeat` (fold 1-5, or seed) from the persisted store."""
+    """Read back one (train_idx, val_idx, test_idx) triple for `regime`
+    ("transductive", "inductive_molecule", or "inductive_molecule_v5") and
+    `repeat` (fold 1-5, or seed) from the persisted store."""
     z = np.load(path)
     prefix = f"{regime}_{repeat}_"
     return z[f"{prefix}train"], z[f"{prefix}val"], z[f"{prefix}test"]

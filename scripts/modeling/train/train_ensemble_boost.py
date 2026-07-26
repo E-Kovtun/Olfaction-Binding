@@ -30,9 +30,15 @@ for why they aren't unified):
                    + --seeds (fresh random split per seed).
   full_full     -- pairs reconstructed from LoRaX's own data
                    (orbind.regimes.full_full_pairs), split via
-                   --full-full-mode {transductive,inductive_molecule} +
-                   --repeats (LoRaX fold 1-5 for transductive, our own
-                   cold-molecule seed for inductive_molecule).
+                   --full-full-mode
+                   {transductive,inductive_molecule,inductive_molecule_v5} +
+                   --repeats (LoRaX fold 1-5 for transductive, cold-molecule
+                   seed for the two inductive modes). `inductive_molecule` is
+                   our own cold-molecule split (30% holdout, stratified);
+                   `inductive_molecule_v5` reproduces the v5 graph screen's
+                   own split exactly (20% test / 10% val molecules,
+                   unstratified) so ensemble numbers can be compared to that
+                   screen head-on -- see orbind/regimes.py.
 
 Every invocation creates one timestamped run folder under
 results/ensemble_logs/<run_id>/:
@@ -122,9 +128,13 @@ TYPE_FACTORIES = {"esm": EsmExtractor, "gin": GinExtractor}
 # optionally "name=type:protein_path:molecule_sites_path" to override them).
 ATTENTION_FACTORIES = {"attn_noisy_or": MilNoisyOrExtractor, "attn_lse": MilLseExtractor}
 # pair-level, supervised, graph-based: "name=type" (bakes in mean-pooled ESM/GIN
-# paths; "name=type:protein_path:molecule_path[:n_models]" to override).
+# paths; "name=type:protein_path:molecule_path[:n_models[:emit]]" to override).
+# emit: "prot" (default, v5's own probe shape -- graph protein only, pair it
+# with a raw molecule source) or "both" ([graph molecule || graph protein]).
 GNN_FACTORIES = {"gnn_signed": GnnSignedExtractor}
-DEFAULT_REPEATS = {"transductive": [1, 2, 3, 4, 5], "inductive_molecule": [42, 43, 44, 45, 46]}
+DEFAULT_REPEATS = {"transductive": [1, 2, 3, 4, 5],
+                    "inductive_molecule": [42, 43, 44, 45, 46],
+                    "inductive_molecule_v5": [42, 43, 44, 45, 46]}
 
 
 def parse_source_arg(raw: str):
@@ -158,6 +168,8 @@ def parse_source_arg(raw: str):
             kwargs["molecule_path"] = parts[2]
         if len(parts) > 3 and parts[3]:
             kwargs["n_models"] = int(parts[3])
+        if len(parts) > 4 and parts[4]:
+            kwargs["emit"] = parts[4]
         return name, GNN_FACTORIES[type_](name=name, **kwargs)
 
     if type_ not in TYPE_FACTORIES:
@@ -291,9 +303,10 @@ def main() -> None:
     g1.add_argument("--val-size", type=float, default=0.2)
 
     g2 = ap.add_argument_group("full_full")
-    g2.add_argument("--full-full-mode", default="transductive", choices=["transductive", "inductive_molecule"])
+    g2.add_argument("--full-full-mode", default="transductive",
+                     choices=["transductive", "inductive_molecule", "inductive_molecule_v5"])
     g2.add_argument("--repeats", type=int, nargs="+", default=None,
-                     help="fold 1-5 for transductive, cold-molecule seed for inductive_molecule. "
+                     help="fold 1-5 for transductive, cold-molecule seed for the inductive modes. "
                           "Default: 1..5 / 42..46 respectively.")
     args = ap.parse_args()
 

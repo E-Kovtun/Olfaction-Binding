@@ -24,11 +24,28 @@ whole-graph encoders sees ALL of train_idx's pairs as message-passing edges
 (accepting mild train-row leakage -- the encoder "knows" a training edge
 exists, the same tradeoff ProSmith's own cls model and our attention cls
 sources already make), then embeds every node in the graph through itself;
-the N models' [molecule_embedding || protein_embedding] vectors are
-concatenated. This sidesteps the basis-alignment problem a true
-fold-holdout OOF scheme would have (see attention_extractor.py's module
-docstring for the full argument): every model embeds every split, so
-there's no missing/misaligned block to reconcile.
+the N models' per-row vectors are concatenated. This sidesteps the
+basis-alignment problem a true fold-holdout OOF scheme would have (see
+attention_extractor.py's module docstring for the full argument): every
+model embeds every split, so there's no missing/misaligned block to
+reconcile.
+
+`emit` picks *which* node embeddings leave the extractor (training is
+identical either way -- the decoder always sees both sides):
+  "prot" (default) -- protein only (`n_models * hidden` columns). This is
+                      what the v5 graph screen's own "unentangled boost"
+                      probe did: it fed XGBoost
+                      [raw ChemBERTa molecule || graph-enriched ESM protein]
+                      (see train_graph_full_full.py's `probe_with`), never
+                      the graph's molecule vector -- consistent with this
+                      project's finding that the graph helps cold-molecule
+                      generalization through the *protein* side, while
+                      graph-enriched molecule features hurt (see the
+                      inductive-enrichment study in notes/). Pair this
+                      source with a raw molecule source in the same combo to
+                      reproduce v5's exact feature set.
+  "both"           -- [molecule_embedding || protein_embedding],
+                      `n_models * 2 * hidden` columns.
 
 Training protocol matches the actual v5 graph-architecture-screen runs
 (scripts/modeling/train/run_graph_full_full_v5.ps1: lr=3e-3, epochs=900,
@@ -249,7 +266,11 @@ def _run_models(ext, pairs: pd.DataFrame, train_idx, val_idx, test_idx, seed: in
         sub = pairs.iloc[idx]
         mi = sub["inchikey"].map(mol_to_i).to_numpy()
         pi = sub["receptor"].map(prot_to_i).to_numpy()
-        blocks = [np.concatenate([z_mol[mi], z_prot[pi]], axis=1) for _, z_mol, z_prot, _ in results]
+        if ext.emit == "prot":
+            blocks = [z_prot[pi] for _, _, z_prot, _ in results]
+        else:
+            blocks = [np.concatenate([z_mol[mi], z_prot[pi]], axis=1)
+                       for _, z_mol, z_prot, _ in results]
         return np.concatenate(blocks, axis=1).astype(np.float32)
 
     return features_for(train_idx), features_for(val_idx), features_for(test_idx)
@@ -269,14 +290,18 @@ class GnnSignedExtractor:
     epochs: int = 900
     n_models: int = 5
     seed_offset: int = 5000
+    emit: str = "prot"
     pooling: str = "signed_sage"
     dim_out: int = field(init=False, default=0)
     model_name: str = field(init=False, default="gnn_signed")
 
     def __post_init__(self):
+        if self.emit not in ("prot", "both"):
+            raise ValueError(f"emit must be 'prot' or 'both', got {self.emit!r}")
         self._proteins = D.load_npz_dict(self.protein_path)
         self._molecules = D.load_npz_dict(self.molecule_path)
-        self.dim_out = self.n_models * 2 * self.hidden
+        per_model = self.hidden if self.emit == "prot" else 2 * self.hidden
+        self.dim_out = self.n_models * per_model
         self.path = f"{self.protein_path} + {self.molecule_path}"
 
     def _build_model(self):

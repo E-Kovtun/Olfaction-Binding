@@ -254,3 +254,47 @@ already-computed receptors instead of recomputing). Gap-filled locally by
 reusing the existing 780 and running ESM-2 only on the missing 464, so
 `esm2_650m_mean.npz` reaches the same full coverage `esm1b_650m_mean.npz`
 already had.
+
+## Results ledger (test-set means over 5 repeats)
+
+All rows are one `train_ensemble_boost.py` run each; the `cls` source is
+whatever that run's pair-level extractor was. Repeats = LoRaX folds 1-5
+(transductive) or cold-molecule seeds 42-46 (inductive). Bold = best combo
+in that run by AUROC.
+
+### transductive
+
+| run | source config | prot | mol | cls | cls+mol | prot+mol | cls+prot+mol | ens[simplex] | ens[logreg] |
+|---|---|---|---|---|---|---|---|---|---|
+| `...attn_noisy_or-tuned500-5x` | cls = MIL noisy-OR, mol = GIN | 0.792 | 0.651 | 0.884 | 0.886 | **0.904** | 0.892 | 0.902 | 0.884 |
+| `...gnn_signed-chemberta-tuned250-5x` | cls = GNN signed q99 `emit=both`, mol = ChemBERTa | 0.794 | 0.652 | 0.862 | 0.866 | **0.899** | 0.879 | 0.891 | 0.886 |
+
+(AUROC only; full AUPRC/MCC/F1 live in each run's `metrics.csv`.)
+
+### inductive (cold molecule)
+
+| run | split | cls emit | mol enc | metric | prot | mol | cls | cls+mol | prot+mol | cls+prot+mol | ens[simplex] |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| `...gnn_signed-chemberta-tuned250-5x` (superseded) | ours (30%, stratified) | both | ChemBERTa | AUROC | 0.805 | 0.570 | 0.847 | 0.849 | **0.860** | 0.846 | 0.847 |
+| `...gnn_signed-gin-tuned250-5x` | v5 (20/10%, unstratified) | prot | GIN | AUROC | 0.771 | 0.602 | 0.779 | 0.845 | 0.841 | **0.850** | 0.837 |
+| | | | | AUPRC | 0.599 | 0.327 | 0.587 | 0.684 | **0.696** | 0.683 | 0.687 |
+| | | | | MCC | 0.407 | 0.077 | 0.375 | 0.525 | 0.497 | **0.539** | 0.532 |
+| | | | | F1 | 0.528 | 0.294 | 0.543 | 0.607 | 0.585 | **0.627** | 0.619 |
+
+The first inductive row predates the v5-parity work (our own split, and the
+cls source still emitting `[z_mol || z_prot]`), so it is not comparable to
+the second — kept only as the "before" picture.
+
+**The v5-parity row is the first same-run result where graph-containing
+combos edge out raw boost on cold molecules**: `cls+prot+mol` beats
+`prot+mol` on AUROC (0.850 vs 0.841), MCC (0.539 vs 0.497) and F1 (0.627 vs
+0.585), and `cls+mol` — v5's own exact feature set, `[z_prot || raw
+molecule]` — also clears it on AUROC/MCC/F1. AUPRC goes the other way
+(0.683-0.684 vs 0.696). Deltas are small and the direction is not unanimous
+across metrics, so this needs the per-repeat spread (`metrics.csv` grouped
+by combo, mean ± std over the 5 seeds) before it counts as a real win —
+cold-molecule seed variance has historically been ±0.1 AUROC (see
+notes on the graph screen and the project's graph-experiments ledger).
+Note also `cls` solo is a receptor-only feature under `emit="prot"` (every
+row of a receptor gets the same vector), so its 0.779 is not comparable to
+the `emit="both"` run's 0.847.

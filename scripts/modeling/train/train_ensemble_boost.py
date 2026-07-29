@@ -120,7 +120,7 @@ sys.path.insert(0, str(_root))
 from orbind.ensemble import EsmExtractor, GinExtractor, run_ensemble
 from orbind.regimes import full_full_pairs, load_split
 from orbind.attention_extractor import MilNoisyOrExtractor, MilLseExtractor
-from orbind.gnn_extractor import GnnSignedExtractor
+from orbind.gnn_extractor import GnnSignedExtractor, GnnSignedDgiExtractor
 
 # entity-level: "name=type:path[:model_name[:pooling]]" -- a static npz lookup.
 TYPE_FACTORIES = {"esm": EsmExtractor, "gin": GinExtractor}
@@ -131,7 +131,9 @@ ATTENTION_FACTORIES = {"attn_noisy_or": MilNoisyOrExtractor, "attn_lse": MilLseE
 # paths; "name=type:protein_path:molecule_path[:n_models[:emit]]" to override).
 # emit: "prot" (default, v5's own probe shape -- graph protein only, pair it
 # with a raw molecule source) or "both" ([graph molecule || graph protein]).
-GNN_FACTORIES = {"gnn_signed": GnnSignedExtractor}
+# gnn_signed_dgi is the same source plus a DeepGraphInfomax auxiliary loss
+# (shared scope, lambda=0.5) mixed into encoder training.
+GNN_FACTORIES = {"gnn_signed": GnnSignedExtractor, "gnn_signed_dgi": GnnSignedDgiExtractor}
 DEFAULT_REPEATS = {"transductive": [1, 2, 3, 4, 5],
                     "inductive_molecule": [42, 43, 44, 45, 46],
                     "inductive_molecule_v5": [42, 43, 44, 45, 46]}

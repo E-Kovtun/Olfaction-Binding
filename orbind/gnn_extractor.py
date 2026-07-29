@@ -169,8 +169,33 @@ class _SignedSage(nn.Module):
         return self.dec(torch.cat([z[MOL][mol_idx], z[PROT][prot_idx]], dim=-1)).squeeze(-1)
 
 
+# --------------------------------------------------------------------------- DGI (Deep Graph Infomax)
+
+def _dgi_pool(z, scope):
+    """Pool the encoder's node embeddings into the DGI node set, L2-normalized
+    (the signed encoder's final layer has no activation, so raw embeddings are
+    unbounded and would saturate the sigmoid readout). scope="shared" pools
+    molecules+proteins into one set; scope="prot" uses proteins only."""
+    if scope == "prot":
+        return F.normalize(z[PROT], dim=-1)
+    return torch.cat([F.normalize(z[MOL], dim=-1), F.normalize(z[PROT], dim=-1)], dim=0)
+
+
+def _dgi_loss(weight_mat, z_pos, z_neg):
+    """Deep Graph Infomax loss: a bilinear discriminator tells real node
+    embeddings (which should agree with the global summary) from embeddings
+    produced on a corrupted graph. Mirrors torch_geometric's DeepGraphInfomax
+    math without the wrapper (our encoder is heterogeneous, returning a dict)."""
+    summary = torch.sigmoid(z_pos.mean(dim=0))
+    pos = z_pos @ torch.matmul(weight_mat, summary)
+    neg = z_neg @ torch.matmul(weight_mat, summary)
+    return (F.binary_cross_entropy_with_logits(pos, torch.ones_like(pos))
+            + F.binary_cross_entropy_with_logits(neg, torch.zeros_like(neg)))
+
+
 def _train_one(build_model, x_mol, x_prot, pos_eidx, neg_eidx,
-                mol_idx_train, prot_idx_train, y_train, hp, device, checkpoint_path=None):
+                mol_idx_train, prot_idx_train, y_train, hp, device, checkpoint_path=None,
+                dgi_weight=0.0, dgi_scope="shared", hidden=None):
     """Full-batch training loop (the whole graph is small enough to fit in
     one forward/backward per epoch): BCE loss on train-row decodes, fixed
     epoch count, no early stopping, no LR scheduler -- matches the actual v5
@@ -183,7 +208,15 @@ def _train_one(build_model, x_mol, x_prot, pos_eidx, neg_eidx,
     If `checkpoint_path` already exists on disk, training is skipped
     entirely: the state_dict is loaded and only the final encode pass runs
     -- lets a resumed run reuse a previously-trained model instance instead
-    of retraining it from scratch."""
+    of retraining it from scratch.
+
+    `dgi_weight`>0 adds a DeepGraphInfomax auxiliary term (see `_dgi_loss`):
+    each epoch a corrupted graph (row-shuffled input features, same edges) is
+    re-encoded and contrasted against the real graph's summary via a bilinear
+    discriminator whose weights (`hidden`x`hidden`) join the optimizer. The
+    discriminator is training-only -- it is not saved and not needed to emit
+    embeddings, so a reloaded checkpoint ignores DGI entirely. `dgi_scope`
+    picks the node set (see `_dgi_pool`)."""
     model = build_model().to(device)
     x_mol_d, x_prot_d = x_mol.to(device), x_prot.to(device)
     pos_eidx_d = {k: v.to(device) for k, v in pos_eidx.items()}
@@ -203,15 +236,26 @@ def _train_one(build_model, x_mol, x_prot, pos_eidx, neg_eidx,
     pos = float(y_train.sum())
     pos_weight = torch.tensor([(len(y_train) - pos) / max(pos, 1.0)], device=device)
     loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-    opt = torch.optim.Adam(model.parameters(), lr=hp["lr"], weight_decay=hp["weight_decay"])
+
+    dgi_w = None
+    params = list(model.parameters())
+    if dgi_weight > 0:
+        dgi_w = nn.init.xavier_uniform_(torch.empty(hidden, hidden, device=device)).requires_grad_(True)
+        params = params + [dgi_w]
+    opt = torch.optim.Adam(params, lr=hp["lr"], weight_decay=hp["weight_decay"])
 
     for _ in range(hp["epochs"]):
         model.train()
         opt.zero_grad(set_to_none=True)
         z = model.encode(x_mol_d, x_prot_d, pos_eidx_d, neg_eidx_d)
         loss = loss_fn(model.decode(z, mi_tr, pi_tr), y_tr)
+        if dgi_w is not None:
+            x_mol_c = x_mol_d[torch.randperm(x_mol_d.shape[0], device=device)]
+            x_prot_c = x_prot_d[torch.randperm(x_prot_d.shape[0], device=device)]
+            z_c = model.encode(x_mol_c, x_prot_c, pos_eidx_d, neg_eidx_d)
+            loss = loss + dgi_weight * _dgi_loss(dgi_w, _dgi_pool(z, dgi_scope), _dgi_pool(z_c, dgi_scope))
         loss.backward()
-        nn.utils.clip_grad_norm_(model.parameters(), hp["clip_grad"])
+        nn.utils.clip_grad_norm_(params, hp["clip_grad"])
         opt.step()
 
     model.eval()
@@ -249,7 +293,10 @@ def _run_models(ext, pairs: pd.DataFrame, train_idx, val_idx, test_idx, seed: in
                             if checkpoint_dir is not None else None)
         z_mol, z_prot, model = _train_one(ext._build_model, x_mol, x_prot, pos_eidx, neg_eidx,
                                            mol_idx_train, prot_idx_train, y_train, hp, device,
-                                           checkpoint_path=checkpoint_path)
+                                           checkpoint_path=checkpoint_path,
+                                           dgi_weight=getattr(ext, "dgi_weight", 0.0),
+                                           dgi_scope=getattr(ext, "dgi_scope", "shared"),
+                                           hidden=ext.hidden)
         return m, z_mol, z_prot, model
 
     with ThreadPoolExecutor(max_workers=ext.n_models) as pool:
@@ -292,12 +339,16 @@ class GnnSignedExtractor:
     seed_offset: int = 5000
     emit: str = "prot"
     pooling: str = "signed_sage"
+    dgi_weight: float = 0.0            # >0 enables the DeepGraphInfomax auxiliary loss
+    dgi_scope: str = "shared"          # "shared" (mol+prot) or "prot"
     dim_out: int = field(init=False, default=0)
     model_name: str = field(init=False, default="gnn_signed")
 
     def __post_init__(self):
         if self.emit not in ("prot", "both"):
             raise ValueError(f"emit must be 'prot' or 'both', got {self.emit!r}")
+        if self.dgi_scope not in ("shared", "prot"):
+            raise ValueError(f"dgi_scope must be 'shared' or 'prot', got {self.dgi_scope!r}")
         self._proteins = D.load_npz_dict(self.protein_path)
         self._molecules = D.load_npz_dict(self.molecule_path)
         per_model = self.hidden if self.emit == "prot" else 2 * self.hidden
@@ -321,3 +372,17 @@ class GnnSignedExtractor:
 
     def fit_transform(self, pairs, train_idx, val_idx, test_idx, seed, checkpoint_dir=None):
         return _run_models(self, pairs, train_idx, val_idx, test_idx, seed, checkpoint_dir=checkpoint_dir)
+
+
+@dataclass
+class GnnSignedDgiExtractor(GnnSignedExtractor):
+    """Signed GraphSAGE cls source (identical to GnnSignedExtractor -- q99,
+    signed MP, emit=prot, v5-parity training, n_models bagging) PLUS a
+    DeepGraphInfomax auxiliary loss mixed into training: shared scope
+    (molecules+proteins pooled into one summary) at lambda=0.5. Everything the
+    boost eventually sees is still the same graph-enriched protein vector; DGI
+    only reshapes the encoder during training and is not part of what leaves
+    the extractor. Override `dgi_weight`/`dgi_scope` to sweep."""
+    dgi_weight: float = 0.5
+    dgi_scope: str = "shared"
+    model_name: str = field(init=False, default="gnn_signed_dgi")

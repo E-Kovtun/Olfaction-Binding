@@ -34,12 +34,14 @@ graph_evaluation notebooks expect (regime == "ec50").
 import argparse, pathlib, pickle, sys, time, warnings
 warnings.filterwarnings("ignore")
 import numpy as np, pandas as pd, torch
+import torch.nn.functional as F
 
 _root = pathlib.Path(__file__).resolve()
 while not (_root / "pyproject.toml").exists():
     _root = _root.parent
 sys.path.insert(0, str(_root))
 from orbind import hetero as H
+from orbind.hetero import HeteroDGI
 from orbind import lorax as L
 from orbind.hetero_gat import HeteroGATLink
 from orbind.baselines import train_boost
@@ -53,8 +55,12 @@ def variant_name(args):
     hist_tag = ("_history" if args.history_depth >= 2 else "_hist1") if args.history else ""
     exp_tag = "_transductive_exp" if args.transductive_exp else ""
     disjoint_tag = "_disjoint" if args.disjoint_probe_train else ""
+    # DGI tag only when the auxiliary loss is active, so weight=0 reproduces the
+    # exact v5 variant name (a clean in-run control): e.g. "_dgishared50".
+    dgi_tag = (f"_dgi{args.dgi_scope}{int(round(args.dgi_weight * 100))}"
+               if args.dgi_weight > 0 else "")
     return (args.mp_mode + (f"_q{int(q * 100)}" if q > 0 else "") + hist_tag
-            + ("_rawp" if args.concat_raw_prot else "") + exp_tag + disjoint_tag)
+            + ("_rawp" if args.concat_raw_prot else "") + exp_tag + disjoint_tag + dgi_tag)
 
 
 def save_history(history, csv_path, plot_path):
@@ -203,8 +209,30 @@ def run(args):
 
     model = make_model(args.arch, args.mp_mode, args).to(device)
     with torch.no_grad():
-        model.encode(x_dict, eidx)              # init lazy params
-    opt = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
+        z_init = model.encode(x_dict, eidx)     # init lazy params
+
+    # ---- optional DeepGraphInfomax auxiliary head ----
+    # Both node types already share the encoder's `hidden`-dim output, so DGI
+    # pools them (scope="shared") or takes proteins alone (scope="prot"). The
+    # discriminator is sized from the actual encoder output dim, and its params
+    # join the optimizer. weight=0 => head not built, training == v5 exactly.
+    dgi_head = None
+    if args.dgi_weight > 0:
+        dgi_dim = z_init[H.MOL].shape[-1]
+        dgi_head = HeteroDGI(dgi_dim).to(device)
+        print(f"  DGI enabled: weight={args.dgi_weight} scope={args.dgi_scope} dim={dgi_dim}")
+
+    def dgi_pool(z):
+        """Pool encoder output into the DGI node set, L2-normalized (the signed
+        encoder's final layer has no activation, so raw z would saturate the
+        sigmoid readout)."""
+        if args.dgi_scope == "prot":
+            return F.normalize(z[H.PROT], dim=-1)
+        return torch.cat([F.normalize(z[H.MOL], dim=-1),
+                          F.normalize(z[H.PROT], dim=-1)], dim=0)
+
+    params = list(model.parameters()) + (list(dgi_head.parameters()) if dgi_head else [])
+    opt = torch.optim.Adam(params, lr=args.lr, weight_decay=1e-4)
     scheduler = (torch.optim.lr_scheduler.ReduceLROnPlateau(
         opt, mode="max", factor=args.scheduler_factor,
         patience=args.scheduler_patience, min_lr=args.scheduler_min_lr)
@@ -238,16 +266,26 @@ def run(args):
 
     for ep in range(1, args.epochs + 1):
         model.train(); opt.zero_grad()
-        train_logits = model(x_dict, eidx, tr_idx)
-        loss = loss_fn(train_logits, tr_y)
+        z_train = model.encode(x_dict, eidx)
+        train_logits = model.decode(z_train, tr_idx)
+        link_loss = loss_fn(train_logits, tr_y)
+        # DGI: corrupt = row-shuffle input features per node type, same edges;
+        # re-encode and contrast against the real graph's summary.
+        if dgi_head is not None:
+            x_corrupt = {k: v[torch.randperm(v.shape[0], device=v.device)]
+                         for k, v in x_dict.items()}
+            z_corrupt = model.encode(x_corrupt, eidx)
+            dgi_loss = dgi_head.loss(dgi_pool(z_train), dgi_pool(z_corrupt))
+        else:
+            dgi_loss = torch.zeros((), device=device)
+        loss = link_loss + args.dgi_weight * dgi_loss
         loss.backward()
         if args.grad_clip > 0:
-            grad_norm = float(torch.nn.utils.clip_grad_norm_(
-                model.parameters(), args.grad_clip))
+            grad_norm = float(torch.nn.utils.clip_grad_norm_(params, args.grad_clip))
         else:
             grad_norm = float(torch.sqrt(sum(
                 p.grad.detach().pow(2).sum()
-                for p in model.parameters() if p.grad is not None)))
+                for p in params if p.grad is not None)))
         opt.step()
 
         model.eval()
@@ -260,6 +298,8 @@ def run(args):
 
         val_m = metrics(sup["val"][1].detach().cpu().numpy(), val_pred)
         row = {"epoch": ep, "train_loss": float(loss.detach()),
+               "link_loss": float(link_loss.detach()),
+               "dgi_loss": float(dgi_loss.detach()),
                "lr": float(opt.param_groups[0]["lr"]),
                "grad_norm_pre_clip": grad_norm}
         row.update({f"val_{k}": float(v) for k, v in val_m.items()})
@@ -425,6 +465,8 @@ def run(args):
                    "molecule_features": "graph_enriched" if args.transductive_exp else "raw",
                    "disjoint_probe_train": args.disjoint_probe_train,
                    "probe_train_frac": args.probe_train_frac,
+                   "dgi_weight": args.dgi_weight,
+                   "dgi_scope": args.dgi_scope,
                    "diagnostics": args.diagnostics,
                    "grad_clip": args.grad_clip,
                    "lr_scheduler": args.lr_scheduler,
@@ -505,6 +547,14 @@ def main():
                          "the other for XGBoost fitting")
     ap.add_argument("--probe-train-frac", type=float, default=0.5,
                     help="Fraction of train labels reserved for XGBoost in disjoint mode")
+    ap.add_argument("--dgi-weight", "--dgi_weight", dest="dgi_weight", type=float, default=0.0,
+                    help="Weight of the DeepGraphInfomax auxiliary loss added to the link "
+                         "loss (0=off, reproduces v5 exactly). Try 0.5 as a first non-zero value.")
+    ap.add_argument("--dgi-scope", "--dgi_scope", dest="dgi_scope", default="shared",
+                    choices=["shared", "prot"],
+                    help="DGI node set: 'shared' (A: molecules+proteins pooled into one "
+                         "summary) or 'prot' (C: proteins only — targets the cold-molecule "
+                         "niche where the graph helps).")
     ap.add_argument("--observe_test", action="store_true",
                     help="[DIAGNOSTICS ONLY] Log test-set metrics every epoch. "
                          "ONLY for gnn_training_diagnostics.ipynb. "
@@ -556,6 +606,8 @@ def main():
         ap.error("--probe-train-frac must be between 0 and 1")
     if args.grad_clip < 0:
         ap.error("--grad-clip must be non-negative")
+    if args.dgi_weight < 0:
+        ap.error("--dgi-weight must be non-negative (0 disables DGI)")
     if args.protein_pca_dim < 0 or args.molecule_pca_dim < 0:
         ap.error("PCA dimensions must be non-negative (0 disables PCA)")
     if args.lr_scheduler and not 0.0 < args.scheduler_factor < 1.0:

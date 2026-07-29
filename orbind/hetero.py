@@ -259,3 +259,37 @@ class HeteroLink(torch.nn.Module):
 
     def forward(self, x_dict, eidx_dict, label_index):
         return self.decode(self.encode(x_dict, eidx_dict), label_index)
+
+
+class HeteroDGI(torch.nn.Module):
+    """Deep Graph Infomax auxiliary head for the heterogeneous encoder.
+
+    DGI maximizes mutual information between per-node "patch" embeddings and a
+    global graph summary: a bilinear discriminator learns to tell real node
+    embeddings (which should agree with the summary) from embeddings produced
+    on a corrupted graph (row-shuffled input features, same edges). Used as a
+    self-supervised regularizer added to the link-prediction loss.
+
+    Both node types leave HeteroLink.encode already in the same `hidden`-dim
+    space, so this head only needs them pooled into one node set — the caller
+    does that (scope="shared" = molecules+proteins together, scope="prot" =
+    proteins only) and also builds the corrupted embeddings; this module just
+    scores. Node embeddings are expected pre-normalized by the caller (our
+    signed encoder's final layer has no activation, so its raw output is
+    unbounded and would saturate sigmoid(mean(·))).
+    """
+    def __init__(self, hidden):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.empty(hidden, hidden))
+        torch.nn.init.xavier_uniform_(self.weight)
+
+    def discriminate(self, z, summary):
+        return z @ torch.matmul(self.weight, summary)
+
+    def loss(self, z_pos, z_neg):
+        import torch.nn.functional as F
+        summary = torch.sigmoid(z_pos.mean(dim=0))
+        pos = self.discriminate(z_pos, summary)
+        neg = self.discriminate(z_neg, summary)
+        return (F.binary_cross_entropy_with_logits(pos, torch.ones_like(pos))
+                + F.binary_cross_entropy_with_logits(neg, torch.zeros_like(neg)))

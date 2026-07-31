@@ -4,11 +4,12 @@ shopt -s nullglob
 
 # full_full v6: SimGCL contrastive add-on screen (Yu et al., SIGIR'22).
 #
-# Default GNN setup (same as the first v6 vanilla screen): arch=gnn,
-# mp_mode=signed, NO quantile filter (q=0), 900 epochs, lr 3e-3, grad-clip 1.0,
-# last-epoch probe. The only change vs that v5 point is the training objective:
-# link loss + cl_weight * InfoNCE over two SimGCL-noised views.
-# The cl_weight=0 control is the existing v5 signed (q0) result, NOT re-run here.
+# GNN setup: arch=gnn, mp_mode=signed, quantile filter q=0.95 (override with
+# MOL_Q=... , e.g. MOL_Q=0 for the vanilla no-filter screen), 900 epochs,
+# lr 3e-3, grad-clip 1.0, last-epoch probe. The only change vs the matching v5
+# point is the training objective: link loss + cl_weight * InfoNCE over two
+# SimGCL-noised views. The cl_weight=0 control is the existing v5 signed run at
+# the SAME quantile (NOT re-run here) -- pick that quantile in the notebook cell.
 #
 # Sweep: two hyperparameters, cl_eps (noise magnitude) x cl_weight (lambda).
 #
@@ -26,7 +27,7 @@ LR="${LR:-3e-3}"
 GRAD_CLIP="${GRAD_CLIP:-1.0}"
 MP_MODE="${MP_MODE:-signed}"
 ARCH="${ARCH:-gnn}"
-MOL_Q="${MOL_Q:-0}"                 # default gnn setup: no quantile filter
+MOL_Q="${MOL_Q:-0.95}"             # quantile filter (0 = none); override via env
 CL_TEMP="${CL_TEMP:-0.2}"          # InfoNCE temperature (fixed, paper default)
 MAX_PARALLEL="${MAX_PARALLEL:-1}"
 DRY_RUN="${DRY_RUN:-0}"

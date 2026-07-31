@@ -207,7 +207,11 @@ class HeteroLink(torch.nn.Module):
                 torch.nn.Linear(2 * hidden, hidden), torch.nn.ReLU(),
                 torch.nn.Dropout(dropout), torch.nn.Linear(hidden, 1))
 
-    def encode(self, x_dict, eidx_dict):
+    def encode(self, x_dict, eidx_dict, noise_eps=0.0):
+        """Encode all nodes. With noise_eps>0, add SimGCL-style uniform noise to
+        each message-passing layer's output (see simgcl_noise) — used to build
+        the two contrastive views; noise_eps=0 (default) is the clean encoder
+        every other caller (decode, the XGBoost probe) relies on."""
         import torch.nn.functional as F
         x = {k: F.relu(self.proj[k](v)) for k, v in x_dict.items()}
         if self.mp_mode == "signed":
@@ -217,12 +221,20 @@ class HeteroLink(torch.nn.Module):
             x_n = self.conv1_neg(x, neg_eidx)
             # ReLU after signed difference — negatives push representations away
             x = {k: F.relu(x_p[k] - x_n.get(k, torch.zeros_like(x_p[k]))) for k in x_p}
+            if noise_eps > 0:
+                x = {k: simgcl_noise(v, noise_eps) for k, v in x.items()}
             x_p = self.conv2(x, pos_eidx)
             x_n = self.conv2_neg(x, neg_eidx)
             x = {k: x_p[k] - x_n.get(k, torch.zeros_like(x_p[k])) for k in x_p}
+            if noise_eps > 0:
+                x = {k: simgcl_noise(v, noise_eps) for k, v in x.items()}
         else:
             x = {k: F.relu(v) for k, v in self.conv1(x, eidx_dict).items()}
+            if noise_eps > 0:
+                x = {k: simgcl_noise(v, noise_eps) for k, v in x.items()}
             x = self.conv2(x, eidx_dict)
+            if noise_eps > 0:
+                x = {k: simgcl_noise(v, noise_eps) for k, v in x.items()}
         return x
 
     def encode_history(self, x_dict, eidx_dict, depth=2):
@@ -259,6 +271,29 @@ class HeteroLink(torch.nn.Module):
 
     def forward(self, x_dict, eidx_dict, label_index):
         return self.decode(self.encode(x_dict, eidx_dict), label_index)
+
+
+# --------------------------------------------------------------------------- SimGCL contrastive add-on
+
+def simgcl_noise(x, eps):
+    """SimGCL embedding-space perturbation (Yu et al., SIGIR'22, Eq. 7):
+    Delta = eps * normalize(U(0,1)) ⊙ sign(x), so ||Delta||_2 = eps and the
+    noise stays in the same hyperoctant as x. Added at each message-passing
+    layer to create the two contrastive views (see HeteroLink.encode)."""
+    import torch.nn.functional as F
+    return x + eps * torch.sign(x) * F.normalize(torch.rand_like(x), dim=-1)
+
+
+def info_nce(z1, z2, tau=0.2):
+    """InfoNCE contrastive loss (SimGCL Eq. 2): cosine similarity of the two
+    views, temperature tau, positives on the diagonal. No learnable parameters
+    — unlike DGI, SimGCL's contrastive head is parameter-free."""
+    import torch.nn.functional as F
+    z1 = F.normalize(z1, dim=-1)
+    z2 = F.normalize(z2, dim=-1)
+    logits = z1 @ z2.t() / tau
+    labels = torch.arange(z1.size(0), device=z1.device)
+    return F.cross_entropy(logits, labels)
 
 
 class HeteroDGI(torch.nn.Module):

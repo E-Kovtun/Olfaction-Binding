@@ -59,8 +59,11 @@ def variant_name(args):
     # exact v5 variant name (a clean in-run control): e.g. "_dgishared50".
     dgi_tag = (f"_dgi{args.dgi_scope}{int(round(args.dgi_weight * 100))}"
                if args.dgi_weight > 0 else "")
+    # SimGCL contrastive add-on tag (eps and weight), only when active.
+    cl_tag = (f"_simgcl_e{int(round(args.cl_eps * 100))}_w{int(round(args.cl_weight * 100))}"
+              if args.cl_weight > 0 else "")
     return (args.mp_mode + (f"_q{int(q * 100)}" if q > 0 else "") + hist_tag
-            + ("_rawp" if args.concat_raw_prot else "") + exp_tag + disjoint_tag + dgi_tag)
+            + ("_rawp" if args.concat_raw_prot else "") + exp_tag + disjoint_tag + dgi_tag + cl_tag)
 
 
 def save_history(history, csv_path, plot_path):
@@ -278,7 +281,15 @@ def run(args):
             dgi_loss = dgi_head.loss(dgi_pool(z_train), dgi_pool(z_corrupt))
         else:
             dgi_loss = torch.zeros((), device=device)
-        loss = link_loss + args.dgi_weight * dgi_loss
+        # SimGCL: two noise-perturbed views, per-node-type InfoNCE, summed.
+        if args.cl_weight > 0:
+            z1 = model.encode(x_dict, eidx, noise_eps=args.cl_eps)
+            z2 = model.encode(x_dict, eidx, noise_eps=args.cl_eps)
+            cl_loss = (H.info_nce(z1[H.MOL], z2[H.MOL], args.cl_temp)
+                       + H.info_nce(z1[H.PROT], z2[H.PROT], args.cl_temp))
+        else:
+            cl_loss = torch.zeros((), device=device)
+        loss = link_loss + args.dgi_weight * dgi_loss + args.cl_weight * cl_loss
         loss.backward()
         if args.grad_clip > 0:
             grad_norm = float(torch.nn.utils.clip_grad_norm_(params, args.grad_clip))
@@ -300,6 +311,7 @@ def run(args):
         row = {"epoch": ep, "train_loss": float(loss.detach()),
                "link_loss": float(link_loss.detach()),
                "dgi_loss": float(dgi_loss.detach()),
+               "cl_loss": float(cl_loss.detach()),
                "lr": float(opt.param_groups[0]["lr"]),
                "grad_norm_pre_clip": grad_norm}
         row.update({f"val_{k}": float(v) for k, v in val_m.items()})
@@ -467,6 +479,9 @@ def run(args):
                    "probe_train_frac": args.probe_train_frac,
                    "dgi_weight": args.dgi_weight,
                    "dgi_scope": args.dgi_scope,
+                   "cl_eps": args.cl_eps,
+                   "cl_weight": args.cl_weight,
+                   "cl_temp": args.cl_temp,
                    "diagnostics": args.diagnostics,
                    "grad_clip": args.grad_clip,
                    "lr_scheduler": args.lr_scheduler,
@@ -555,6 +570,16 @@ def main():
                     help="DGI node set: 'shared' (A: molecules+proteins pooled into one "
                          "summary) or 'prot' (C: proteins only — targets the cold-molecule "
                          "niche where the graph helps).")
+    ap.add_argument("--cl-eps", "--cl_eps", dest="cl_eps", type=float, default=0.1,
+                    help="SimGCL noise magnitude epsilon (Yu et al. SIGIR'22): the L2 radius "
+                         "of the uniform embedding perturbation. Only used when --cl-weight>0. "
+                         "Paper's sweet spot ~0.1.")
+    ap.add_argument("--cl-weight", "--cl_weight", dest="cl_weight", type=float, default=0.0,
+                    help="Weight lambda of the SimGCL InfoNCE contrastive loss added to the "
+                         "link loss (0=off, reproduces v5). Paper uses 0.2–2.0.")
+    ap.add_argument("--cl-temp", "--cl_temp", dest="cl_temp", type=float, default=0.2,
+                    help="InfoNCE temperature tau for the SimGCL loss (default 0.2, the "
+                         "paper's value). Not part of the primary two-hyperparameter sweep.")
     ap.add_argument("--observe_test", action="store_true",
                     help="[DIAGNOSTICS ONLY] Log test-set metrics every epoch. "
                          "ONLY for gnn_training_diagnostics.ipynb. "
@@ -608,6 +633,8 @@ def main():
         ap.error("--grad-clip must be non-negative")
     if args.dgi_weight < 0:
         ap.error("--dgi-weight must be non-negative (0 disables DGI)")
+    if args.cl_weight < 0 or args.cl_eps < 0:
+        ap.error("--cl-weight and --cl-eps must be non-negative (cl-weight 0 disables SimGCL)")
     if args.protein_pca_dim < 0 or args.molecule_pca_dim < 0:
         ap.error("PCA dimensions must be non-negative (0 disables PCA)")
     if args.lr_scheduler and not 0.0 < args.scheduler_factor < 1.0:

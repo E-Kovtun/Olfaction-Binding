@@ -257,17 +257,23 @@ already had.
 
 ## Results ledger (test-set means over 5 repeats)
 
-All rows are one `train_ensemble_boost.py` run each; the `cls` source is
-whatever that run's pair-level extractor was. Repeats = LoRaX folds 1-5
-(transductive) or cold-molecule seeds 42-46 (inductive). Bold = best combo
-in that run by AUROC.
+All rows are one `train_ensemble_boost.py` run each, named by its folder
+under `results/ensemble_logs/`; the `cls` source is whatever that run's
+pair-level extractor was. Repeats = LoRaX folds 1-5 (transductive) or
+cold-molecule seeds 42-46 (inductive). Bold = best combo in that run by
+AUROC.
+
+Run folders are named `{regime}_{cls}_{molecule encoder}` and deliberately
+do *not* carry the optuna budget: every run here used 250 trials per combo
+**except `transductive_ownattnnoisy_GIN`, which used 500** — worth
+remembering before reading small gaps between runs as real.
 
 ### transductive
 
 | run | source config | prot | mol | cls | cls+mol | prot+mol | cls+prot+mol | ens[simplex] | ens[logreg] |
 |---|---|---|---|---|---|---|---|---|---|
-| `...attn_noisy_or-tuned500-5x` | cls = MIL noisy-OR, mol = GIN | 0.792 | 0.651 | 0.884 | 0.886 | **0.904** | 0.892 | 0.902 | 0.884 |
-| `...gnn_signed-chemberta-tuned250-5x` | cls = GNN signed q99 `emit=both`, mol = ChemBERTa | 0.794 | 0.652 | 0.862 | 0.866 | **0.899** | 0.879 | 0.891 | 0.886 |
+| `transductive_ownattnnoisy_GIN` | cls = MIL noisy-OR, mol = GIN | 0.792 | 0.651 | 0.884 | 0.886 | **0.904** | 0.892 | 0.902 | 0.884 |
+| `transductive_gnn99signed_chemberta` | cls = GNN signed q99 `emit=both`, mol = ChemBERTa | 0.794 | 0.652 | 0.862 | 0.866 | **0.899** | 0.879 | 0.891 | 0.886 |
 
 (AUROC only; full AUPRC/MCC/F1 live in each run's `metrics.csv`.)
 
@@ -275,8 +281,8 @@ in that run by AUROC.
 
 | run | split | cls emit | mol enc | metric | prot | mol | cls | cls+mol | prot+mol | cls+prot+mol | ens[simplex] |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| `...gnn_signed-chemberta-tuned250-5x` (superseded) | ours (30%, stratified) | both | ChemBERTa | AUROC | 0.805 | 0.570 | 0.847 | 0.849 | **0.860** | 0.846 | 0.847 |
-| `...gnn_signed-gin-tuned250-5x` | v5 (20/10%, unstratified) | prot | GIN | AUROC | 0.771 | 0.602 | 0.779 | 0.845 | 0.841 | **0.850** | 0.837 |
+| `metrics_inductive_OLDsplit_emitboth.csv` (superseded) | ours (30%, stratified) | both | ChemBERTa | AUROC | 0.805 | 0.570 | 0.847 | 0.849 | **0.860** | 0.846 | 0.847 |
+| `inductive_gnn99signed_GIN` | v5 (20/10%, unstratified) | prot | GIN | AUROC | 0.771 | 0.602 | 0.779 | 0.845 | 0.841 | **0.850** | 0.837 |
 | | | | | AUPRC | 0.599 | 0.327 | 0.587 | 0.684 | **0.696** | 0.683 | 0.687 |
 | | | | | MCC | 0.407 | 0.077 | 0.375 | 0.525 | 0.497 | **0.539** | 0.532 |
 | | | | | F1 | 0.528 | 0.294 | 0.543 | 0.607 | 0.585 | **0.627** | 0.619 |

@@ -5,16 +5,16 @@ shopt -s nullglob
 # full_full v6: BPR main-loss screen.
 # Swaps the pointwise BCE link loss for pairwise Bayesian Personalized Ranking
 # (LightGCN/SimGCL-style); negatives are the molecule's REAL tested non-binders.
-# GNN setup: arch=gnn, mp_mode=signed, quantile filter q=0.95 (override MOL_Q),
-# 900 epochs, lr 3e-3, grad-clip 1.0, last-epoch probe. No add-ons (dgi/simgcl
-# off). The BCE control is the existing v5 signed run at the SAME quantile (NOT
-# re-run) -- pick that quantile in the notebook cell. BPR has no extra
-# hyperparameter, so this is a single arm x 10 repeats = 10 runs.
+# GNN setup: arch=gnn, mp_mode=signed, 900 epochs, lr 3e-3, grad-clip 1.0,
+# last-epoch probe. No add-ons (dgi/simgcl off). This produces the pure-BPR
+# baseline used as the lambda=0 control in the notebook's SimGCL cell when
+# V6_MAIN_LOSS="bpr". Sweeps QUANTILES (default "0 0.95 0.99") x 10 repeats =
+# 30 runs; BPR has no extra hyperparameter.
 #
 # Examples:
 #   bash scripts/modeling/train/run_graph_full_full_v6_bpr.sh
 #   MAX_PARALLEL=10 bash scripts/modeling/train/run_graph_full_full_v6_bpr.sh
-#   MOL_Q=0.99 MAX_PARALLEL=10 bash scripts/modeling/train/run_graph_full_full_v6_bpr.sh
+#   QUANTILES="0.95" MAX_PARALLEL=10 bash scripts/modeling/train/run_graph_full_full_v6_bpr.sh
 #   DRY_RUN=1 bash scripts/modeling/train/run_graph_full_full_v6_bpr.sh
 
 RESULT_DIR="${RESULT_DIR:-results/graph/full_full/v6/bpr_screen/training}"
@@ -25,7 +25,7 @@ LR="${LR:-3e-3}"
 GRAD_CLIP="${GRAD_CLIP:-1.0}"
 MP_MODE="${MP_MODE:-signed}"
 ARCH="${ARCH:-gnn}"
-MOL_Q="${MOL_Q:-0.95}"             # quantile filter (0 = none); override via env
+QUANTILES="${QUANTILES:-0 0.95 0.99}"   # space-separated quantiles to sweep (pure-BPR control)
 MAX_PARALLEL="${MAX_PARALLEL:-1}"
 DRY_RUN="${DRY_RUN:-0}"
 QUIET="${QUIET:-1}"
@@ -53,7 +53,8 @@ REPEATS=(
   "inductive_molecule 1 45 1045"
   "inductive_molecule 1 46 1046"
 )
-TOTAL_RUNS=${#REPEATS[@]}
+NQ=$(wc -w <<< "$QUANTILES")
+TOTAL_RUNS=$((${#REPEATS[@]} * NQ))
 
 write_status() {
   local status="$1" stem="$2" log="$3"
@@ -120,9 +121,9 @@ dashboard() {
 }
 
 run_one() {
-  local regime="$1" fold="$2" gnn_seed="$3" boost_seed="$4"
+  local regime="$1" fold="$2" gnn_seed="$3" boost_seed="$4" q="$5"
   local qt q_seg variant stem artifact log rc
-  qt="$(awk "BEGIN{printf \"%d\", $MOL_Q*100}")"
+  qt="$(awk "BEGIN{printf \"%d\", $q*100}")"
   q_seg=""; [[ "$qt" != "0" ]] && q_seg="_q${qt}"
   variant="${MP_MODE}${q_seg}_bpr"
   stem="${ARCH}_${variant}_${regime}_fold${fold}_gnn${gnn_seed}_boost${boost_seed}"
@@ -137,7 +138,7 @@ run_one() {
   if [[ "$DRY_RUN" == "1" ]]; then
     {
       echo uv run python scripts/modeling/train/train_graph_full_full.py \
-        --arch "$ARCH" --mp_mode "$MP_MODE" --mol_quality_q "$MOL_Q" --main-loss bpr \
+        --arch "$ARCH" --mp_mode "$MP_MODE" --mol_quality_q "$q" --main-loss bpr \
         --regime "$regime" --fold "$fold" \
         --epochs "$EPOCHS" --lr "$LR" --grad-clip "$GRAD_CLIP" \
         --device "$DEVICE" --seed "$gnn_seed" --boost-seed "$boost_seed" \
@@ -149,7 +150,7 @@ run_one() {
   set +e
   if [[ "$QUIET" == "1" ]]; then
     uv run python scripts/modeling/train/train_graph_full_full.py \
-      --arch "$ARCH" --mp_mode "$MP_MODE" --mol_quality_q "$MOL_Q" --main-loss bpr \
+      --arch "$ARCH" --mp_mode "$MP_MODE" --mol_quality_q "$q" --main-loss bpr \
       --regime "$regime" --fold "$fold" \
       --epochs "$EPOCHS" --lr "$LR" --grad-clip "$GRAD_CLIP" \
       --device "$DEVICE" --seed "$gnn_seed" --boost-seed "$boost_seed" \
@@ -157,7 +158,7 @@ run_one() {
     rc=$?
   else
     uv run python scripts/modeling/train/train_graph_full_full.py \
-      --arch "$ARCH" --mp_mode "$MP_MODE" --mol_quality_q "$MOL_Q" --main-loss bpr \
+      --arch "$ARCH" --mp_mode "$MP_MODE" --mol_quality_q "$q" --main-loss bpr \
       --regime "$regime" --fold "$fold" \
       --epochs "$EPOCHS" --lr "$LR" --grad-clip "$GRAD_CLIP" \
       --device "$DEVICE" --seed "$gnn_seed" --boost-seed "$boost_seed" \
@@ -193,12 +194,14 @@ if [[ "$QUIET" == "1" ]]; then
   trap '[[ -n "${MONITOR_PID:-}" ]] && kill "$MONITOR_PID" 2>/dev/null || true' EXIT
 fi
 
-echo "full_full v6 BPR: $TOTAL_RUNS runs (1 arm x ${#REPEATS[@]} repeats); arch=$ARCH mp=$MP_MODE q=$MOL_Q main_loss=bpr"
+echo "full_full v6 BPR: $TOTAL_RUNS runs (${#REPEATS[@]} repeats x $NQ quantiles); arch=$ARCH mp=$MP_MODE q={$QUANTILES} main_loss=bpr"
 for repeat in "${REPEATS[@]}"; do
   read -r regime fold gnn_seed boost_seed <<< "$repeat"
-  wait_for_slot
-  run_one "$regime" "$fold" "$gnn_seed" "$boost_seed" &
-  RUNNING_PIDS+=("$!")
+  for q in $QUANTILES; do
+    wait_for_slot
+    run_one "$regime" "$fold" "$gnn_seed" "$boost_seed" "$q" &
+    RUNNING_PIDS+=("$!")
+  done
 done
 
 fail=0

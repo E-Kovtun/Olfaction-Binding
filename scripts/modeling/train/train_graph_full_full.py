@@ -62,7 +62,9 @@ def variant_name(args):
     # SimGCL contrastive add-on tag (eps and weight), only when active.
     cl_tag = (f"_simgcl_e{int(round(args.cl_eps * 100))}_w{int(round(args.cl_weight * 100))}"
               if args.cl_weight > 0 else "")
-    return (args.mp_mode + (f"_q{int(q * 100)}" if q > 0 else "") + hist_tag
+    # Main-loss tag (BPR replaces the default pointwise BCE); empty for bce.
+    main_tag = "_bpr" if args.main_loss == "bpr" else ""
+    return (args.mp_mode + (f"_q{int(q * 100)}" if q > 0 else "") + main_tag + hist_tag
             + ("_rawp" if args.concat_raw_prot else "") + exp_tag + disjoint_tag + dgi_tag + cl_tag)
 
 
@@ -246,6 +248,38 @@ def run(args):
     pw = (neg_count / pos_count).reshape(1).to(device)
     loss_fn = torch.nn.BCEWithLogitsLoss(pos_weight=pw)
 
+    # ---- BPR triple bookkeeping (only when --main-loss bpr) ----
+    # For each positive (m, p+), the negative p- is drawn each epoch from the
+    # REAL tested negatives of the SAME molecule m. Positives whose molecule has
+    # no tested negative are dropped (we never invent unobserved negatives).
+    # flat_negs/offsets/counts give O(1) vectorized per-epoch sampling.
+    bpr = None
+    if args.main_loss == "bpr":
+        from collections import defaultdict
+        neg_by_mol = defaultdict(list)
+        for m, p in gnn_train["neg"]:
+            neg_by_mol[int(m)].append(int(p))
+        kept_mol, kept_pos_prot, flat, offsets, counts = [], [], [], [], []
+        off = 0
+        for m, p in gnn_train["pos"]:
+            negs = neg_by_mol.get(int(m))
+            if not negs:
+                continue
+            kept_mol.append(int(m)); kept_pos_prot.append(int(p))
+            flat.extend(negs); offsets.append(off); counts.append(len(negs)); off += len(negs)
+        if not kept_mol:
+            raise RuntimeError("--main-loss bpr: no positive has a tested negative for its "
+                               "molecule; cannot form a single BPR triple")
+        bpr = {
+            "mol": torch.tensor(kept_mol, dtype=torch.long, device=device),
+            "pos_prot": torch.tensor(kept_pos_prot, dtype=torch.long, device=device),
+            "flat_negs": np.asarray(flat, dtype=np.int64),
+            "offsets": np.asarray(offsets, dtype=np.int64),
+            "counts": np.asarray(counts, dtype=np.int64),
+        }
+        print(f"  BPR: {len(kept_mol)}/{len(gnn_train['pos'])} positives kept "
+              f"(molecule has >=1 tested negative); rest dropped from the ranking loss")
+
     if args.observe_test:
         print(
             "\n" + "!" * 70 + "\n"
@@ -270,8 +304,18 @@ def run(args):
     for ep in range(1, args.epochs + 1):
         model.train(); opt.zero_grad()
         z_train = model.encode(x_dict, eidx)
-        train_logits = model.decode(z_train, tr_idx)
-        link_loss = loss_fn(train_logits, tr_y)
+        if args.main_loss == "bpr":
+            # sample one real tested negative per kept positive this epoch
+            r = (np.random.rand(len(bpr["offsets"])) * bpr["counts"]).astype(np.int64)
+            neg_prot = torch.as_tensor(bpr["flat_negs"][bpr["offsets"] + r],
+                                       dtype=torch.long, device=device)
+            pos_scores = model.decode(z_train, torch.stack([bpr["mol"], bpr["pos_prot"]]))
+            neg_scores = model.decode(z_train, torch.stack([bpr["mol"], neg_prot]))
+            link_loss = H.bpr_loss(pos_scores, neg_scores)
+            train_logits = pos_scores  # for the diagnostics block below
+        else:
+            train_logits = model.decode(z_train, tr_idx)
+            link_loss = loss_fn(train_logits, tr_y)
         # DGI: corrupt = row-shuffle input features per node type, same edges;
         # re-encode and contrast against the real graph's summary.
         if dgi_head is not None:
@@ -482,6 +526,7 @@ def run(args):
                    "cl_eps": args.cl_eps,
                    "cl_weight": args.cl_weight,
                    "cl_temp": args.cl_temp,
+                   "main_loss": args.main_loss,
                    "diagnostics": args.diagnostics,
                    "grad_clip": args.grad_clip,
                    "lr_scheduler": args.lr_scheduler,
@@ -580,6 +625,12 @@ def main():
     ap.add_argument("--cl-temp", "--cl_temp", dest="cl_temp", type=float, default=0.2,
                     help="InfoNCE temperature tau for the SimGCL loss (default 0.2, the "
                          "paper's value). Not part of the primary two-hyperparameter sweep.")
+    ap.add_argument("--main-loss", "--main_loss", dest="main_loss", default="bce",
+                    choices=["bce", "bpr"],
+                    help="Main link objective: 'bce' (default, pointwise BCE with pos_weight, "
+                         "reproduces v5) or 'bpr' (pairwise Bayesian Personalized Ranking, "
+                         "LightGCN/SimGCL-style; negatives are the molecule's real tested "
+                         "non-binders). Composes with --dgi-* and --cl-* add-ons.")
     ap.add_argument("--observe_test", action="store_true",
                     help="[DIAGNOSTICS ONLY] Log test-set metrics every epoch. "
                          "ONLY for gnn_training_diagnostics.ipynb. "

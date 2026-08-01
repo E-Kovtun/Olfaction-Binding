@@ -284,6 +284,17 @@ def simgcl_noise(x, eps):
     return x + eps * torch.sign(x) * F.normalize(torch.rand_like(x), dim=-1)
 
 
+def bpr_loss(pos_scores, neg_scores):
+    """Bayesian Personalized Ranking (Rendle et al., 2009) — the pairwise
+    ranking loss LightGCN/SimGCL use as their main objective. For each
+    (molecule, positive receptor, negative receptor) triple, push the positive
+    score above the negative: -mean(log sigmoid(pos - neg)). Here the negatives
+    are REAL tested non-binders of the same molecule (not random unobserved
+    pairs), so the ranking target is grounded in measured data."""
+    import torch.nn.functional as F
+    return -F.logsigmoid(pos_scores - neg_scores).mean()
+
+
 def info_nce(z1, z2, tau=0.2):
     """InfoNCE contrastive loss (SimGCL Eq. 2): cosine similarity of the two
     views, temperature tau, positives on the diagonal. No learnable parameters

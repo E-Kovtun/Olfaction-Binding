@@ -4,14 +4,16 @@ shopt -s nullglob
 
 # full_full v6: SimGCL contrastive add-on screen (Yu et al., SIGIR'22).
 #
-# GNN setup: arch=gnn, mp_mode=signed, quantile filter q=0.95 (override with
-# MOL_Q=... , e.g. MOL_Q=0 for the vanilla no-filter screen), 900 epochs,
-# lr 3e-3, grad-clip 1.0, last-epoch probe. The only change vs the matching v5
-# point is the training objective: link loss + cl_weight * InfoNCE over two
-# SimGCL-noised views. The cl_weight=0 control is the existing v5 signed run at
-# the SAME quantile (NOT re-run here) -- pick that quantile in the notebook cell.
+# GNN setup: arch=gnn, mp_mode=signed, 900 epochs, lr 3e-3, grad-clip 1.0,
+# last-epoch probe. The only change vs the matching v5 point is the training
+# objective: main link loss + cl_weight * InfoNCE over two SimGCL-noised views.
+# The cl_weight=0 control is the existing v5 signed run at the SAME quantile
+# (NOT re-run here) -- pick that quantile in the notebook cell.
 #
-# Sweep: two hyperparameters, cl_eps (noise magnitude) x cl_weight (lambda).
+# Sweep: QUANTILES (default "0 0.95 0.99") x SimGCL arms (cl_eps x cl_weight).
+# MAIN_LOSS (bce default | bpr) sets the main link loss; variant names carry
+# both the quantile and the loss so bce/bpr and different q coexist in one dir.
+#   default: 4 arms x 10 repeats x 3 quantiles = 120 runs.
 #
 # Examples:
 #   bash scripts/modeling/train/run_graph_full_full_v6_simgcl.sh
@@ -27,7 +29,8 @@ LR="${LR:-3e-3}"
 GRAD_CLIP="${GRAD_CLIP:-1.0}"
 MP_MODE="${MP_MODE:-signed}"
 ARCH="${ARCH:-gnn}"
-MOL_Q="${MOL_Q:-0.95}"             # quantile filter (0 = none); override via env
+QUANTILES="${QUANTILES:-0 0.95 0.99}"   # space-separated molecule-coverage quantiles to sweep
+MAIN_LOSS="${MAIN_LOSS:-bce}"      # main link loss: bce (default) or bpr
 CL_TEMP="${CL_TEMP:-0.2}"          # InfoNCE temperature (fixed, paper default)
 MAX_PARALLEL="${MAX_PARALLEL:-1}"
 DRY_RUN="${DRY_RUN:-0}"
@@ -65,7 +68,8 @@ SIMGCL_ARMS=(
   "0.2 0.2"
   "0.2 0.5"
 )
-TOTAL_RUNS=$((${#REPEATS[@]} * ${#SIMGCL_ARMS[@]}))
+NQ=$(wc -w <<< "$QUANTILES")
+TOTAL_RUNS=$((${#REPEATS[@]} * ${#SIMGCL_ARMS[@]} * NQ))
 
 write_status() {
   local status="$1" stem="$2" log="$3"
@@ -132,13 +136,14 @@ dashboard() {
 }
 
 run_one() {
-  local regime="$1" fold="$2" gnn_seed="$3" boost_seed="$4" eps="$5" weight="$6"
+  local regime="$1" fold="$2" gnn_seed="$3" boost_seed="$4" eps="$5" weight="$6" q="$7"
   local ep wp qt variant stem artifact log rc
   ep="$(awk "BEGIN{printf \"%d\", $eps*100}")"
   wp="$(awk "BEGIN{printf \"%d\", $weight*100}")"
-  qt="$(awk "BEGIN{printf \"%d\", $MOL_Q*100}")"
+  qt="$(awk "BEGIN{printf \"%d\", $q*100}")"
   local q_seg=""; [[ "$qt" != "0" ]] && q_seg="_q${qt}"
-  variant="${MP_MODE}${q_seg}_simgcl_e${ep}_w${wp}"
+  local loss_seg=""; [[ "$MAIN_LOSS" == "bpr" ]] && loss_seg="_bpr"
+  variant="${MP_MODE}${q_seg}${loss_seg}_simgcl_e${ep}_w${wp}"
   stem="${ARCH}_${variant}_${regime}_fold${fold}_gnn${gnn_seed}_boost${boost_seed}"
   artifact="${RESULT_DIR}/checkpoints/${ARCH}_${variant}_unentangled_boost_${regime}_fold${fold}_gnn${gnn_seed}_boost${boost_seed}.pt"
   log="${LOG_DIR}/${stem}.log"
@@ -151,7 +156,7 @@ run_one() {
   if [[ "$DRY_RUN" == "1" ]]; then
     {
       echo uv run python scripts/modeling/train/train_graph_full_full.py \
-        --arch "$ARCH" --mp_mode "$MP_MODE" --mol_quality_q "$MOL_Q" \
+        --arch "$ARCH" --mp_mode "$MP_MODE" --mol_quality_q "$q" --main-loss "$MAIN_LOSS" \
         --cl-eps "$eps" --cl-weight "$weight" --cl-temp "$CL_TEMP" \
         --regime "$regime" --fold "$fold" \
         --epochs "$EPOCHS" --lr "$LR" --grad-clip "$GRAD_CLIP" \
@@ -164,7 +169,7 @@ run_one() {
   set +e
   if [[ "$QUIET" == "1" ]]; then
     uv run python scripts/modeling/train/train_graph_full_full.py \
-      --arch "$ARCH" --mp_mode "$MP_MODE" --mol_quality_q "$MOL_Q" \
+      --arch "$ARCH" --mp_mode "$MP_MODE" --mol_quality_q "$q" --main-loss "$MAIN_LOSS" \
       --cl-eps "$eps" --cl-weight "$weight" --cl-temp "$CL_TEMP" \
       --regime "$regime" --fold "$fold" \
       --epochs "$EPOCHS" --lr "$LR" --grad-clip "$GRAD_CLIP" \
@@ -173,7 +178,7 @@ run_one() {
     rc=$?
   else
     uv run python scripts/modeling/train/train_graph_full_full.py \
-      --arch "$ARCH" --mp_mode "$MP_MODE" --mol_quality_q "$MOL_Q" \
+      --arch "$ARCH" --mp_mode "$MP_MODE" --mol_quality_q "$q" --main-loss "$MAIN_LOSS" \
       --cl-eps "$eps" --cl-weight "$weight" --cl-temp "$CL_TEMP" \
       --regime "$regime" --fold "$fold" \
       --epochs "$EPOCHS" --lr "$LR" --grad-clip "$GRAD_CLIP" \
@@ -210,14 +215,16 @@ if [[ "$QUIET" == "1" ]]; then
   trap '[[ -n "${MONITOR_PID:-}" ]] && kill "$MONITOR_PID" 2>/dev/null || true' EXIT
 fi
 
-echo "full_full v6 SimGCL: $TOTAL_RUNS runs (${#SIMGCL_ARMS[@]} arms x ${#REPEATS[@]} repeats); arch=$ARCH mp=$MP_MODE q=$MOL_Q tau=$CL_TEMP"
+echo "full_full v6 SimGCL: $TOTAL_RUNS runs (${#SIMGCL_ARMS[@]} arms x ${#REPEATS[@]} repeats x $NQ quantiles); arch=$ARCH mp=$MP_MODE q={$QUANTILES} main_loss=$MAIN_LOSS tau=$CL_TEMP"
 for repeat in "${REPEATS[@]}"; do
   read -r regime fold gnn_seed boost_seed <<< "$repeat"
-  for arm in "${SIMGCL_ARMS[@]}"; do
-    read -r eps weight <<< "$arm"
-    wait_for_slot
-    run_one "$regime" "$fold" "$gnn_seed" "$boost_seed" "$eps" "$weight" &
-    RUNNING_PIDS+=("$!")
+  for q in $QUANTILES; do
+    for arm in "${SIMGCL_ARMS[@]}"; do
+      read -r eps weight <<< "$arm"
+      wait_for_slot
+      run_one "$regime" "$fold" "$gnn_seed" "$boost_seed" "$eps" "$weight" "$q" &
+      RUNNING_PIDS+=("$!")
+    done
   done
 done
 

@@ -337,7 +337,14 @@ def run_ensemble(pairs: pd.DataFrame, extractors: dict[str, object], combo_spec:
             study_name = f"repeat{repeat_tag}_combo{'+'.join(combo)}"
             clf, study = tune_boost(Xtr, y_tr, Xva, y_va, seed=seed, n_trials=n_trials,
                                      storage=optuna_storage, study_name=study_name)
-            print(f"  [repeat {repeat_tag}] tune[{'+'.join(combo):>20}]: {n_trials} trials, "
+            # Report the trials actually behind best_value, not the requested
+            # budget: on a resumed (or study-imported) run the search is
+            # already satisfied and this call runs none of its own, so
+            # printing n_trials would claim work that never happened.
+            import optuna as _optuna
+            done = sum(1 for t in study.trials if t.state == _optuna.trial.TrialState.COMPLETE)
+            print(f"  [repeat {repeat_tag}] tune[{'+'.join(combo):>20}]: "
+                  f"{done} trials done (target {n_trials}), "
                   f"best val AUPRC={study.best_value:.3f}, params={study.best_params}", flush=True)
             if checkpoint_dir is not None:
                 study.trials_dataframe().to_csv(

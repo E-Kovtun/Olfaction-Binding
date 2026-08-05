@@ -41,6 +41,21 @@ while not (_root / "pyproject.toml").exists():
 METRICS = ["AUROC", "AUPRC", "F1", "MCC"]
 SOURCES = [("simplex", "ensemble", "ensemble[simplex]"),
            ("prot+mol", "combo", "prot+mol")]
+ENCODER_TAGS = ("chemberta", "gin", "esm1b", "esm2")
+
+
+def molecule_encoder(cfg: dict) -> str:
+    """Which molecule embedding a run actually used. Not readable from the
+    source's CLI type -- `gin` there just means "npz keyed by inchikey" and
+    is routinely handed ChemBERTa -- so it comes from the file name."""
+    for src in cfg.get("sources", []):
+        name, _, rest = src.partition("=")
+        if name != "mol":
+            continue
+        parts = rest.split(":")
+        stem = pathlib.Path(parts[1]).stem.lower() if len(parts) > 1 and parts[1] else ""
+        return next((t.upper() if t == "gin" else t for t in ENCODER_TAGS if t in stem), stem or "?")
+    return "?"
 
 
 def ci95(values: pd.Series) -> tuple[float, float, int]:
@@ -80,7 +95,7 @@ def main() -> None:
         cfg = json.loads(cfg_path.read_text(encoding="utf-8")) if cfg_path.exists() else {}
         mode = cfg.get("full_full_mode") if cfg.get("regime") == "full_full" else cfg.get("split")
 
-        row = {"run": d.name, "mode": mode or "?"}
+        row = {"run": d.name, "mode": mode or "?", "mol": molecule_encoder(cfg)}
         n_seen = set()
         for metric in METRICS:
             for label, kind, name in SOURCES:
@@ -100,15 +115,27 @@ def main() -> None:
         print(f"no runs with metrics.csv under {_root / args.out_dir}")
         return
 
-    table = pd.DataFrame(rows).sort_values(["mode", "run"])
-    cols = ["run", "mode", "n"] + [c for c in table.columns if c not in ("run", "mode", "n")]
-    table = table[cols]
+    table = pd.DataFrame(rows)
+    meta = ["run", "mode", "mol", "n"]
+    table = table[meta + [c for c in table.columns if c not in meta]]
+    # transductive first: it is the easier regime and reads as the reference
+    # point for the cold-molecule numbers underneath it.
+    table = table.sort_values(
+        ["mode", "mol", "run"],
+        key=lambda s: s.map({"transductive": ""}).fillna(s) if s.name == "mode" else s)
 
     pd.set_option("display.width", 300)
     pd.set_option("display.max_colwidth", 40)
-    print(table.to_string(index=False))
+
+    for mode, by_mode in table.groupby("mode", sort=False):
+        print(f"\n{'=' * 100}\n{mode}  ({len(by_mode)} run(s))\n{'=' * 100}")
+        for mol, by_mol in by_mode.groupby("mol", sort=False):
+            print(f"\n  molecules: {mol}")
+            block = by_mol.drop(columns=["mode", "mol"])
+            print("\n".join("  " + line for line in block.to_string(index=False).splitlines()))
+
     print("\ncells: mean ± half-width of the 95% t-interval over n repeats; "
-          "'—' = that combo was never computed in that run")
+          "'-' = that combo was never computed in that run")
 
     if args.csv:
         out = pathlib.Path(args.csv)

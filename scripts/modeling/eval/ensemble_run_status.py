@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import json
 import pathlib
+import shlex
 import sys
 
 import pandas as pd
@@ -150,11 +151,66 @@ def verdict(run: dict) -> tuple[str, list[str]]:
     return "OK", notes
 
 
+def relaunch_command(run: dict) -> str:
+    """The run's own original invocation, with --combos widened to everything
+    it now has artifacts for. Printed, never executed: rerunning it refits the
+    heads whose studies are already complete (zero new optuna trials) and
+    refits the ensemble over the full candidate set."""
+    cfg = run["cfg"]
+    source_names = [s.split("=", 1)[0] for s in cfg.get("sources", [])]
+    available = set()
+    for rep in set(run["boosters"]) | set(run["studies"]):
+        available |= run["boosters"].get(rep, set()) | run["studies"].get(rep, set())
+
+    digits = []
+    for combo in sorted(available, key=lambda c: (len(c.split("+")), c)):
+        parts = combo.split("+")
+        if any(p not in source_names for p in parts):
+            continue                                  # combo from a source this run no longer declares
+        digits.append("".join(str(source_names.index(p) + 1) for p in parts))
+    digits.sort(key=lambda d: (len(d), d))
+
+    def opt(flag: str, *values) -> str:
+        return " ".join([flag, *(shlex.quote(str(v)) if " " in str(v) else str(v) for v in values)])
+
+    lines = ["uv run python scripts/modeling/train/train_ensemble_boost.py",
+             opt("--regime", cfg["regime"])]
+    lines += [opt("--source", s) for s in cfg["sources"]]
+    lines += [opt("--combos", " ".join(digits)),
+              opt("--on-missing", cfg.get("on_missing", "raise")),
+              opt("--weight-method", cfg.get("weight_method", "both")),
+              opt("--max-parallel", cfg.get("max_parallel", 1)),
+              opt("--run-name", cfg["run_name"])]
+    if cfg.get("tune_boost"):
+        lines.append(opt("--tune-boost") + " " + opt("--n-trials", cfg.get("n_trials", 30)))
+    if cfg.get("skip_checkpoints"):
+        lines.append("--skip-checkpoints")
+    if cfg.get("gpus"):
+        lines.append(opt("--gpus", *cfg["gpus"]))
+    if cfg["regime"] == "full_full":
+        lines.append(opt("--full-full-mode", cfg.get("full_full_mode", "transductive")))
+        if cfg.get("repeats"):
+            lines.append(opt("--repeats", *cfg["repeats"]))
+    else:
+        lines += [opt("--pairs", cfg.get("pairs", "")),
+                  opt("--split", cfg.get("split", "stratified")),
+                  opt("--test-size", cfg.get("test_size", 0.2)),
+                  opt("--val-size", cfg.get("val_size", 0.2))]
+        if cfg.get("seeds"):
+            lines.append(opt("--seeds", *cfg["seeds"]))
+    return " \\\n    ".join(lines)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out-dir", default="results/ensemble_logs")
     ap.add_argument("--verbose", action="store_true", help="also print per-repeat combo sets")
+    ap.add_argument("--print-relaunch", action="store_true",
+                     help="for every OUTDATED run, print the command that refits its ensemble "
+                          "over the full set of combos it now has artifacts for (printed only, "
+                          "never run)")
     args = ap.parse_args()
+    outdated = []
 
     base = _root / args.out_dir
     rows = []
@@ -163,6 +219,8 @@ def main() -> None:
         if run is None:
             continue
         status, notes = verdict(run)
+        if status == "OUTDATED":
+            outdated.append(run)
         cfg = run["cfg"]
         mode = cfg.get("full_full_mode") if cfg.get("regime") == "full_full" else cfg.get("split")
         scored = sorted(set().union(*run["combo_rows"].values())) if run["combo_rows"] else []
@@ -192,6 +250,13 @@ def main() -> None:
     print(pd.DataFrame(rows).to_string(index=False))
     print("\nOUTDATED = artifacts exist for combos the recorded ensemble was not fit over;"
           "\n           only the ensembling stage needs redoing, the heads are already trained.")
+
+    if args.print_relaunch:
+        if not outdated:
+            print("\nnothing OUTDATED -- no relaunch needed.")
+        for run in outdated:
+            print(f"\n# --- {run['dir'].name} ---")
+            print(relaunch_command(run))
 
 
 if __name__ == "__main__":

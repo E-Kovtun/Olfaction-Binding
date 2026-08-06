@@ -88,6 +88,20 @@ all three together -- on full_full/transductive, all 5 folds, 3 at a time::
         --source mol=gin:data/embeddings/molecules/gin_supervised_contextpred_all_m2or.npz \\
         --combos "1 2 3 12 13 23 123" --on-missing drop
 
+The ProSmith/MPP baseline itself, reproducing upstream's own second stage
+(its `training_GB.py` builds exactly `cls`, `prot+mol` and `prot+mol+cls`).
+The cls source takes a *per-residue* protein npz -- upstream's own ESM-1b,
+imported by scripts/embedding_generation/proteins/06_import_ofm_esm1b.py --
+while prot stays mean-pooled; both defaults, so only the BindingDB
+checkpoint (which upstream's published numbers use) has to be named::
+
+    uv run python scripts/modeling/train/train_ensemble_boost.py \\
+        --regime full_full --full-full-mode transductive \\
+        --source cls=prosmith:::1:saved_model/pretraining_IC50_6gpus_bs144_1.5e-05_layers6.txt.pkl \\
+        --source prot=esm:data/embeddings/proteins/esm1b_650m_mean.npz:esm1b_t33_650M_UR50S \\
+        --source mol=gin:data/embeddings/molecules/chemberta_77m_m2or.npz:chemberta_77m \\
+        --combos "1 2 3 12 13 23 123" --on-missing drop
+
 Same, but cls as a single ProSmith-style model (n_models=1) instead of the
 default 5-model bagging ensemble -- note the blank protein/molecule-path
 fields to keep their defaults::
@@ -121,6 +135,7 @@ from orbind.ensemble import EsmExtractor, GinExtractor, run_ensemble
 from orbind.regimes import full_full_pairs, load_split
 from orbind.attention_extractor import MilNoisyOrExtractor, MilLseExtractor
 from orbind.gnn_extractor import GnnSignedExtractor, GnnSignedDgiExtractor
+from orbind.prosmith_extractor import ProSmithExtractor
 
 # entity-level: "name=type:path[:model_name[:pooling]]" -- a static npz lookup.
 TYPE_FACTORIES = {"esm": EsmExtractor, "gin": GinExtractor}
@@ -134,6 +149,18 @@ ATTENTION_FACTORIES = {"attn_noisy_or": MilNoisyOrExtractor, "attn_lse": MilLseE
 # gnn_signed_dgi is the same source plus a DeepGraphInfomax auxiliary loss
 # (shared scope, lambda=0.5) mixed into encoder training.
 GNN_FACTORIES = {"gnn_signed": GnnSignedExtractor, "gnn_signed_dgi": GnnSignedDgiExtractor}
+# pair-level, supervised, external baseline: the ProSmith/MPP multimodal
+# transformer (see orbind/prosmith_extractor.py). Unlike the sources above it
+# wants a *per-residue* protein npz, and its molecule npz is a pooled one.
+# "name=prosmith[:protein_path:molecule_path[:n_models[:pretrained_path[:faithful_bugs]]]]"
+# n_models defaults to 1 -- ProSmith's own scheme, one model per split.
+# pretrained_path points at upstream's BindingDB checkpoint (BindingDB.zip in
+# https://zenodo.org/records/17228740); without it the transformer starts from
+# scratch, which is NOT what upstream's published numbers use.
+# faithful_bugs=1 restores upstream's double sigmoid and unmasked padding
+# (several times slower, since padding then has to be computed); default 0
+# fixes both -- see the extractor's module docstring.
+PROSMITH_FACTORIES = {"prosmith": ProSmithExtractor}
 DEFAULT_REPEATS = {"transductive": [1, 2, 3, 4, 5],
                     "inductive_molecule": [42, 43, 44, 45, 46],
                     "inductive_molecule_v5": [42, 43, 44, 45, 46]}
@@ -174,9 +201,24 @@ def parse_source_arg(raw: str):
             kwargs["emit"] = parts[4]
         return name, GNN_FACTORIES[type_](name=name, **kwargs)
 
+    if type_ in PROSMITH_FACTORIES:
+        kwargs = {}
+        if len(parts) > 1 and parts[1]:
+            kwargs["protein_path"] = parts[1]
+        if len(parts) > 2 and parts[2]:
+            kwargs["molecule_path"] = parts[2]
+        if len(parts) > 3 and parts[3]:
+            kwargs["n_models"] = int(parts[3])
+        if len(parts) > 4 and parts[4]:
+            kwargs["pretrained_path"] = parts[4]
+        if len(parts) > 5 and parts[5]:
+            kwargs["faithful_bugs"] = parts[5] not in ("0", "false", "False")
+        return name, PROSMITH_FACTORIES[type_](name=name, **kwargs)
+
     if type_ not in TYPE_FACTORIES:
         raise argparse.ArgumentTypeError(
-            f"unknown source type {type_!r}, have {list(TYPE_FACTORIES) + list(ATTENTION_FACTORIES) + list(GNN_FACTORIES)}")
+            f"unknown source type {type_!r}, have "
+            f"{list(TYPE_FACTORIES) + list(ATTENTION_FACTORIES) + list(GNN_FACTORIES) + list(PROSMITH_FACTORIES)}")
     if len(parts) < 2:
         raise argparse.ArgumentTypeError(f"--source {raw!r} must look like name=type:path")
     path = parts[1]

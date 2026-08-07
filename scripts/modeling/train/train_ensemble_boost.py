@@ -131,36 +131,52 @@ while not (_root / "pyproject.toml").exists():
     _root = _root.parent
 sys.path.insert(0, str(_root))
 
-from orbind.ensemble import EsmExtractor, GinExtractor, run_ensemble
-from orbind.regimes import full_full_pairs, load_split
-from orbind.attention_extractor import MilNoisyOrExtractor, MilLseExtractor
-from orbind.gnn_extractor import GnnSignedExtractor, GnnSignedDgiExtractor
-from orbind.prosmith_extractor import ProSmithExtractor
+import importlib
 
-# entity-level: "name=type:path[:model_name[:pooling]]" -- a static npz lookup.
-TYPE_FACTORIES = {"esm": EsmExtractor, "gin": GinExtractor}
-# pair-level, supervised: "name=type" (bakes in its own embedding paths/hparams;
-# optionally "name=type:protein_path:molecule_sites_path" to override them).
-ATTENTION_FACTORIES = {"attn_noisy_or": MilNoisyOrExtractor, "attn_lse": MilLseExtractor}
-# pair-level, supervised, graph-based: "name=type" (bakes in mean-pooled ESM/GIN
-# paths; "name=type:protein_path:molecule_path[:n_models[:emit]]" to override).
-# emit: "prot" (default, v5's own probe shape -- graph protein only, pair it
-# with a raw molecule source) or "both" ([graph molecule || graph protein]).
-# gnn_signed_dgi is the same source plus a DeepGraphInfomax auxiliary loss
-# (shared scope, lambda=0.5) mixed into encoder training.
-GNN_FACTORIES = {"gnn_signed": GnnSignedExtractor, "gnn_signed_dgi": GnnSignedDgiExtractor}
-# pair-level, supervised, external baseline: the ProSmith/MPP multimodal
-# transformer (see orbind/prosmith_extractor.py). Unlike the sources above it
-# wants a *per-residue* protein npz, and its molecule npz is a pooled one.
-# "name=prosmith[:protein_path:molecule_path[:n_models[:pretrained_path[:faithful_bugs]]]]"
-# n_models defaults to 1 -- ProSmith's own scheme, one model per split.
-# pretrained_path points at upstream's BindingDB checkpoint (BindingDB.zip in
-# https://zenodo.org/records/17228740); without it the transformer starts from
-# scratch, which is NOT what upstream's published numbers use.
-# faithful_bugs=1 restores upstream's double sigmoid and unmasked padding
-# (several times slower, since padding then has to be computed); default 0
-# fixes both -- see the extractor's module docstring.
-PROSMITH_FACTORIES = {"prosmith": ProSmithExtractor}
+from orbind.ensemble import run_ensemble
+from orbind.regimes import full_full_pairs, load_split
+
+# Source types dispatch LAZILY: parse_source_arg imports an extractor's module
+# only when a source of that type is actually requested, so a run pulls just the
+# heavy deps it needs -- gnn_* -> torch_geometric, lorax -> transformers+peft,
+# prosmith/attn/esm/gin -> torch only. This is what lets the ProSmith/LORAX
+# "controls" run in a PyG-free environment separate from the graph pipeline.
+_FACTORY_SPEC = {
+    # entity-level: "name=type:path[:model_name[:pooling]]" -- a static npz lookup.
+    "esm": ("orbind.ensemble", "EsmExtractor"),
+    "gin": ("orbind.ensemble", "GinExtractor"),
+    # attention MIL (torch only): "name=type[:protein_path:molecule_sites_path[:n_models]]".
+    "attn_noisy_or": ("orbind.attention_extractor", "MilNoisyOrExtractor"),
+    "attn_lse": ("orbind.attention_extractor", "MilLseExtractor"),
+    # graph-based (pulls torch_geometric): "name=type[:protein_path:molecule_path[:n_models[:emit]]]".
+    # emit: "prot" (default, v5 probe shape) or "both". gnn_signed_dgi adds a
+    # DeepGraphInfomax auxiliary loss (shared scope, lambda=0.5).
+    "gnn_signed": ("orbind.gnn_extractor", "GnnSignedExtractor"),
+    "gnn_signed_dgi": ("orbind.gnn_extractor", "GnnSignedDgiExtractor"),
+    # ProSmith/MPP transformer over a *per-residue* protein npz + pooled molecule npz
+    # (torch only): "name=prosmith[:protein_path:molecule_path[:n_models[:pretrained_path[:faithful_bugs]]]]".
+    # pretrained_path = upstream BindingDB checkpoint; empty trains from scratch
+    # (weaker than upstream's published numbers). faithful_bugs=1 restores the
+    # double sigmoid + unmasked padding (slower). See orbind/prosmith_extractor.py.
+    "prosmith": ("orbind.prosmith_extractor", "ProSmithExtractor"),
+    # LORAX (pulls transformers+peft): LoRA-ChemBERTa molecule + cross-attention
+    # over frozen per-residue ESM-1b protein. LoRA on the MOLECULE side only and
+    # protein frozen ESM-1b, so directly comparable to the ProSmith baseline (both
+    # on ESM-1b). "name=lorax[:protein_path:chemberta_card[:n_models[:lora_r]]]".
+    # See orbind/lorax_extractor.py.
+    "lorax": ("orbind.lorax_extractor", "LoraxExtractor"),
+}
+_ENTITY_TYPES    = {"esm", "gin"}
+_ATTENTION_TYPES = {"attn_noisy_or", "attn_lse"}
+_GNN_TYPES       = {"gnn_signed", "gnn_signed_dgi"}
+_PROSMITH_TYPES  = {"prosmith"}
+_LORAX_TYPES     = {"lorax"}
+
+
+def _factory(type_):
+    """Import the extractor module lazily and return its class."""
+    module, cls = _FACTORY_SPEC[type_]
+    return getattr(importlib.import_module(module), cls)
 DEFAULT_REPEATS = {"transductive": [1, 2, 3, 4, 5],
                     "inductive_molecule": [42, 43, 44, 45, 46],
                     "inductive_molecule_v5": [42, 43, 44, 45, 46]}
@@ -179,7 +195,7 @@ def parse_source_arg(raw: str):
     parts = rest.split(":")
     type_ = parts[0]
 
-    if type_ in ATTENTION_FACTORIES:
+    if type_ in _ATTENTION_TYPES:
         kwargs = {}
         if len(parts) > 1 and parts[1]:
             kwargs["protein_path"] = parts[1]
@@ -187,9 +203,9 @@ def parse_source_arg(raw: str):
             kwargs["molecule_sites_path"] = parts[2]
         if len(parts) > 3 and parts[3]:
             kwargs["n_models"] = int(parts[3])
-        return name, ATTENTION_FACTORIES[type_](name=name, **kwargs)
+        return name, _factory(type_)(name=name, **kwargs)
 
-    if type_ in GNN_FACTORIES:
+    if type_ in _GNN_TYPES:
         kwargs = {}
         if len(parts) > 1 and parts[1]:
             kwargs["protein_path"] = parts[1]
@@ -199,9 +215,9 @@ def parse_source_arg(raw: str):
             kwargs["n_models"] = int(parts[3])
         if len(parts) > 4 and parts[4]:
             kwargs["emit"] = parts[4]
-        return name, GNN_FACTORIES[type_](name=name, **kwargs)
+        return name, _factory(type_)(name=name, **kwargs)
 
-    if type_ in PROSMITH_FACTORIES:
+    if type_ in _PROSMITH_TYPES:
         kwargs = {}
         if len(parts) > 1 and parts[1]:
             kwargs["protein_path"] = parts[1]
@@ -213,12 +229,23 @@ def parse_source_arg(raw: str):
             kwargs["pretrained_path"] = parts[4]
         if len(parts) > 5 and parts[5]:
             kwargs["faithful_bugs"] = parts[5] not in ("0", "false", "False")
-        return name, PROSMITH_FACTORIES[type_](name=name, **kwargs)
+        return name, _factory(type_)(name=name, **kwargs)
 
-    if type_ not in TYPE_FACTORIES:
+    if type_ in _LORAX_TYPES:
+        kwargs = {}
+        if len(parts) > 1 and parts[1]:
+            kwargs["protein_path"] = parts[1]
+        if len(parts) > 2 and parts[2]:
+            kwargs["chemberta_card"] = parts[2]
+        if len(parts) > 3 and parts[3]:
+            kwargs["n_models"] = int(parts[3])
+        if len(parts) > 4 and parts[4]:
+            kwargs["lora_r"] = int(parts[4])
+        return name, _factory(type_)(name=name, **kwargs)
+
+    if type_ not in _ENTITY_TYPES:
         raise argparse.ArgumentTypeError(
-            f"unknown source type {type_!r}, have "
-            f"{list(TYPE_FACTORIES) + list(ATTENTION_FACTORIES) + list(GNN_FACTORIES) + list(PROSMITH_FACTORIES)}")
+            f"unknown source type {type_!r}, have {list(_FACTORY_SPEC)}")
     if len(parts) < 2:
         raise argparse.ArgumentTypeError(f"--source {raw!r} must look like name=type:path")
     path = parts[1]
@@ -227,7 +254,7 @@ def parse_source_arg(raw: str):
         kwargs["model_name"] = parts[2]
     if len(parts) > 3 and parts[3]:
         kwargs["pooling"] = parts[3]
-    extractor = TYPE_FACTORIES[type_](name=name, path=path, **kwargs)
+    extractor = _factory(type_)(name=name, path=path, **kwargs)
     return name, extractor
 
 

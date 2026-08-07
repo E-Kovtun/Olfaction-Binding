@@ -234,13 +234,16 @@ def _train_one(build_model, load_tokenizer, train_df, val_df, test_df, proteins,
         return nn.functional.binary_cross_entropy_with_logits(logits, y, weight=w, reduction="mean")
 
     best_val, best_state = np.inf, None
-    for _ in range(hp["epochs"]):
+    for ep in range(hp["epochs"]):
         model.train()
+        run_loss, seen = 0.0, 0
         for smi_tok, prot, pad, y, w in train_loader:
             opt.zero_grad(set_to_none=True)
             logits = model(_to_device(smi_tok, device), prot.to(device), pad.to(device))
-            batch_loss(logits, y.to(device), w.to(device)).backward()
+            loss = batch_loss(logits, y.to(device), w.to(device))
+            loss.backward()
             opt.step()
+            run_loss += float(loss) * len(y); seen += len(y)
 
         model.eval()
         total, n = 0.0, 0
@@ -250,9 +253,13 @@ def _train_one(build_model, load_tokenizer, train_df, val_df, test_df, proteins,
                 total += float(batch_loss(logits, y.to(device), w.to(device))) * len(y)
                 n += len(y)
         val_loss = total / max(n, 1)
-        if val_loss < best_val:
+        is_best = val_loss < best_val
+        if is_best:
             best_val = val_loss
             best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+        print(f"    lorax epoch {ep + 1}/{hp['epochs']}  "
+              f"train_loss={run_loss / max(seen, 1):.4f}  val_loss={val_loss:.4f}"
+              f"{'  *best' if is_best else ''}", flush=True)
 
     if best_state is not None:
         model.load_state_dict(best_state)

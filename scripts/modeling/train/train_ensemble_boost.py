@@ -162,7 +162,8 @@ _FACTORY_SPEC = {
     # LORAX (pulls transformers+peft): LoRA-ChemBERTa molecule + cross-attention
     # over frozen per-residue ESM-1b protein. LoRA on the MOLECULE side only and
     # protein frozen ESM-1b, so directly comparable to the ProSmith baseline (both
-    # on ESM-1b). "name=lorax[:protein_path:chemberta_card[:n_models[:lora_r]]]".
+    # on ESM-1b). "name=lorax[:protein_path:chemberta_card[:n_models[:lora_r[:epochs]]]]"
+    # (epochs exposed so a smoke can pass e.g. cls=lorax:::::2).
     # See orbind/lorax_extractor.py.
     "lorax": ("orbind.lorax_extractor", "LoraxExtractor"),
 }
@@ -241,6 +242,8 @@ def parse_source_arg(raw: str):
             kwargs["n_models"] = int(parts[3])
         if len(parts) > 4 and parts[4]:
             kwargs["lora_r"] = int(parts[4])
+        if len(parts) > 5 and parts[5]:
+            kwargs["epochs"] = int(parts[5])
         return name, _factory(type_)(name=name, **kwargs)
 
     if type_ not in _ENTITY_TYPES:
@@ -284,6 +287,17 @@ class _Tee:
     def flush(self):
         for s in self.streams:
             s.flush()
+
+    def isatty(self):
+        # Never a TTY: keeps libraries (e.g. transformers' loading report) from
+        # emitting ANSI colour codes into the captured log file, and avoids the
+        # AttributeError they raise when they probe sys.stdout.isatty().
+        return False
+
+    def __getattr__(self, name):
+        # Delegate anything else a library might probe (fileno, encoding, ...) to
+        # the real console stream.
+        return getattr(self.streams[0], name)
 
 
 def _run_one_repeat(regime, pairs, extractors, combos, split, repeat, test_size, val_size,

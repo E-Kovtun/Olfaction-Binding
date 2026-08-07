@@ -311,9 +311,13 @@ def _run_models(ext, pairs, train_idx, val_idx, test_idx, seed, checkpoint_dir=N
 @dataclass
 class LoraxExtractor:
     """LORAX cls-style source: LoRA-ChemBERTa (molecule, live) cross-attended
-    with frozen per-residue ESM-1b (protein). Defaults follow LORAX's own config
-    (lorax/configs): LoRA r=8/alpha=8 on query/key/value, 8 heads, lr 1e-3,
-    50 epochs, linear projection head. The boosting feature is `cat_rep`
+    with frozen per-residue ESM-1b (protein). Defaults follow LORAX's **M2OR**
+    config (lorax/configs/config_m2or.yaml): LoRA r=8/alpha=8 on query/key/value,
+    8 heads, comb dropout 0.1, MLP projection head (lin_proj False), lr 1e-4,
+    15 epochs, batch 21. config_m2or also sets no_prot_model_ft=True (protein not
+    fine-tuned) -- our frozen ESM-1b matches that intent; the one deliberate
+    deviation is ESM-1b instead of their ESM-2, for apples-to-apples comparability
+    with the ProSmith baseline. The boosting feature is `cat_rep`
     (mol_hidden + prot_dim = 384 + 1280 = 1664 per model).
 
     `protein_path` must be a *per-residue* npz keyed by sequence
@@ -332,13 +336,13 @@ class LoraxExtractor:
     lora_alpha: int = 8
     lora_dropout: float = 0.1
     num_heads: int = 8
-    lin_proj: bool = True
+    lin_proj: bool = False         # config_m2or: MLP head (lin_proj: False)
     mlp_hidden: int = 512
     mol_hidden: int = 384          # ChemBERTa-77M hidden width
     prot_dim: int = 1280           # ESM-1b per-residue width
-    lr: float = 1e-3
-    epochs: int = 50
-    batch_size: int = 12
+    lr: float = 1e-4               # config_m2or train_lorax.lr
+    epochs: int = 15               # config_m2or train_lorax.train_epochs
+    batch_size: int = 21           # config_m2or train_lorax.batch_size
     max_smiles_len: int = 256
     seed_offset: int = 5000
     pooling: str = "cross_attn_cat"

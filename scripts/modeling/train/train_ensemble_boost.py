@@ -166,12 +166,19 @@ _FACTORY_SPEC = {
     # (epochs exposed so a smoke can pass e.g. cls=lorax:::::2).
     # See orbind/lorax_extractor.py.
     "lorax": ("orbind.lorax_extractor", "LoraxExtractor"),
+    # MolOR (pulls dgl+dgllife+rdkit): GCN molecule encoder (trained live) cross-
+    # attended with frozen per-residue ESM-1b protein -- same ESM-1b as ProSmith
+    # and LORAX, so all three are directly comparable. Molecule is a 2D graph, not
+    # ChemBERTa (that IS MolOR's identity). "name=molor[:protein_path[:n_models[:epochs]]]".
+    # See orbind/molor_extractor.py.
+    "molor": ("orbind.molor_extractor", "MolorExtractor"),
 }
 _ENTITY_TYPES    = {"esm", "gin"}
 _ATTENTION_TYPES = {"attn_noisy_or", "attn_lse"}
 _GNN_TYPES       = {"gnn_signed", "gnn_signed_dgi"}
 _PROSMITH_TYPES  = {"prosmith"}
 _LORAX_TYPES     = {"lorax"}
+_MOLOR_TYPES     = {"molor"}
 
 
 def _factory(type_):
@@ -244,6 +251,16 @@ def parse_source_arg(raw: str):
             kwargs["lora_r"] = int(parts[4])
         if len(parts) > 5 and parts[5]:
             kwargs["epochs"] = int(parts[5])
+        return name, _factory(type_)(name=name, **kwargs)
+
+    if type_ in _MOLOR_TYPES:
+        kwargs = {}
+        if len(parts) > 1 and parts[1]:
+            kwargs["protein_path"] = parts[1]
+        if len(parts) > 2 and parts[2]:
+            kwargs["n_models"] = int(parts[2])
+        if len(parts) > 3 and parts[3]:
+            kwargs["epochs"] = int(parts[3])
         return name, _factory(type_)(name=name, **kwargs)
 
     if type_ not in _ENTITY_TYPES:

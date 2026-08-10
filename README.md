@@ -29,11 +29,7 @@ All experiment notebooks are versioned and are the primary research record.
 
 - `notebooks/baseline_screening.ipynb` — curated baseline comparison.
 - `notebooks/interaction_research.ipynb` — interaction-feature experiments.
-- `notebooks/graph/graph_evaluation_curated.ipynb` — curated graph evaluation.
-- `notebooks/graph/graph_evaluation_full_full.ipynb` — standard full_full GNN/GAT architecture screen and v5 analysis.
-- `notebooks/graph/graph_evaluation_full_full_compressed.ipynb` — compressed-embedding graph experiments.
-- `notebooks/graph/graph_inductive-transductive_analysis.ipynb` — inductive/transductive mechanisms and molecule enrichment.
-- `notebooks/graph/gnn_training_diagnostics.ipynb` — training-history and stability diagnostics.
+- `notebooks/graph/` — heterogeneous bipartite GNN/GAT link predictor, grouped into `benchmarks/` (per-dataset sweeps: `full_full`, `full_full_compressed`, `curated`), `mechanism/` (`inductive_vs_transductive`, `training_diagnostics`), and `alternatives/` (`molecule_side_graphs` — the "none beats raw boost" ledger). See `notebooks/graph/README.md`.
 - `notebooks/molecule_embeddings/` — molecular embedding and PCA screening.
 - `notebooks/protein_embeddings/` — ESM embedding, PCA, and neighbourhood analyses.
 

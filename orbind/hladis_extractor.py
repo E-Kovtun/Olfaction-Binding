@@ -74,8 +74,27 @@ the only Hladis in the project.
 The upside is that the *split* is shared: LoRaX's `rand_split_1..5` are
 Hladis's own folds, which is exactly the `full_full` pool this project's
 transductive regime uses. Published Hladis numbers are therefore on the same
-partition as our transductive runs. (`inductive_molecule_v5` is ours, and has
-no published Hladis counterpart.)
+partition as our transductive runs.
+
+Published reference numbers (paper Tab. 1 and Tab. 3, 5 CV runs, test = 30%
+of the dose-response rows; AveP / Precision / Recall / F / MCC)
+---------------------------------------------------------------------------
+  i.i.d., "single"       0.765 / 0.665 / 0.711 / 0.687 / 0.595
+  i.i.d., "mixture"      0.780 / 0.689 / 0.698 / 0.693 / 0.605
+  random cold molecule   0.729 / 0.657 / 0.629 / 0.638 / 0.533
+  cluster cold molecule  0.580 / 0.544 / 0.342 / 0.418 / 0.334
+
+The i.i.d. rows are the ones quoted in the LORAX paper. The "random cold
+molecule" row is the closest published analogue to this project's
+`inductive_molecule` regimes -- theirs holds out 25% of molecules that have
+at least two responsive pairs, ours holds out 20-30% unconditionally, so it
+is a reference point rather than a matched comparison.
+
+Two caveats on comparing our numbers to those. Their test set is
+dose-response rows only, which our inductive splits also do, but their i.i.d.
+split is over pairs. And "mixture" means enantiomer mixtures modelled as
+disconnected components of one graph; we build one graph per SMILES, so the
+"single" row is the applicable one.
 """
 from __future__ import annotations
 
@@ -365,13 +384,23 @@ def _embed(model, loader, device):
     return np.concatenate(out, axis=0)
 
 
+def _endless(loader):
+    while True:
+        yield from loader
+
+
 def _train_one(build_model, train_df, val_df, test_df, proteins, graphs,
                w_train, w_val, w_test, hp, device, checkpoint_path=None):
-    """Upstream's protocol: Adam on the transformer warmup schedule, a fixed
-    epoch count, no early stopping, keeping the best-validation-loss weights.
-    The criterion is the Hladis-weighted BCE (his own weighting, which this
-    project already reproduces for ProSmith and LORAX) -- upstream's
-    `LOSS_OPTION: cross_entropy` with `WEIGHT_COL: sample_weight`.
+    """Upstream's protocol: Adam on the Vaswani warmup schedule, a fixed
+    *step* budget, no early stopping, keeping the best-validation-loss
+    weights. The criterion is the Hladis-weighted BCE -- the paper's eq. (6),
+    quality x class x pair, which this project already reproduces for ProSmith
+    and LORAX (`_M2ORWeights`), and upstream's `LOSS_OPTION: cross_entropy`
+    with `WEIGHT_COL: sample_weight`.
+
+    Counted in optimizer steps rather than epochs on purpose; see
+    `HladisExtractor.max_steps` for why the two sources disagree and why a
+    step budget is the self-consistent reading.
 
     If `checkpoint_path` exists, training is skipped and only the embed passes
     run, so a resumed run reuses the trained model."""
@@ -393,9 +422,11 @@ def _train_one(build_model, train_df, val_df, test_df, proteins, graphs,
         return nn.functional.binary_cross_entropy_with_logits(logits, y, weight=w, reduction="mean")
 
     best_val, best_state, step = np.inf, None, 0
-    for epoch in range(hp["epochs"]):
+    batches = _endless(train_loader)
+    while step < hp["max_steps"]:
         model.train()
-        for x, mask, src, dst, ea, prot, y, w in train_loader:
+        for _ in range(min(hp["eval_every"], hp["max_steps"] - step)):
+            x, mask, src, dst, ea, prot, y, w = next(batches)
             step += 1
             for g in opt.param_groups:
                 g["lr"] = _transformer_lr(step, hp["lr"], hp["warmup_steps"])
@@ -414,7 +445,8 @@ def _train_one(build_model, train_df, val_df, test_df, proteins, graphs,
                 total += float(loss_of(logits, y.to(device), w.to(device))) * len(y)
                 n += len(y)
         val_loss = total / max(n, 1)
-        print(f"    hladis epoch {epoch + 1}/{hp['epochs']}: val loss {val_loss:.4f}"
+        lr_now = _transformer_lr(step, hp["lr"], hp["warmup_steps"])
+        print(f"    hladis step {step}/{hp['max_steps']}: val loss {val_loss:.4f} lr {lr_now:.2e}"
               + ("  *" if val_loss < best_val else ""), flush=True)
         if val_loss < best_val:
             best_val = val_loss
@@ -469,35 +501,50 @@ def _run_models(ext, pairs, train_idx, val_idx, test_idx, seed, checkpoint_dir=N
 
 @dataclass
 class HladisExtractor:
-    """Hladis et al. (ICLR 2023) cls source. Defaults follow upstream's
-    `configs/config_train.yml` and `normal_QK_model`: node width 72, edge
-    width 36, 5 encoder layers, 6 heads, widening 8, dropout 0.1 (0.5 before
-    the head), Adam at 1e-3 on the transformer schedule with 6000 warmup
-    steps, 10 epochs, batch 100.
+    """Hladis et al. (ICLR 2023) cls source. Defaults follow the paper's
+    section A.1 and `normal_QK_model`: node width 72 and edge width 36 (the
+    paper's own "embedded in R^72 / R^36"), 5 blocks, 6 heads, widening 8,
+    dropout 0.1 in each attention layer and 0.5 before the output, Adam at
+    1e-3 on the Vaswani schedule with 6000 warmup steps, batch 100.
 
     `protein_path` is a *mean-pooled* (one vector per receptor) npz keyed by
-    sequence -- ESM-1b by default, which is a deliberate substitution for
-    upstream's ProtBERT CLS; see the module docstring.
+    sequence -- ESM-1b by default, a deliberate substitution for upstream's
+    ProtBERT CLS. Note the paper concatenates the CLS token **from the last
+    five protBERT layers**, so its receptor input is 5 x 1024 = 5120-d against
+    our 1280; the first Dense absorbs the difference, but the substitution is
+    wider than "same vector, different encoder" and should be reported as
+    such. See the module docstring.
 
     Needs rdkit to build molecule graphs (imported lazily, only when a Hladis
-    source is actually used). Molecule graphs are built once per extractor and
-    cached, so the cost is 596 rdkit parses per run.
+    source is actually used). Graphs are built once per extractor and cached,
+    so the cost is 596 rdkit parses per run.
 
     The emitted feature is `node_d_model` wide -- 72 by default, much narrower
     than the other cls baselines.
 
-    **Watch the learning rate.** Upstream's schedule is the Vaswani warmup with
-    `warmup_steps=6000`, which makes `lr` a scale rather than a peak: the
-    maximum it ever reaches is `lr / sqrt(6000)` ~ 1.3e-5, and only at step
-    6000. On this pool 10 epochs at batch 100 is only ~3500 steps, so training
-    ends *inside* the warmup ramp with an effective rate around 7e-6 -- the
-    smoke test shows the loss barely moving over two epochs. That is faithfully
-    upstream's config (`config_train.yml` + `make_create_optimizer.py`; the
-    `TRANSITION_EPOCHS: 500` in that file belongs to the other optimizer branch
-    and is dead for `adam_transformer`), and it is left as the default rather
-    than quietly "fixed". If a run produces a near-untrained model, the honest
-    levers are `warmup_steps` (lower it so the peak is reached) or `epochs`,
-    and either one should be reported as a deviation."""
+    Budget is counted in **optimizer steps, not epochs**, because the two
+    sources disagree and only the step reading is self-consistent. The paper
+    says "we train the model for 10 000 epochs" with "6000 warm-up steps",
+    while the released `config_train.yml` says `N_EPOCH: 10`. Ten thousand
+    true epochs over ~33k pairs at batch 100 would be ~3.3M steps, which makes
+    a 6000-step warmup meaningless (the rate would spend the entire run
+    decaying) and would take weeks on the V100/A100 they report; ten true
+    epochs is ~3500 steps, which ends *inside* the ramp and never reaches the
+    peak. Reading "epoch" as "gradient step" makes everything line up: warmup
+    completes at 6000 of 10000, and the switch to full-size graphs at 8000 is
+    the last fifth of training. Hence `max_steps=10_000`, roughly 29 epochs
+    here. Both `max_steps` and `warmup_steps` are exposed; changing either is
+    a deviation worth reporting.
+
+    Even at the peak the rate is small: the Vaswani schedule makes `lr` a
+    scale, not a peak, topping out at `lr / sqrt(warmup)` ~ 1.3e-5 at step
+    6000 and decaying afterwards.
+
+    Not reproduced: the size-cut curriculum (first 8000 steps on graphs of at
+    most 32 nodes / 64 edges, then the full dataset). In JAX that exists to
+    keep padded shapes static and jit-able; our collate pads to the batch
+    maximum, so it buys nothing computationally here, and keeping it purely as
+    a curriculum would be a guess about intent rather than a reproduction."""
 
     name: str
     protein_path: str = "data/embeddings/proteins/esm1b_650m_mean.npz"
@@ -510,7 +557,8 @@ class HladisExtractor:
     widening_factor: int = 8
     lr: float = 1e-3
     warmup_steps: int = 6000
-    epochs: int = 10
+    max_steps: int = 10_000
+    eval_every: int = 500
     batch_size: int = 100
     n_models: int = 1
     seed_offset: int = 5000
@@ -552,8 +600,8 @@ class HladisExtractor:
                           self.n_heads, self.dropout, self.widening_factor, self.out_dropout)
 
     def _hp(self, seed):
-        return dict(lr=self.lr, warmup_steps=self.warmup_steps, epochs=self.epochs,
-                    batch_size=self.batch_size, seed=seed)
+        return dict(lr=self.lr, warmup_steps=self.warmup_steps, max_steps=self.max_steps,
+                    eval_every=self.eval_every, batch_size=self.batch_size, seed=seed)
 
     def covered(self, pairs, idx):
         self._ensure_loaded(pairs)

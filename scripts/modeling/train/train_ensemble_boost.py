@@ -186,9 +186,11 @@ _ATTENTION_TYPES = {"attn_noisy_or", "attn_lse"}
 _GNN_TYPES       = {"gnn_signed", "gnn_signed_dgi"}
 _PROSMITH_TYPES  = {"prosmith"}
 _LORAX_TYPES     = {"lorax"}
-# Same CLI shape for both: "name=type[:protein_path[:n_models[:epochs]]]" --
-# one protein npz, no molecule npz (each builds its own molecule graphs).
-_MOLOR_TYPES     = {"molor", "hladis"}
+_MOLOR_TYPES     = {"molor"}
+# "name=hladis[:protein_path[:n_models[:max_steps]]]". Budget is in optimizer
+# steps, not epochs -- see HladisExtractor's docstring on why the paper and the
+# released config disagree and why steps is the self-consistent reading.
+_HLADIS_TYPES    = {"hladis"}
 
 
 def _factory(type_):
@@ -263,14 +265,15 @@ def parse_source_arg(raw: str):
             kwargs["epochs"] = int(parts[5])
         return name, _factory(type_)(name=name, **kwargs)
 
-    if type_ in _MOLOR_TYPES:
+    if type_ in _MOLOR_TYPES or type_ in _HLADIS_TYPES:
         kwargs = {}
         if len(parts) > 1 and parts[1]:
             kwargs["protein_path"] = parts[1]
         if len(parts) > 2 and parts[2]:
             kwargs["n_models"] = int(parts[2])
         if len(parts) > 3 and parts[3]:
-            kwargs["epochs"] = int(parts[3])
+            # molor counts epochs, hladis counts optimizer steps
+            kwargs["max_steps" if type_ in _HLADIS_TYPES else "epochs"] = int(parts[3])
         return name, _factory(type_)(name=name, **kwargs)
 
     if type_ not in _ENTITY_TYPES:

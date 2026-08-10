@@ -172,13 +172,23 @@ _FACTORY_SPEC = {
     # ChemBERTa (that IS MolOR's identity). "name=molor[:protein_path[:n_models[:epochs]]]".
     # See orbind/molor_extractor.py.
     "molor": ("orbind.molor_extractor", "MolorExtractor"),
+    # Hladis et al. ICLR 2023 (pulls rdkit): MPNN-attention over the molecule
+    # graph, with the receptor vector broadcast onto every atom -- no cross-
+    # attention block at all. Protein defaults to mean-pooled ESM-1b (upstream
+    # uses ProtBERT CLS; ESM-1b keeps it comparable to the other three).
+    # Emitted feature is only node_d_model=72 wide by default -- upstream's own
+    # size, far narrower than prosmith/lorax/molor.
+    # "name=hladis[:protein_path[:n_models[:epochs]]]". See orbind/hladis_extractor.py.
+    "hladis": ("orbind.hladis_extractor", "HladisExtractor"),
 }
 _ENTITY_TYPES    = {"esm", "gin"}
 _ATTENTION_TYPES = {"attn_noisy_or", "attn_lse"}
 _GNN_TYPES       = {"gnn_signed", "gnn_signed_dgi"}
 _PROSMITH_TYPES  = {"prosmith"}
 _LORAX_TYPES     = {"lorax"}
-_MOLOR_TYPES     = {"molor"}
+# Same CLI shape for both: "name=type[:protein_path[:n_models[:epochs]]]" --
+# one protein npz, no molecule npz (each builds its own molecule graphs).
+_MOLOR_TYPES     = {"molor", "hladis"}
 
 
 def _factory(type_):

@@ -70,6 +70,7 @@ import torch.nn.functional as F
 from torch_geometric.nn import HeteroConv, SAGEConv
 
 from . import dataset as D
+from . import mol_selection
 
 MOL, PROT = "mol", "prot"
 ETYPE = (MOL, "binds", PROT)
@@ -93,19 +94,24 @@ def _build_universe(pairs: pd.DataFrame, all_idx, proteins: dict, molecules: dic
     return mol_to_i, prot_to_i, x_mol, x_prot
 
 
-def _mp_edges(pairs: pd.DataFrame, train_idx, mol_to_i, prot_to_i, q: float):
+def _mp_edges(pairs: pd.DataFrame, train_idx, mol_to_i, prot_to_i, q: float,
+              criterion: str = "coverage"):
     """Train split's own pairs -> (pos, neg) local (mol_id, prot_id) arrays,
-    optionally dropping molecules below the q-th quantile of train-edge count
-    (the "q99" style quality filter) from message passing only -- every train
-    row still gets decoded/supervised regardless."""
+    optionally dropping molecules below the q-th quantile from message passing
+    only -- every train row still gets decoded/supervised regardless.
+
+    The quantile sets how many molecules to keep (coverage-quantile count); the
+    `criterion` (see orbind/mol_selection.CRITERIA) picks WHICH ones. The default
+    "coverage" reproduces the historical "keep counts >= quantile(counts, q)"
+    filter bit-for-bit on the resulting edge set (zero-coverage molecules carry
+    no edges, so their mask value is irrelevant)."""
     sub = pairs.iloc[train_idx]
     mol_ids = sub["inchikey"].map(mol_to_i).to_numpy()
     prot_ids = sub["receptor"].map(prot_to_i).to_numpy()
     y = sub["label"].to_numpy()
     if q and q > 0:
-        counts = np.bincount(mol_ids, minlength=len(mol_to_i))
-        threshold = np.quantile(counts, q)
-        keep = counts >= threshold
+        keep = mol_selection.select_keep_mask(
+            criterion, mol_ids, prot_ids, y, len(mol_to_i), len(prot_to_i), q)
         mask = keep[mol_ids]
         mol_ids, prot_ids, y = mol_ids[mask], prot_ids[mask], y[mask]
     pos_mask = y == 1
@@ -284,7 +290,8 @@ def _run_models(ext, pairs: pd.DataFrame, train_idx, val_idx, test_idx, seed: in
     prot_idx_train = train_df["receptor"].map(prot_to_i).to_numpy().copy()
     y_train = train_df["label"].to_numpy(dtype=np.float32)
 
-    pos, neg = _mp_edges(pairs, train_idx, mol_to_i, prot_to_i, ext.q)
+    pos, neg = _mp_edges(pairs, train_idx, mol_to_i, prot_to_i, ext.q,
+                         getattr(ext, "criterion", "coverage"))
     pos_eidx, neg_eidx = _edge_index_dict(pos, neg)
 
     def model_job(m):
@@ -331,6 +338,7 @@ class GnnSignedExtractor:
     hidden: int = 256
     dropout: float = 0.3
     q: float = 0.99
+    criterion: str = "coverage"        # MP molecule-keep ranking (mol_selection.CRITERIA)
     lr: float = 3e-3
     weight_decay: float = 1e-4
     clip_grad: float = 1.0
@@ -347,6 +355,9 @@ class GnnSignedExtractor:
     def __post_init__(self):
         if self.emit not in ("prot", "both"):
             raise ValueError(f"emit must be 'prot' or 'both', got {self.emit!r}")
+        if self.criterion not in mol_selection.CRITERIA:
+            raise ValueError(f"criterion must be one of {mol_selection.CRITERIA}, "
+                             f"got {self.criterion!r}")
         if self.dgi_scope not in ("shared", "prot"):
             raise ValueError(f"dgi_scope must be 'shared' or 'prot', got {self.dgi_scope!r}")
         self._proteins = D.load_npz_dict(self.protein_path)

@@ -17,12 +17,14 @@ GNN's MP node features), quantiles, criteria, seeds, and GPU parallelism
 (`orbind.mol_selection`) and the established GNN architecture + hyperparameters
 (`GnnSignedExtractor` defaults).
 
-Parallelism: each **seed** is one work unit run in its own spawned process pinned
-to a GPU (`CUDA_VISIBLE_DEVICES` set in the parent before start -- see
-train_ensemble_boost.py for why the initializer approach fails on Linux). Workers
-stream finished rows back over a queue; the PARENT is the sole CSV writer, so the
-incremental/resumable CSV stays race-free. Re-running skips finished (criterion,
-quantile, seed) cells.
+Parallelism: `--max-parallel` persistent worker processes, each pinned to one GPU
+(`CUDA_VISIBLE_DEVICES` set in the parent before start -- see train_ensemble_boost.py
+for why the initializer approach fails on Linux). Each **(seed, quantile, criterion)
+GNN cell** is a separate queued job (boost_full is one cheap job per seed), so GNN
+training -- not just the boost baseline -- stays spread across every GPU regardless of
+how the seed count divides the GPUs. Workers cache per-seed prep and stream finished
+rows back; the PARENT is the sole CSV writer, so the incremental/resumable CSV stays
+race-free. Re-running skips finished (criterion, quantile, seed) cells.
 
     python scripts/modeling/train/run_quantile_criteria_sweep.py \
         --regime inductive --boost-full \
@@ -74,56 +76,69 @@ def _prepare(args):
     return pairs, mol_emb, prot_emb, cov
 
 
-def _run_seed(seed, args, per_seed_done, emit, data):
-    """Compute one seed's whole sub-sweep, calling `emit(row_dict)` per finished
-    cell. `per_seed_done` is the set of (criterion, quantile) already cached for
-    this seed (skipped). `data` = (pairs, mol_emb, prot_emb, cov)."""
+def _seed_prep(seed, args, data):
+    """Per-seed tensors reused across all quantiles/criteria of that seed."""
     regime_key = REGIME_KEY[args.regime]
     pairs, mol_emb, prot_emb, cov = data
     ik = pairs["inchikey"].to_numpy(); rc = pairs["receptor"].to_numpy()
     lab = pairs["label"].to_numpy().astype(np.float32)
-
     tr, va, te = (np.asarray(a)[cov[np.asarray(a)]] for a in load_split(regime_key, seed))
     y_tr, y_te = lab[tr], lab[te]
     Xm_tr, Xm_te = _pair_matrix(mol_emb, ik[tr]), _pair_matrix(mol_emb, ik[te])
     Xp_tr_raw, Xp_te_raw = _pair_matrix(prot_emb, rc[tr]), _pair_matrix(prot_emb, rc[te])
-
     uniq = pd.unique(ik[tr]); loc = {k: i for i, k in enumerate(uniq)}
     cov_counts = np.bincount([loc[k] for k in ik[tr]], minlength=len(uniq))
     Kq = {q: quality_K(cov_counts, q / 100.0) for q in args.quantiles}
-
-    if args.boost_full and any(("boost_full", q) not in per_seed_done for q in args.quantiles):
-        sc = train_boost(np.concatenate([Xp_tr_raw, Xm_tr], 1), y_tr,
-                         np.concatenate([Xp_te_raw, Xm_te], 1), seed=seed)
-        mb = metrics(y_te, sc)
-        for q in args.quantiles:
-            if ("boost_full", q) not in per_seed_done:
-                emit({"criterion": "boost_full", "quantile": q, "K": len(uniq), "seed": seed,
-                      "n_models": args.n_models,
-                      **{k: float(mb[k]) for k in METRICS}}, heavy=False)
-
-    for q in args.quantiles:
-        for crit in args.criteria:
-            if (crit, q) in per_seed_done:
-                continue
-            ext = GnnSignedExtractor(
-                name="gnn", protein_path=args.prot_embeddings,
-                molecule_path=args.mol_embeddings, q=q / 100.0, criterion=crit,
-                n_models=args.n_models, epochs=args.epochs, emit="prot")
-            Zp_tr, _Zp_va, Zp_te = ext.fit_transform(pairs, tr, va, te, seed)
-            sc = train_boost(np.concatenate([Zp_tr, Xm_tr], 1), y_tr,
-                             np.concatenate([Zp_te, Xm_te], 1), seed=seed)
-            m = metrics(y_te, sc)
-            emit({"criterion": crit, "quantile": q, "K": int(Kq[q]), "seed": seed,
-                  "n_models": args.n_models,
-                  **{k: float(m[k]) for k in METRICS}}, heavy=True)
+    return {"pairs": pairs, "tr": tr, "va": va, "te": te, "y_tr": y_tr, "y_te": y_te,
+            "Xm_tr": Xm_tr, "Xm_te": Xm_te, "Xp_tr_raw": Xp_tr_raw, "Xp_te_raw": Xp_te_raw,
+            "uniq": uniq, "Kq": Kq}
 
 
-def _worker(q, seed, args, per_seed_done):
-    """Spawned process: CUDA_VISIBLE_DEVICES already pinned by the parent."""
+def _boost_rows(seed, args, P):
+    """No-graph [protein||molecule] baseline; q-independent, replicated per quantile."""
+    sc = train_boost(np.concatenate([P["Xp_tr_raw"], P["Xm_tr"]], 1), P["y_tr"],
+                     np.concatenate([P["Xp_te_raw"], P["Xm_te"]], 1), seed=seed)
+    mb = metrics(P["y_te"], sc)
+    return [{"criterion": "boost_full", "quantile": q, "K": len(P["uniq"]), "seed": seed,
+             "n_models": args.n_models, **{k: float(mb[k]) for k in METRICS}}
+            for q in args.quantiles]
+
+
+def _gnn_row(seed, q, crit, args, P):
+    """One (seed, quantile, criterion) GNN cell -> boost head; the schedulable unit."""
+    ext = GnnSignedExtractor(
+        name="gnn", protein_path=args.prot_embeddings,
+        molecule_path=args.mol_embeddings, q=q / 100.0, criterion=crit,
+        n_models=args.n_models, epochs=args.epochs, emit="prot")
+    Zp_tr, _Zp_va, Zp_te = ext.fit_transform(P["pairs"], P["tr"], P["va"], P["te"], seed)
+    sc = train_boost(np.concatenate([Zp_tr, P["Xm_tr"]], 1), P["y_tr"],
+                     np.concatenate([Zp_te, P["Xm_te"]], 1), seed=seed)
+    m = metrics(P["y_te"], sc)
+    return {"criterion": crit, "quantile": q, "K": int(P["Kq"][q]), "seed": seed,
+            "n_models": args.n_models, **{k: float(m[k]) for k in METRICS}}
+
+
+def _worker_loop(job_q, res_q, args):
+    """Persistent worker: the parent pinned CUDA_VISIBLE_DEVICES before start(), so
+    every torch/XGBoost op here lands on this worker's GPU. Loads the pool once and
+    caches per-seed prep, then pulls (seed, quantile, criterion) jobs -- so GNN
+    training, not just the boost baseline, stays spread across every GPU."""
     data = _prepare(args)
-    _run_seed(seed, args, per_seed_done, lambda row, heavy: q.put(("row", row, heavy)), data)
-    q.put(("done", seed, None))
+    prep = {}
+    while True:
+        job = job_q.get()
+        if job is None:
+            break
+        kind, seed, q, crit = job
+        if seed not in prep:
+            prep[seed] = _seed_prep(seed, args, data)
+        P = prep[seed]
+        if kind == "boost":
+            for row in _boost_rows(seed, args, P):
+                res_q.put(("row", row, False))
+        else:
+            res_q.put(("row", _gnn_row(seed, q, crit, args, P), True))
+    res_q.put(("worker_done", None, None))
 
 
 def main() -> None:
@@ -208,42 +223,57 @@ def main() -> None:
         print(f"  seed {row['seed']} q{int(row['quantile'])} {row['criterion']:18} "
               + " ".join(f"{k}={row[k]:.3f}" for k in METRICS) + f"  {tag}", flush=True)
 
-    def per_seed_done(seed):
-        return {(c, q) for (c, q, s) in done if s == int(seed)}
+    # ---- schedulable jobs: one GNN cell per (seed, quantile, criterion) so GNN
+    #      training saturates every GPU; boost_full is one cheap job per seed.
+    jobs = []
+    for s in seeds:
+        seed_done = {(c, q) for (c, q, ss) in done if ss == int(s)}
+        if args.boost_full and any(("boost_full", float(q)) not in seed_done for q in args.quantiles):
+            jobs.append(("boost", int(s), None, None))
+        for q in args.quantiles:
+            for c in args.criteria:
+                if (c, float(q)) not in seed_done:
+                    jobs.append(("gnn", int(s), float(q), c))
 
-    todo = [s for s in seeds if any((c, float(q), int(s)) not in done
-                                    for q in args.quantiles for c in args.criteria)]
-
-    if args.max_parallel <= 1 or len(todo) <= 1:
-        data = _prepare(args)
-        for seed in todo:
-            print(f"\n--- seed {seed} ---", flush=True)
-            _run_seed(seed, args, per_seed_done(seed), record, data)
+    if not jobs:
+        print("nothing to do -- all cells already cached", flush=True)
+    elif args.max_parallel <= 1:
+        data = _prepare(args); prep = {}
+        for kind, s, q, c in jobs:
+            if s not in prep:
+                prep[s] = _seed_prep(s, args, data)
+            P = prep[s]
+            if kind == "boost":
+                for row in _boost_rows(s, args, P):
+                    record(row, False)
+            else:
+                record(_gnn_row(s, q, c, args, P), True)
     else:
         import multiprocessing as mp
         ctx = mp.get_context("spawn")
-        q = ctx.Queue()
+        job_q, res_q = ctx.Queue(), ctx.Queue()
         gpus = args.gpus or [0]
-        procs, pending, gi = {}, list(todo), 0
-
-        def spawn(seed):
-            nonlocal gi
-            gpu = gpus[gi % len(gpus)]; gi += 1
-            os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu)   # baked into the child at start
-            p = ctx.Process(target=_worker, args=(q, seed, args, per_seed_done(seed)))
-            p.start(); procs[seed] = p
-            print(f"  launched seed {seed} -> GPU {gpu}", flush=True)
-
-        while pending and len(procs) < args.max_parallel:
-            spawn(pending.pop(0))
-        while procs:
-            kind, payload, extra = q.get()
+        n_workers = min(args.max_parallel, len(jobs))
+        for j in jobs:
+            job_q.put(j)
+        for _ in range(n_workers):
+            job_q.put(None)            # one sentinel per worker
+        procs = []
+        for i in range(n_workers):
+            gpu = gpus[i % len(gpus)]
+            os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu)   # inherited by the child at start()
+            p = ctx.Process(target=_worker_loop, args=(job_q, res_q, args))
+            p.start(); procs.append(p)
+            print(f"  worker {i} -> GPU {gpu}", flush=True)
+        finished = 0
+        while finished < n_workers:
+            kind, payload, extra = res_q.get()
             if kind == "row":
                 record(payload, extra)
-            elif kind == "done":
-                procs.pop(payload).join()
-                if pending:
-                    spawn(pending.pop(0))
+            elif kind == "worker_done":
+                finished += 1
+        for p in procs:
+            p.join()
 
     print(f"\ndone -> {out}  ({len(rows)} rows)", flush=True)
 

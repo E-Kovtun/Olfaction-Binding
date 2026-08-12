@@ -152,15 +152,24 @@ def build_graph(smiles: str):
         begin.append(b.GetBeginAtomIdx())
         end.append(b.GetEndAtomIdx())
         feats.append([int(b.GetBondType()), int(b.GetStereo()), int(b.GetIsAromatic())])
-    if not begin:
-        # Upstream raises NoBondsError here; a single-atom molecule has nothing
-        # to message-pass over.
-        raise ValueError(f"molecule with no bonds: {smiles!r}")
+    if begin:
+        edge_index = np.array([begin + end, end + begin], dtype=np.int64)
+        edge_feats = np.array(feats + feats, dtype=np.float32)
+    else:
+        # A bondless odorant -- ammonia is one of Carey's 110. Upstream raises
+        # NoBondsError, because M2OR has no such molecule; dropping it here
+        # would silently cost one whole row per receptor.
+        #
+        # An empty edge set is well defined for this architecture: the message
+        # passing scatter-adds over zero edges, so the aggregate stays zero and
+        # the GRU still updates each node from its own carry. The atom keeps
+        # its embedded features and the attention pooling reads it normally.
+        # The shapes must be spelled out -- `np.array([] + [])` would come back
+        # as (0,) and blow up the torch.cat in `_collate`.
+        edge_index = np.zeros((2, 0), dtype=np.int64)
+        edge_feats = np.zeros((0, len(BOND_FEATURES)), dtype=np.float32)
 
-    edge_index = np.array([begin + end, end + begin], dtype=np.int64)
-    return (np.array(atoms, dtype=np.float32),
-            edge_index,
-            np.array(feats + feats, dtype=np.float32))
+    return np.array(atoms, dtype=np.float32), edge_index, edge_feats
 
 
 class _PairDataset(Dataset):

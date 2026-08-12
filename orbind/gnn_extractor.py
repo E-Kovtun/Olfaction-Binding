@@ -71,6 +71,7 @@ from torch_geometric.nn import HeteroConv, SAGEConv
 
 from . import dataset as D
 from . import mol_selection
+from .tasks import check_task
 
 MOL, PROT = "mol", "prot"
 ETYPE = (MOL, "binds", PROT)
@@ -95,7 +96,7 @@ def _build_universe(pairs: pd.DataFrame, all_idx, proteins: dict, molecules: dic
 
 
 def _mp_edges(pairs: pd.DataFrame, train_idx, mol_to_i, prot_to_i, q: float,
-              criterion: str = "coverage"):
+              criterion: str = "coverage", edge_threshold: float = 0.0):
     """Train split's own pairs -> (pos, neg) local (mol_id, prot_id) arrays,
     optionally dropping molecules below the q-th quantile from message passing
     only -- every train row still gets decoded/supervised regardless.
@@ -114,7 +115,12 @@ def _mp_edges(pairs: pd.DataFrame, train_idx, mol_to_i, prot_to_i, q: float,
             criterion, mol_ids, prot_ids, y, len(mol_to_i), len(prot_to_i), q)
         mask = keep[mol_ids]
         mol_ids, prot_ids, y = mol_ids[mask], prot_ids[mask], y[mask]
-    pos_mask = y == 1
+    # Which edges are "positive" for the signed message passing. `y > 0` is
+    # IDENTICAL to the historical `y == 1` on binary labels, so every M2OR run
+    # reproduces bit-for-bit; on a z-scored continuous response it reads as
+    # "responds above the pool average", which is what a z-score's zero means.
+    # Raise `edge_threshold` to make the positive graph stricter.
+    pos_mask = y > edge_threshold
     return (mol_ids[pos_mask], prot_ids[pos_mask]), (mol_ids[~pos_mask], prot_ids[~pos_mask])
 
 
@@ -239,9 +245,16 @@ def _train_one(build_model, x_mol, x_prot, pos_eidx, neg_eidx,
     pi_tr = torch.as_tensor(prot_idx_train, dtype=torch.long, device=device)
     y_tr = torch.as_tensor(y_train, dtype=torch.float32, device=device)
 
-    pos = float(y_train.sum())
-    pos_weight = torch.tensor([(len(y_train) - pos) / max(pos, 1.0)], device=device)
-    loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    # Deliberately NOT routed through orbind.tasks.batch_loss_fn: this decoder
+    # uses a single `pos_weight` scalar, not per-row weights, and rewriting it
+    # would change every existing M2OR number. The classification branch stays
+    # byte-identical; regression just swaps in plain squared error.
+    if hp.get("task", "classification") == "regression":
+        loss_fn = nn.MSELoss()
+    else:
+        pos = float(y_train.sum())
+        pos_weight = torch.tensor([(len(y_train) - pos) / max(pos, 1.0)], device=device)
+        loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
     dgi_w = None
     params = list(model.parameters())
@@ -272,7 +285,19 @@ def _train_one(build_model, x_mol, x_prot, pos_eidx, neg_eidx,
     return z_mol, z_prot, model
 
 
+_LABEL_AGNOSTIC_CRITERIA = {"coverage"}   # see orbind/mol_selection.compute_mol_scores
+
+
 def _run_models(ext, pairs: pd.DataFrame, train_idx, val_idx, test_idx, seed: int, checkpoint_dir=None):
+    check_task(ext.task)
+    if ext.task == "regression" and ext.criterion not in _LABEL_AGNOSTIC_CRITERIA:
+        # Every other criterion is built from npos/nneg, i.e. `y == 1` / `y == 0`
+        # counts, which are empty on a continuous target -- the ranking would
+        # silently collapse to zeros rather than fail.
+        raise ValueError(
+            f"{ext.name}: criterion {ext.criterion!r} scores molecules by their "
+            f"positive/negative mix and is undefined for task='regression'; "
+            f"use one of {sorted(_LABEL_AGNOSTIC_CRITERIA)}")
     for split_name, idx in (("train", train_idx), ("val", val_idx), ("test", test_idx)):
         mask = ext.covered(pairs, idx)
         if not mask.all():
@@ -291,7 +316,17 @@ def _run_models(ext, pairs: pd.DataFrame, train_idx, val_idx, test_idx, seed: in
     y_train = train_df["label"].to_numpy(dtype=np.float32)
 
     pos, neg = _mp_edges(pairs, train_idx, mol_to_i, prot_to_i, ext.q,
-                         getattr(ext, "criterion", "coverage"))
+                         getattr(ext, "criterion", "coverage"),
+                         getattr(ext, "edge_threshold", 0.0))
+    n_pos, n_neg = len(pos[0]), len(neg[0])
+    print(f"  {ext.name}: MP graph {n_pos} positive / {n_neg} negative edges "
+          f"(q={ext.q}, criterion={getattr(ext, 'criterion', 'coverage')}, "
+          f"edge_threshold={getattr(ext, 'edge_threshold', 0.0)})", flush=True)
+    if n_pos == 0 or n_neg == 0:
+        raise ValueError(
+            f"{ext.name}: signed message passing needs both edge signs, got "
+            f"{n_pos} positive / {n_neg} negative. Check `edge_threshold` "
+            f"(={getattr(ext, 'edge_threshold', 0.0)}) against the label scale.")
     pos_eidx, neg_eidx = _edge_index_dict(pos, neg)
 
     def model_job(m):
@@ -339,6 +374,12 @@ class GnnSignedExtractor:
     dropout: float = 0.3
     q: float = 0.99
     criterion: str = "coverage"        # MP molecule-keep ranking (mol_selection.CRITERIA)
+    # The task axis (orbind/tasks.py). `run_ensemble` overwrites this to match
+    # the run, so the decoder's criterion and the boosting head downstream agree.
+    task: str = "classification"
+    # Label above which an edge joins the POSITIVE message-passing graph.
+    # 0.0 reproduces the historical `y == 1` exactly on binary labels.
+    edge_threshold: float = 0.0
     lr: float = 3e-3
     weight_decay: float = 1e-4
     clip_grad: float = 1.0
@@ -373,7 +414,7 @@ class GnnSignedExtractor:
 
     def _hp(self, seed):
         return dict(lr=self.lr, weight_decay=self.weight_decay, clip_grad=self.clip_grad,
-                    epochs=self.epochs, seed=seed)
+                    epochs=self.epochs, task=self.task, seed=seed)
 
     def covered(self, pairs, idx):
         prot = pairs["receptor"].to_numpy()[idx]

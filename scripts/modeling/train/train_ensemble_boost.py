@@ -172,7 +172,8 @@ _FACTORY_SPEC = {
     # attention MIL (torch only): "name=type[:protein_path:molecule_sites_path[:n_models]]".
     "attn_noisy_or": ("orbind.attention_extractor", "MilNoisyOrExtractor"),
     "attn_lse": ("orbind.attention_extractor", "MilLseExtractor"),
-    # graph-based (pulls torch_geometric): "name=type[:protein_path:molecule_path[:n_models[:emit]]]".
+    # graph-based (pulls torch_geometric):
+    # "name=type[:protein_path:molecule_path[:n_models[:emit[:q[:criterion[:edge_threshold]]]]]]".
     # emit: "prot" (default, v5 probe shape) or "both". gnn_signed_dgi adds a
     # DeepGraphInfomax auxiliary loss (shared scope, lambda=0.5).
     "gnn_signed": ("orbind.gnn_extractor", "GnnSignedExtractor"),
@@ -262,6 +263,16 @@ def parse_source_arg(raw: str):
             kwargs["n_models"] = int(parts[3])
         if len(parts) > 4 and parts[4]:
             kwargs["emit"] = parts[4]
+        # q / criterion / edge_threshold were dataclass-only until the Carey
+        # datasets arrived: there the receptor x odorant matrix is COMPLETE, so
+        # per-molecule coverage is near-uniform and the q=0.99 default keeps a
+        # couple of molecules instead of a hub core. They have to be settable.
+        if len(parts) > 5 and parts[5]:
+            kwargs["q"] = float(parts[5])
+        if len(parts) > 6 and parts[6]:
+            kwargs["criterion"] = parts[6]
+        if len(parts) > 7 and parts[7]:
+            kwargs["edge_threshold"] = float(parts[7])
         return name, _factory(type_)(name=name, **kwargs)
 
     if type_ in _PROSMITH_TYPES:

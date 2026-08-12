@@ -52,38 +52,57 @@ def train_mlp(Xtr, ytr, Xte, seed=42, hidden=(512, 128), dropout=0.3, lr=1e-3, e
         return torch.sigmoid(model(Xte).squeeze(-1)).numpy()
 
 
-def fit_boost(Xtr, ytr, seed=42):
-    """Fit and return the classifier (not just its predictions), so callers
+def fit_boost(Xtr, ytr, seed=42, task="classification"):
+    """Fit and return the estimator (not just its predictions), so callers
     that need scores on more than one held-out set (e.g. val AND test) don't
-    have to refit."""
+    have to refit.
+
+    `task="regression"` swaps XGBClassifier for XGBRegressor on the same
+    hyperparameters (400 trees, depth 6, lr 0.1, subsample/colsample 0.8) so
+    the two tasks stay comparable head-to-head. `scale_pos_weight` has no
+    meaning without classes and is dropped rather than neutralised.
+    """
     import xgboost as xgb
     import torch
+    from .tasks import check_task
+    check_task(task)
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    spw = float((ytr == 0).sum() / max((ytr == 1).sum(), 1))
-    def make_classifier(target_device):
-        return xgb.XGBClassifier(
-            n_estimators=400, max_depth=6, learning_rate=0.1,
-            subsample=0.8, colsample_bytree=0.8, scale_pos_weight=spw,
-            eval_metric="aucpr", tree_method="hist", device=target_device,
-            n_jobs=-1, random_state=seed)
+    common = dict(n_estimators=400, max_depth=6, learning_rate=0.1,
+                  subsample=0.8, colsample_bytree=0.8,
+                  tree_method="hist", n_jobs=-1, random_state=seed)
 
-    clf = make_classifier(device)
+    def make_estimator(target_device):
+        if task == "regression":
+            return xgb.XGBRegressor(**common, objective="reg:squarederror",
+                                     eval_metric="rmse", device=target_device)
+        spw = float((ytr == 0).sum() / max((ytr == 1).sum(), 1))
+        return xgb.XGBClassifier(**common, scale_pos_weight=spw,
+                                  eval_metric="aucpr", device=target_device)
+
+    clf = make_estimator(device)
     try:
         clf.fit(Xtr, ytr)
     except xgb.core.XGBoostError:
         if device != "cuda":
             raise
         print("  XGBoost CUDA unavailable; retrying boost head on CPU", flush=True)
-        clf = make_classifier("cpu")
+        clf = make_estimator("cpu")
         clf.fit(Xtr, ytr)
     return clf
 
 
-def train_boost(Xtr, ytr, Xte, seed=42):
-    return fit_boost(Xtr, ytr, seed=seed).predict_proba(Xte)[:, 1]
+def predict_scores(model, X, task="classification"):
+    """The one number per row a downstream ensemble/metric wants: a positive-
+    class probability for classification, the predicted value for regression."""
+    return model.predict(X) if task == "regression" else model.predict_proba(X)[:, 1]
 
 
-def tune_boost(Xtr, ytr, Xva, yva, seed=42, n_trials=30, storage=None, study_name=None):
+def train_boost(Xtr, ytr, Xte, seed=42, task="classification"):
+    return predict_scores(fit_boost(Xtr, ytr, seed=seed, task=task), Xte, task)
+
+
+def tune_boost(Xtr, ytr, Xva, yva, seed=42, n_trials=30, storage=None, study_name=None,
+                task="classification"):
     """Per-combo XGBoost hyperparameter search (optuna, TPE sampler -- same
     idea as ProSmith/LORAX's own hyperopt random search over a near-identical
     space, just with a smarter sampler): each trial fits on train, scores
@@ -104,17 +123,28 @@ def tune_boost(Xtr, ytr, Xva, yva, seed=42, n_trials=30, storage=None, study_nam
     the same or a higher `n_trials` picks up mid-tuning instead of starting
     over or padding trials on top of an already-finished budget.
 
-    Returns `(classifier, study)` -- the caller decides what to do with the
+    `task="regression"` searches the same space minus `scale_pos_weight_mult`
+    (meaningless without classes) and maximises val R^2 instead of val AUPRC.
+
+    Returns `(estimator, study)` -- the caller decides what to do with the
     optuna `study` (e.g. persist `study.trials_dataframe()`, the full
-    per-trial hyperparameters + val-AUPRC history, or just read
+    per-trial hyperparameters + val-score history, or just read
     `study.best_value`/`study.best_params`)."""
     import optuna
     import torch
     import xgboost as xgb
+    from .tasks import check_task
+    check_task(task)
     optuna.logging.set_verbosity(optuna.logging.WARNING)
-    spw = float((ytr == 0).sum() / max((ytr == 1).sum(), 1))
+    objective_metric = "R2" if task == "regression" else "AUPRC"
 
     def make_classifier(params, device):
+        if task == "regression":
+            return xgb.XGBRegressor(
+                **params, objective="reg:squarederror",
+                eval_metric="rmse", tree_method="hist", device=device,
+                n_jobs=-1, random_state=seed)
+        spw = float((ytr == 0).sum() / max((ytr == 1).sum(), 1))
         weight_mult = params.pop("scale_pos_weight_mult")
         return xgb.XGBClassifier(
             **params, scale_pos_weight=spw * weight_mult,
@@ -134,16 +164,17 @@ def tune_boost(Xtr, ytr, Xva, yva, seed=42, n_trials=30, storage=None, study_nam
             max_delta_step=trial.suggest_float("max_delta_step", 0.0, 5.0),
             subsample=trial.suggest_float("subsample", 0.5, 1.0),
             colsample_bytree=trial.suggest_float("colsample_bytree", 0.5, 1.0),
-            scale_pos_weight_mult=trial.suggest_float("scale_pos_weight_mult", 0.5, 1.5),
         )
+        if task == "classification":
+            params["scale_pos_weight_mult"] = trial.suggest_float("scale_pos_weight_mult", 0.5, 1.5)
         try:
             clf = make_classifier(dict(params), device)
             clf.fit(Xtr, ytr)
         except xgb.core.XGBoostError:
             clf = make_classifier(dict(params), "cpu")
             clf.fit(Xtr, ytr)
-        p_va = clf.predict_proba(Xva)[:, 1]
-        return D.metrics(yva, p_va)["AUPRC"]
+        p_va = predict_scores(clf, Xva, task)
+        return D.METRICS[task](yva, p_va)[objective_metric]
 
     study = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=seed),
                                  storage=storage, study_name=study_name, load_if_exists=True)

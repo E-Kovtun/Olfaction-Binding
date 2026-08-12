@@ -42,7 +42,8 @@ import numpy as np
 import pandas as pd
 
 from . import dataset as D
-from .baselines import fit_boost, tune_boost
+from .baselines import fit_boost, predict_scores, tune_boost
+from .tasks import check_task
 
 
 # --------------------------------------------------------------------------- extractors
@@ -163,21 +164,35 @@ class EnsembleCombiner:
         return self.predict_fn(P)
 
 
+def _simplex(objective, K: int) -> np.ndarray:
+    """Non-negative weights summing to 1, minimizing `objective(w)`."""
+    from scipy.optimize import minimize
+    res = minimize(objective, np.full(K, 1.0 / K), method="SLSQP",
+                    bounds=[(0.0, 1.0)] * K,
+                    constraints=[{"type": "eq", "fun": lambda w: w.sum() - 1.0}])
+    return res.x
+
+
 def _fit_simplex_weights(P: np.ndarray, y: np.ndarray, combos: list[tuple[str, ...]]) -> EnsembleCombiner:
     """Non-negative weights summing to 1, minimizing validation log-loss.
     Directly comparable to the ProSmith/LORAX weighting scheme."""
-    from scipy.optimize import minimize
-    K = P.shape[1]
     eps = 1e-6
 
     def neg_log_loss(w):
         p = np.clip(P @ w, eps, 1 - eps)
         return -(y * np.log(p) + (1 - y) * np.log(1 - p)).mean()
 
-    w0 = np.full(K, 1.0 / K)
-    res = minimize(neg_log_loss, w0, method="SLSQP", bounds=[(0.0, 1.0)] * K,
-                    constraints=[{"type": "eq", "fun": lambda w: w.sum() - 1.0}])
-    w = res.x
+    w = _simplex(neg_log_loss, P.shape[1])
+    return EnsembleCombiner(combos=combos, method="simplex",
+                             weights=dict(zip(combos, w.tolist())),
+                             predict_fn=lambda P_, w=w: P_ @ w)
+
+
+def _fit_simplex_weights_mse(P: np.ndarray, y: np.ndarray, combos: list[tuple[str, ...]]) -> EnsembleCombiner:
+    """The regression counterpart: the same convex combination of the combo
+    predictions, chosen to minimize validation MSE instead of log-loss. Still
+    a simplex, so the weights stay readable as mixing proportions."""
+    w = _simplex(lambda w: float(((P @ w - y) ** 2).mean()), P.shape[1])
     return EnsembleCombiner(combos=combos, method="simplex",
                              weights=dict(zip(combos, w.tolist())),
                              predict_fn=lambda P_, w=w: P_ @ w)
@@ -196,15 +211,41 @@ def _fit_logreg_weights(P: np.ndarray, y: np.ndarray, combos: list[tuple[str, ..
                              predict_fn=lambda P_: model.predict_proba(P_)[:, 1])
 
 
-_WEIGHT_FITTERS = {"simplex": _fit_simplex_weights, "logreg": _fit_logreg_weights}
+def _fit_linreg_weights(P: np.ndarray, y: np.ndarray, combos: list[tuple[str, ...]]) -> EnsembleCombiner:
+    """The regression counterpart of the logreg stacker: ordinary least
+    squares over the K combo predictions, coefficients unconstrained."""
+    from sklearn.linear_model import LinearRegression
+    model = LinearRegression()
+    model.fit(P, y)
+    return EnsembleCombiner(combos=combos, method="linreg",
+                             weights=dict(zip(combos, model.coef_.tolist())),
+                             intercept=float(model.intercept_),
+                             predict_fn=lambda P_: model.predict(P_))
+
+
+# One fitter table per task: the method NAMES differ on purpose, so a metrics
+# file never leaves you guessing whether "logreg" meant a logistic stacker or
+# a least-squares one.
+_WEIGHT_FITTERS = {
+    "classification": {"simplex": _fit_simplex_weights, "logreg": _fit_logreg_weights},
+    "regression": {"simplex": _fit_simplex_weights_mse, "linreg": _fit_linreg_weights},
+}
 
 
 def fit_ensemble_weights(val_preds: dict[tuple[str, ...], np.ndarray], y_val: np.ndarray,
-                          method: str = "both") -> dict[str, EnsembleCombiner]:
+                          method: str = "both",
+                          task: str = "classification") -> dict[str, EnsembleCombiner]:
+    fitters = _WEIGHT_FITTERS[check_task(task)]
     combos = list(val_preds.keys())
     P = np.column_stack([val_preds[c] for c in combos])
-    methods = list(_WEIGHT_FITTERS) if method == "both" else [method]
-    return {m: _WEIGHT_FITTERS[m](P, y_val, combos) for m in methods}
+    if method == "both":
+        methods = list(fitters)
+    elif method in fitters:
+        methods = [method]
+    else:
+        raise ValueError(f"weight method {method!r} is not defined for task {task!r} "
+                         f"(have {sorted(fitters)})")
+    return {m: fitters[m](P, y_val, combos) for m in methods}
 
 
 def _coverage_intersection(pairs: pd.DataFrame, extractors: dict[str, object],
@@ -229,7 +270,8 @@ def run_ensemble(pairs: pd.DataFrame, extractors: dict[str, object], combo_spec:
                   on_missing: str = "raise",
                   checkpoint_dir: "pathlib.Path | str | None" = None,
                   tune_boost_hp: bool = False, n_trials: int = 30,
-                  optuna_storage: str | None = None, run_id: str | None = None) -> dict:
+                  optuna_storage: str | None = None, run_id: str | None = None,
+                  task: str = "classification") -> dict:
     """Fit one boosting head per combo (concatenating its extractors'
     features), fit ensemble weights on validation, evaluate on test.
 
@@ -270,19 +312,52 @@ def run_ensemble(pairs: pd.DataFrame, extractors: dict[str, object], combo_spec:
     directly comparable and the ensemble's per-combo val predictions stay
     row-aligned.
 
+    `task`: "classification" (default, M2OR's 0/1 Responsive) or "regression"
+    (the continuous z-scored response of the Carey/Hallem datasets -- see
+    orbind/tasks.py and orbind/regimes_ofm.py). It switches the boosting head
+    (XGBRegressor), the metric family (`orbind.dataset.METRICS`), and the
+    ensemble weight fitters, and it is passed on to every extractor that
+    declares a `task` attribute so their own criterion matches.
+
     Returns
     -------
     {
       "combos":   {combo_tuple: metrics_dict},   # solo performance per combo
       "ensemble": {weight_method: metrics_dict},
       "weights":  {weight_method: {combo_tuple: weight}},
-      "n": {"train": int, "val": int, "test": int, "test_pos": int},
+      "naive":    metrics_dict,                  # constant train-mean predictor
+      "n": {"train": int, "val": int, "test": int, ...},
     }
+
+    The "naive" entry is the no-information floor: predict the TRAIN mean for
+    every test row. Under regression that is upstream's own naive row, and it
+    is the only thing that makes an R^2 near zero interpretable. Under
+    classification the same constant is the class prevalence, which is exactly
+    the AUPRC baseline (and gives AUROC 0.5 by construction).
     """
     if on_missing not in ("raise", "drop"):
         raise ValueError(f"on_missing must be 'raise' or 'drop', got {on_missing!r}")
+    check_task(task)
+    metric_fn = D.METRICS[task]
     names = list(extractors.keys())
     combos = parse_combo_spec(combo_spec, names)
+
+    # Pair-level extractors train their own head and need the same criterion
+    # as the boosting head downstream; entity-level lookups have no task.
+    #
+    # A pair-level source that does NOT declare `task` has not been ported to
+    # the second task, and would quietly keep minimising BCE against a
+    # continuous target -- a wrong answer rather than an error. Refuse instead.
+    # (As of writing that is the attention-MIL and GNN sources: noisy-OR/LSE
+    # pooling and the signed bipartite graph are both built out of binary
+    # edges, so porting them is a design question, not a criterion swap.)
+    for name, ex in extractors.items():
+        if hasattr(ex, "task"):
+            ex.task = task
+        elif not isinstance(ex, EntityExtractor) and task != "classification":
+            raise NotImplementedError(
+                f"source {name!r} ({type(ex).__name__}) trains its own head but declares no "
+                f"`task`, so it only supports classification; asked for {task!r}")
 
     y = pairs["label"].to_numpy(dtype=np.float32)
     if train_idx is None:
@@ -312,8 +387,18 @@ def run_ensemble(pairs: pd.DataFrame, extractors: dict[str, object], combo_spec:
                 test_idx = idx[mask]
 
     y_tr, y_va, y_te = y[train_idx], y[val_idx], y[test_idx]
+    # test_pos is kept on both tasks so the log line stays greppable; under
+    # regression it counts test rows above the pool's zero (the response is
+    # already z-scored), which is descriptive only, never a metric.
+    n_info = {"train": len(train_idx), "val": len(val_idx), "test": len(test_idx),
+              "test_pos": int((y_te > 0).sum())}
+    if task == "regression":
+        n_info |= {"test_mean": float(y_te.mean()), "test_std": float(y_te.std()),
+                   "train_mean": float(y_tr.mean())}
     print(f"  after coverage: train={len(train_idx)} val={len(val_idx)} "
-          f"test={len(test_idx)} test_pos={int(y_te.sum())}", flush=True)
+          f"test={len(test_idx)} test_pos={n_info['test_pos']}"
+          + (f" test_mean={n_info['test_mean']:.3f} train_mean={n_info['train_mean']:.3f}"
+             if task == "regression" else ""), flush=True)
 
     if checkpoint_dir is not None:
         checkpoint_dir = pathlib.Path(checkpoint_dir)
@@ -336,7 +421,7 @@ def run_ensemble(pairs: pd.DataFrame, extractors: dict[str, object], combo_spec:
         if tune_boost_hp:
             study_name = f"repeat{repeat_tag}_combo{'+'.join(combo)}"
             clf, study = tune_boost(Xtr, y_tr, Xva, y_va, seed=seed, n_trials=n_trials,
-                                     storage=optuna_storage, study_name=study_name)
+                                     storage=optuna_storage, study_name=study_name, task=task)
             # Report the trials actually behind best_value, not the requested
             # budget: on a resumed (or study-imported) run the search is
             # already satisfied and this call runs none of its own, so
@@ -345,37 +430,43 @@ def run_ensemble(pairs: pd.DataFrame, extractors: dict[str, object], combo_spec:
             done = sum(1 for t in study.trials if t.state == _optuna.trial.TrialState.COMPLETE)
             print(f"  [repeat {repeat_tag}] tune[{'+'.join(combo):>20}]: "
                   f"{done} trials done (target {n_trials}), "
-                  f"best val AUPRC={study.best_value:.3f}, params={study.best_params}", flush=True)
+                  f"best val {'R2' if task == 'regression' else 'AUPRC'}={study.best_value:.3f}, "
+                  f"params={study.best_params}", flush=True)
             if checkpoint_dir is not None:
                 study.trials_dataframe().to_csv(
                     checkpoint_dir / f"optuna_{'+'.join(combo)}.csv", index=False)
         else:
-            clf = fit_boost(Xtr, y_tr, seed=seed)
+            clf = fit_boost(Xtr, y_tr, seed=seed, task=task)
         if checkpoint_dir is not None:
             # save the underlying Booster directly -- this xgboost version's
             # sklearn-wrapper .save_model() needs `_estimator_type`, which
             # isn't set on a bare XGBClassifier built the way fit_boost does.
             clf.get_booster().save_model(str(checkpoint_dir / f"boost_{'+'.join(combo)}.json"))
-        p_va = clf.predict_proba(Xva)[:, 1]
-        p_te = clf.predict_proba(Xte)[:, 1]
+        p_va = predict_scores(clf, Xva, task)
+        p_te = predict_scores(clf, Xte, task)
         val_preds[combo], test_preds[combo] = p_va, p_te
-        combo_metrics[combo] = D.metrics(y_te, p_te)
+        combo_metrics[combo] = metric_fn(y_te, p_te)
         print(f"  [repeat {repeat_tag}] combo {'+'.join(combo):>20s}: dim={Xtr.shape[1]:4d} "
               + " ".join(f"{k}={v:.3f}" for k, v in combo_metrics[combo].items()), flush=True)
 
-    combiners = fit_ensemble_weights(val_preds, y_va, method=weight_method)
+    combiners = fit_ensemble_weights(val_preds, y_va, method=weight_method, task=task)
     ensemble_metrics, weights = {}, {}
     for m, combiner in combiners.items():
         p_final = combiner.predict(test_preds)
-        ensemble_metrics[m] = D.metrics(y_te, p_final)
+        ensemble_metrics[m] = metric_fn(y_te, p_final)
         weights[m] = combiner.weights
         print(f"  [repeat {repeat_tag}] ensemble[{m}]: "
               + " ".join(f"{k}={v:.3f}" for k, v in ensemble_metrics[m].items()), flush=True)
+
+    # The no-information floor, on the same rows and the same metrics.
+    naive_metrics = metric_fn(y_te, np.full(len(y_te), float(y_tr.mean())))
+    print(f"  [repeat {repeat_tag}] naive[train-mean]: "
+          + " ".join(f"{k}={v:.3f}" for k, v in naive_metrics.items()), flush=True)
 
     return {
         "combos": combo_metrics,
         "ensemble": ensemble_metrics,
         "weights": weights,
-        "n": {"train": len(train_idx), "val": len(val_idx), "test": len(test_idx),
-              "test_pos": int(y_te.sum())},
+        "naive": naive_metrics,
+        "n": n_info,
     }

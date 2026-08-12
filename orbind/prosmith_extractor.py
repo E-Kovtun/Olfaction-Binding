@@ -97,6 +97,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 
 from . import dataset as D
+from .tasks import batch_loss_fn, check_task
 
 FAITHFUL_MAX_SMILES_LEN = 256    # upstream utils/datautils.py max_smiles_seq_len
 FAITHFUL_MAX_PROT_LEN = 1018     # upstream utils/datautils.py max_prot_seq_len
@@ -367,10 +368,10 @@ def _train_one(build_model, train_df, val_df, test_df, proteins, molecules,
     train_loader = _make_loader(train_df, proteins, molecules, w_train, hp["batch_size"], faithful, train=True)
     opt = torch.optim.Adam(model.parameters(), lr=hp["lr"])
 
-    def batch_loss(logits, y, w):
-        # weight= + reduction='mean' reproduces upstream's weighted BCE exactly
-        # (sum(w_i * l_i) / N, not / sum(w)).
-        return nn.functional.binary_cross_entropy_with_logits(logits, y, weight=w, reduction="mean")
+    # weight= + reduction='mean' reproduces upstream's weighted BCE exactly
+    # (sum(w_i * l_i) / N, not / sum(w)); the regression branch keeps that
+    # convention with squared error. See orbind/tasks.py.
+    batch_loss = batch_loss_fn(hp["task"])
 
     best_val, best_state = np.inf, None
     for epoch in range(hp["epochs"]):
@@ -399,6 +400,15 @@ def _train_one(build_model, train_df, val_df, test_df, proteins, molecules,
 
 
 def _run_models(ext, pairs: pd.DataFrame, train_idx, val_idx, test_idx, seed: int, checkpoint_dir=None):
+    check_task(ext.task)
+    if ext.task == "regression" and ext.faithful_bugs:
+        # Upstream's extra sigmoid squashes the head's output into
+        # [0.5, 0.731]. Harmless for classification (AUROC/AUPRC are
+        # rank-invariant, and the fixed path is the default anyway), fatal for
+        # a continuous target -- no z-scored response can be reached.
+        raise ValueError(
+            f"{ext.name}: faithful_bugs=True is incompatible with task='regression' -- "
+            f"upstream's double sigmoid bounds the prediction to [0.5, 0.731]")
     ext._ensure_loaded()
     for split_name, idx in (("train", train_idx), ("val", val_idx), ("test", test_idx)):
         mask = ext.covered(pairs, idx)
@@ -480,6 +490,9 @@ class ProSmithExtractor:
     n_models: int = 1
     seed_offset: int = 5000
     faithful_bugs: bool = False
+    # The task axis (orbind/tasks.py). `run_ensemble` overwrites this to match
+    # the run, so this head's criterion and the boosting head downstream agree.
+    task: str = "classification"
     pooling: str = "cls_token"
     dim_out: int = field(init=False, default=0)
     model_name: str = field(init=False, default="prosmith_mm_tn")
@@ -524,7 +537,7 @@ class ProSmithExtractor:
     def _hp(self, seed):
         return dict(lr=self.lr, epochs=self.epochs, batch_size=self.batch_size,
                     faithful_bugs=self.faithful_bugs, pretrained_path=self.pretrained_path,
-                    seed=seed)
+                    task=self.task, seed=seed)
 
     def covered(self, pairs, idx):
         self._ensure_loaded()

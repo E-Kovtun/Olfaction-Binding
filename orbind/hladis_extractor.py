@@ -111,6 +111,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from . import dataset as D
 from .prosmith_extractor import _M2ORWeights
+from .tasks import batch_loss_fn, check_task
 
 # Upstream's config_train.yml ATOM_FEATURES / BOND_FEATURES, in order.
 ATOM_FEATURES = ("AtomicNum", "ChiralTag", "Hybridization", "FormalCharge",
@@ -418,8 +419,7 @@ def _train_one(build_model, train_df, val_df, test_df, proteins, graphs,
     train_loader = _make_loader(train_df, proteins, graphs, w_train, hp["batch_size"], train=True)
     opt = torch.optim.Adam(model.parameters(), lr=hp["lr"])
 
-    def loss_of(logits, y, w):
-        return nn.functional.binary_cross_entropy_with_logits(logits, y, weight=w, reduction="mean")
+    loss_of = batch_loss_fn(hp["task"])   # BCE, or squared error under regression
 
     best_val, best_state, step = np.inf, None, 0
     batches = _endless(train_loader)
@@ -458,6 +458,7 @@ def _train_one(build_model, train_df, val_df, test_df, proteins, graphs,
 
 
 def _run_models(ext, pairs, train_idx, val_idx, test_idx, seed, checkpoint_dir=None):
+    check_task(ext.task)
     ext._ensure_loaded(pairs)
     for split_name, idx in (("train", train_idx), ("val", val_idx), ("test", test_idx)):
         mask = ext.covered(pairs, idx)
@@ -562,6 +563,9 @@ class HladisExtractor:
     batch_size: int = 100
     n_models: int = 1
     seed_offset: int = 5000
+    # The task axis (orbind/tasks.py). `run_ensemble` overwrites this to match
+    # the run, so this head's criterion and the boosting head downstream agree.
+    task: str = "classification"
     pooling: str = "attn_sum_pool"
     dim_out: int = field(init=False, default=0)
     model_name: str = field(init=False, default="hladis_normal_qk")
@@ -601,7 +605,8 @@ class HladisExtractor:
 
     def _hp(self, seed):
         return dict(lr=self.lr, warmup_steps=self.warmup_steps, max_steps=self.max_steps,
-                    eval_every=self.eval_every, batch_size=self.batch_size, seed=seed)
+                    eval_every=self.eval_every, batch_size=self.batch_size,
+                    task=self.task, seed=seed)
 
     def covered(self, pairs, idx):
         self._ensure_loaded(pairs)

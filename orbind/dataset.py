@@ -68,6 +68,36 @@ def metrics(y, p):
     }
 
 
+def regression_metrics(y, p):
+    """Continuous-target metrics, for the Carey/Hallem response magnitude.
+
+    `R2` is sklearn's: the reference is the *test* set's own mean. That is the
+    same definition upstream reports, and it is why their "naive" row (predict
+    the TRAIN mean) can be strongly negative -- the two means differ. Read a
+    model's R2 against that naive row, never against 0.
+
+    A constant predictor has no defined correlation with anything; rather than
+    emit a nan that poisons every downstream mean, Pearson/Spearman are
+    reported as 0.0 in that case (it is exactly the no-information value).
+    """
+    from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
+    from scipy.stats import pearsonr, spearmanr
+    y = np.asarray(y, dtype=float)
+    p = np.asarray(p, dtype=float)
+    constant = len(p) == 0 or bool(np.allclose(p, p[0]))
+    return {
+        "R2": float(r2_score(y, p)),
+        "RMSE": float(np.sqrt(mean_squared_error(y, p))),
+        "MAE": float(mean_absolute_error(y, p)),
+        "Pearson": 0.0 if constant else float(pearsonr(y, p)[0]),
+        "Spearman": 0.0 if constant else float(spearmanr(y, p).statistic),
+    }
+
+
+# The task axis (see orbind/tasks.py): which metric family a run reports.
+METRICS = {"classification": metrics, "regression": regression_metrics}
+
+
 def split(pairs, y, kind="stratified", test_size=0.2, seed=42):
     """Return boolean train/test masks over the rows of `pairs`."""
     n = len(y)

@@ -22,8 +22,8 @@ mini-language refers to. Two families of source type:
                             to override any of them (leave a field blank to
                             keep its default, e.g. "cls=attn_lse:::1").
 
-Two regimes, two split "traditions" (see orbind/dataset.py vs orbind/regimes.py
-for why they aren't unified):
+Three regimes (see orbind/dataset.py vs orbind/regimes.py vs
+orbind/regimes_ofm.py for why they aren't unified):
 
   curated_full  -- pairs from a csv (pairs_curated.csv / pairs_m2or_full.csv),
                    split via --split {stratified,group_molecule,group_receptor}
@@ -39,6 +39,28 @@ for why they aren't unified):
                    own split exactly (20% test / 10% val molecules,
                    unstratified) so ensemble numbers can be compared to that
                    screen head-on -- see orbind/regimes.py.
+  ofm           -- the Carey (--dataset cc) and Hallem-Carlson (--dataset hc)
+                   datasets from the olfactory foundation models release, with
+                   upstream's own 5-fold splits: --split-family
+                   {rand,cdhit,scaf} = {i.i.d., unseen receptors, unseen
+                   odorants}. HC ships only `rand`. --repeats picks folds
+                   (default 1..5). See orbind/regimes_ofm.py.
+
+The task axis
+-------------
+--task {classification,regression}. M2OR's target is a 0/1 flag; the Carey and
+Hallem targets are continuous z-scored responses, and upstream scores them with
+R^2. `--regime ofm` therefore defaults to `regression`, which switches the
+boosting head to XGBRegressor, the metrics to R2/RMSE/MAE/Pearson/Spearman, the
+ensemble stacker to simplex-on-MSE / linreg, and every cls extractor's
+criterion to squared error (orbind/tasks.py).
+
+Every run also emits a `naive[train-mean]` row: the constant train-mean
+predictor, scored on the same test rows with the same metrics. Under regression
+that is upstream's own naive baseline and the only thing that makes an R^2 near
+zero interpretable (R^2 is measured against the TEST mean, so a model can beat
+the naive row while still scoring below 0). Under classification the same
+constant is the class prevalence -- i.e. the AUPRC floor.
 
 Every invocation creates one timestamped run folder under
 results/ensemble_logs/<run_id>/:
@@ -135,6 +157,8 @@ import importlib
 
 from orbind.ensemble import run_ensemble
 from orbind.regimes import full_full_pairs, load_split
+from orbind.regimes_ofm import DATASETS as OFM_DATASETS, available_families, ofm_indices, ofm_pairs
+from orbind.tasks import TASKS
 
 # Source types dispatch LAZILY: parse_source_arg imports an extractor's module
 # only when a source of that type is actually requested, so a run pulls just the
@@ -178,7 +202,8 @@ _FACTORY_SPEC = {
     # uses ProtBERT CLS; ESM-1b keeps it comparable to the other three).
     # Emitted feature is only node_d_model=72 wide by default -- upstream's own
     # size, far narrower than prosmith/lorax/molor.
-    # "name=hladis[:protein_path[:n_models[:epochs]]]". See orbind/hladis_extractor.py.
+    # "name=hladis[:protein_path[:n_models[:max_steps[:warmup_steps[:eval_every]]]]]".
+    # See orbind/hladis_extractor.py.
     "hladis": ("orbind.hladis_extractor", "HladisExtractor"),
 }
 _ENTITY_TYPES    = {"esm", "gin"}
@@ -200,6 +225,8 @@ def _factory(type_):
 DEFAULT_REPEATS = {"transductive": [1, 2, 3, 4, 5],
                     "inductive_molecule": [42, 43, 44, 45, 46],
                     "inductive_molecule_v5": [42, 43, 44, 45, 46]}
+# ofm repeats are upstream's own 5 folds of whichever split family is chosen.
+OFM_FOLDS = [1, 2, 3, 4, 5]
 
 
 def parse_source_arg(raw: str):
@@ -271,9 +298,19 @@ def parse_source_arg(raw: str):
             kwargs["protein_path"] = parts[1]
         if len(parts) > 2 and parts[2]:
             kwargs["n_models"] = int(parts[2])
-        if len(parts) > 3 and parts[3]:
-            # molor counts epochs, hladis counts optimizer steps
-            kwargs["max_steps" if type_ in _HLADIS_TYPES else "epochs"] = int(parts[3])
+        if type_ in _HLADIS_TYPES:
+            # Hladis counts optimizer steps, and the two schedule companions are
+            # exposed alongside because they only make sense together: the LR is
+            # `init * min(step^-0.5, step * warmup^-1.5)`, so a max_steps below
+            # warmup_steps never leaves the ramp, and eval_every fixes how many
+            # times best-val weight selection gets to look. Upstream's
+            # 10000/6000/500 is sized for M2OR's 41k rows; on a dataset an order
+            # of magnitude smaller all three have to come down together.
+            for pos, key in ((3, "max_steps"), (4, "warmup_steps"), (5, "eval_every")):
+                if len(parts) > pos and parts[pos]:
+                    kwargs[key] = int(parts[pos])
+        elif len(parts) > 3 and parts[3]:
+            kwargs["epochs"] = int(parts[3])
         return name, _factory(type_)(name=name, **kwargs)
 
     if type_ not in _ENTITY_TYPES:
@@ -332,7 +369,8 @@ class _Tee:
 
 def _run_one_repeat(regime, pairs, extractors, combos, split, repeat, test_size, val_size,
                      weight_method, on_missing, full_full_mode, run_dir, save_checkpoints,
-                     tune_boost_hp, n_trials, optuna_storage):
+                     tune_boost_hp, n_trials, optuna_storage,
+                     task="classification", ofm_dataset=None, ofm_family=None):
     """One repeat's full run_ensemble call -- top-level (not a closure) so it
     can be pickled and sent to a separate process by --max-parallel. Owns its
     own log file and checkpoint subdir regardless of which process runs it."""
@@ -355,15 +393,20 @@ def _run_one_repeat(regime, pairs, extractors, combos, split, repeat, test_size,
                                        weight_method=weight_method, on_missing=on_missing,
                                        checkpoint_dir=checkpoint_dir,
                                        tune_boost_hp=tune_boost_hp, n_trials=n_trials,
-                                       optuna_storage=optuna_storage, run_id=str(repeat))
+                                       optuna_storage=optuna_storage, run_id=str(repeat),
+                                       task=task)
             else:
-                train_idx, val_idx, test_idx = load_split(full_full_mode, repeat)
+                if regime == "ofm":
+                    train_idx, val_idx, test_idx = ofm_indices(ofm_dataset, ofm_family, repeat)
+                else:
+                    train_idx, val_idx, test_idx = load_split(full_full_mode, repeat)
                 result = run_ensemble(pairs, extractors, combos,
                                        train_idx=train_idx, val_idx=val_idx, test_idx=test_idx,
                                        weight_method=weight_method, on_missing=on_missing,
                                        checkpoint_dir=checkpoint_dir,
                                        tune_boost_hp=tune_boost_hp, n_trials=n_trials,
-                                       optuna_storage=optuna_storage, run_id=str(repeat))
+                                       optuna_storage=optuna_storage, run_id=str(repeat),
+                                       task=task)
         finally:
             sys.stdout = old_stdout
     return repeat, result
@@ -379,11 +422,22 @@ def _run_one_repeat_to_queue(q, *call_args):
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--regime", default="curated_full", choices=["curated_full", "full_full"])
+    ap.add_argument("--regime", default="curated_full", choices=["curated_full", "full_full", "ofm"])
+    ap.add_argument("--task", default=None, choices=list(TASKS),
+                     help="classification (default, M2OR's 0/1 Responsive) or regression "
+                          "(the continuous z-scored response of the Carey/Hallem datasets). "
+                          "Switches the boosting head, the metric family, the ensemble "
+                          "weight fitters, and every cls extractor's criterion. "
+                          "--regime ofm defaults to regression.")
     ap.add_argument("--source", action="append", required=True, dest="sources",
                      help="name=type:path[:model_name[:pooling]], repeatable; order fixes combo digits")
     ap.add_argument("--combos", required=True, help='e.g. "1 2 12"')
-    ap.add_argument("--weight-method", default="both", choices=["both", "simplex", "logreg"])
+    ap.add_argument("--weight-method", default="both",
+                     choices=["both", "simplex", "logreg", "linreg"],
+                     help="stacker over the per-combo predictions. 'logreg' is the "
+                          "classification stacker, 'linreg' its least-squares regression "
+                          "counterpart; 'both' picks the right pair for --task. With a "
+                          "single combo the simplex is degenerate and equals that combo.")
     ap.add_argument("--on-missing", default="raise", choices=["raise", "drop"],
                      help="raise: fail loudly on any embedding gap (default). "
                           "drop: warn with coverage %% and drop uncovered rows, "
@@ -421,11 +475,36 @@ def main() -> None:
     g2.add_argument("--full-full-mode", default="transductive",
                      choices=["transductive", "inductive_molecule", "inductive_molecule_v5"])
     g2.add_argument("--repeats", type=int, nargs="+", default=None,
-                     help="fold 1-5 for transductive, cold-molecule seed for the inductive modes. "
-                          "Default: 1..5 / 42..46 respectively.")
+                     help="fold 1-5 for transductive, cold-molecule seed for the inductive modes, "
+                          "fold 1-5 for --regime ofm. Default: 1..5 / 42..46 respectively.")
+
+    g3 = ap.add_argument_group("ofm (Carey / Hallem-Carlson)")
+    g3.add_argument("--dataset", default="cc", choices=sorted(OFM_DATASETS),
+                     help="cc = Carey (50 receptors x 110 odorants), "
+                          "hc = Hallem-Carlson (24 x 110)")
+    g3.add_argument("--split-family", default="rand", choices=["rand", "cdhit", "scaf"],
+                     help="upstream's own split families: rand = i.i.d. (transductive), "
+                          "cdhit = unseen receptors, scaf = unseen odorants. "
+                          "HC ships only rand.")
     args = ap.parse_args()
 
-    tag = args.split if args.regime == "curated_full" else args.full_full_mode
+    # The ofm datasets exist for their continuous response; defaulting them to
+    # classification would silently binarise the very thing they were fetched for.
+    if args.task is None:
+        args.task = "regression" if args.regime == "ofm" else "classification"
+
+    if args.regime == "ofm":
+        families = available_families(args.dataset)
+        if args.split_family not in families:
+            ap.error(f"--dataset {args.dataset} ships no {args.split_family!r} splits "
+                     f"(upstream released only {families} for it)")
+
+    if args.regime == "curated_full":
+        tag = args.split
+    elif args.regime == "ofm":
+        tag = f"{args.dataset}-{args.split_family}"
+    else:
+        tag = args.full_full_mode
     run_id = args.run_name or f"{args.regime}-{tag}-{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     run_dir = _root / args.out_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -451,6 +530,7 @@ def _run(args, run_dir) -> None:
         print(f"source {name!r}: type={type(ex).__name__} model={ex.model_name} "
               f"pooling={ex.pooling} dim_out={dim_out} path={ex.path}")
 
+    print(f"task: {args.task}")
     if args.regime == "curated_full":
         pairs_path = pathlib.Path(args.pairs)
         if not pairs_path.is_absolute():
@@ -458,6 +538,15 @@ def _run(args, run_dir) -> None:
         pairs = pd.read_csv(pairs_path)
         print(f"pairs: {len(pairs)} rows from {pairs_path}")
         repeats = args.seeds
+    elif args.regime == "ofm":
+        pairs = ofm_pairs(args.dataset)
+        y = pairs["label"]
+        print(f"pairs: {len(pairs)} rows from orbind.regimes_ofm.ofm_pairs({args.dataset!r}) "
+              f"-- {pairs['receptor'].nunique()} receptors x {pairs['inchikey'].nunique()} odorants, "
+              f"split family {args.split_family!r}")
+        print(f"  label: continuous, mean={y.mean():.3f} sd={y.std():.3f} "
+              f"min={y.min():.3f} max={y.max():.3f}")
+        repeats = args.repeats or OFM_FOLDS
     else:
         pairs = full_full_pairs()
         print(f"pairs: {len(pairs)} rows from orbind.regimes.full_full_pairs()")
@@ -504,6 +593,11 @@ def _run(args, run_dir) -> None:
                 "repeat": repeat, "kind": "ensemble", "name": f"ensemble[{method}]", **m,
                 "weights": json.dumps({"+".join(c): round(v, 4) for c, v in w.items()}),
             })
+        # The no-information floor gets its own row: under regression an R2 is
+        # unreadable without it (see orbind/dataset.py::regression_metrics).
+        if "naive" in result:
+            rows.append({"repeat": repeat, "kind": "naive", "name": "naive[train-mean]",
+                          **result["naive"]})
         all_rows[:] = [r for r in all_rows if r["repeat"] != repeat] + rows
         pd.DataFrame(all_rows).to_csv(metrics_path, index=False)
         print(f"  wrote -> {metrics_path} ({len(all_rows)} rows so far)", flush=True)
@@ -514,7 +608,8 @@ def _run(args, run_dir) -> None:
             _, result = _run_one_repeat(args.regime, pairs, extractors, args.combos, args.split, repeat,
                                          args.test_size, args.val_size, args.weight_method,
                                          args.on_missing, args.full_full_mode, run_dir, save_checkpoints,
-                                         args.tune_boost, args.n_trials, optuna_storage)
+                                         args.tune_boost, args.n_trials, optuna_storage,
+                                         args.task, args.dataset, args.split_family)
             collect(repeat, result)
     else:
         gpu_ids = _detect_gpus(args.gpus)
@@ -559,7 +654,9 @@ def _run(args, run_dir) -> None:
                                                                         args.weight_method, args.on_missing,
                                                                         args.full_full_mode, run_dir,
                                                                         save_checkpoints, args.tune_boost,
-                                                                        args.n_trials, optuna_storage))
+                                                                        args.n_trials, optuna_storage,
+                                                                        args.task, args.dataset,
+                                                                        args.split_family))
                 p.start()
                 procs.append((repeat, p, q))
             for repeat, p, q in procs:
@@ -570,7 +667,10 @@ def _run(args, run_dir) -> None:
 
     df = pd.DataFrame(all_rows)
     print(f"\nfinal -> {metrics_path} ({len(df)} rows)")
-    print(df.groupby(["kind", "name"])[["AUROC", "AUPRC", "MCC", "F1"]].mean().round(3))
+    summary_cols = (["R2", "RMSE", "Pearson", "Spearman"] if args.task == "regression"
+                    else ["AUROC", "AUPRC", "MCC", "F1"])
+    summary_cols = [c for c in summary_cols if c in df.columns]
+    print(df.groupby(["kind", "name"])[summary_cols].mean().round(3))
     if save_checkpoints:
         print(f"checkpoints -> {run_dir / 'checkpoints'}/repeat_*/")
 

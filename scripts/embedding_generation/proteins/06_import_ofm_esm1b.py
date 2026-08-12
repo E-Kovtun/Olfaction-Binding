@@ -43,6 +43,13 @@ Run
 ---
     uv run python scripts/embedding_generation/proteins/06_import_ofm_esm1b.py \\
         --prots-pt M2OR_full/embeddings/featurized_proteins/prots.pt
+
+The same release ships ESM-1b for the other two benchmark datasets, built by
+the same generator; those receptors are not in the M2OR pool, so both the
+coverage check and the mean cross-check have to be turned off:
+
+    ... --prots-pt data/external/ofm/CC/embeddings/featurized_proteins/prots.pt \\
+        --tag cc --pool none --compare-mean ""
 """
 from __future__ import annotations
 
@@ -81,6 +88,9 @@ def main() -> None:
     ap.add_argument("--prots-pt", default="M2OR_full/embeddings/featurized_proteins/prots.pt",
                     help="upstream prots.pt extracted from data.zip")
     ap.add_argument("--tag", default="full_full", help="output file suffix")
+    ap.add_argument("--pool", default="full_full", choices=("full_full", "none"),
+                    help='pool to check receptor coverage against; "none" for the '
+                         "Carey/Hallem releases, whose receptors are not in the M2OR pool")
     ap.add_argument("--compare-mean", default="data/embeddings/proteins/esm1b_650m_mean.npz",
                     help='existing mean-pooled ESM-1b npz to validate against ("" to skip)')
     args = ap.parse_args()
@@ -115,14 +125,17 @@ def main() -> None:
                          f"(e.g. len={len(bad[0])} vs {per_res[bad[0]].shape[0]})")
 
     # Coverage against the pool this is meant to serve.
-    try:
-        from orbind.regimes import full_full_pairs
-        receptors = set(full_full_pairs()["receptor"])
-        missing = receptors - set(per_res)
-        print(f"  pool coverage: {len(receptors) - len(missing)}/{len(receptors)} receptors"
-              + (f"  MISSING {len(missing)}" if missing else ""))
-    except Exception as e:                                    # pool not reconstructible here
-        print(f"  (skipped pool coverage check: {e})")
+    if args.pool == "none":
+        print("  (pool coverage check disabled via --pool none)")
+    else:
+        try:
+            from orbind.regimes import full_full_pairs
+            receptors = set(full_full_pairs()["receptor"])
+            missing = receptors - set(per_res)
+            print(f"  pool coverage: {len(receptors) - len(missing)}/{len(receptors)} receptors"
+                  + (f"  MISSING {len(missing)}" if missing else ""))
+        except Exception as e:                                # pool not reconstructible here
+            print(f"  (skipped pool coverage check: {e})")
 
     mean_emb = {s: v.mean(axis=0).astype(np.float32) for s, v in per_res.items()}
 

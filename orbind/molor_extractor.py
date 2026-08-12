@@ -52,6 +52,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from . import dataset as D
 from .prosmith_extractor import _M2ORWeights   # identical Hladis/M2OR weighting
+from .tasks import batch_loss_fn, check_task
 
 _INIT_LOCK = threading.Lock()   # see _train_one (global manual_seed under threads)
 
@@ -261,8 +262,7 @@ def _train_one(build_model, train_df, val_df, test_df, graphs, proteins,
                                 hp["batch_size"], train=True)
     opt = torch.optim.Adam(model.parameters(), lr=hp["lr"], weight_decay=hp["weight_decay"])
 
-    def batch_loss(logits, y, w):
-        return nn.functional.binary_cross_entropy_with_logits(logits, y, weight=w, reduction="mean")
+    batch_loss = batch_loss_fn(hp["task"])   # BCE, or squared error under regression
 
     best_val, best_state = np.inf, None
     for ep in range(hp["epochs"]):
@@ -302,6 +302,7 @@ def _train_one(build_model, train_df, val_df, test_df, graphs, proteins,
 
 
 def _run_models(ext, pairs, train_idx, val_idx, test_idx, seed, checkpoint_dir=None):
+    check_task(ext.task)
     ext._ensure_loaded()
     for split_name, idx in (("train", train_idx), ("val", val_idx), ("test", test_idx)):
         mask = ext.covered(pairs, idx)
@@ -381,6 +382,9 @@ class MolorExtractor:
     batch_size: int = 128          # MolOR_canonical batch_size
     add_self_loop: bool = True
     seed_offset: int = 7000
+    # The task axis (orbind/tasks.py). `run_ensemble` overwrites this to match
+    # the run, so this head's criterion and the boosting head downstream agree.
+    task: str = "classification"
     pooling: str = "cross_attn_cat"
     dim_out: int = field(init=False, default=0)
     model_name: str = field(init=False, default="molor_gcn")
@@ -432,7 +436,8 @@ class MolorExtractor:
 
     def _hp(self, seed):
         return dict(lr=self.lr, weight_decay=self.weight_decay, epochs=self.epochs,
-                    batch_size=self.batch_size, max_node_len=self._max_node_len, seed=seed)
+                    batch_size=self.batch_size, max_node_len=self._max_node_len,
+                    task=self.task, seed=seed)
 
     def covered(self, pairs, idx):
         self._ensure_loaded()

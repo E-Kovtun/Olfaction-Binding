@@ -60,6 +60,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from . import dataset as D
 from .prosmith_extractor import _M2ORWeights   # identical Hladis/M2OR weighting
+from .tasks import batch_loss_fn, check_task
 
 _INIT_LOCK = threading.Lock()   # see _train_one (global manual_seed under threads)
 
@@ -230,8 +231,7 @@ def _train_one(build_model, load_tokenizer, train_df, val_df, test_df, proteins,
     params = [p for p in model.parameters() if p.requires_grad]
     opt = torch.optim.Adam(params, lr=hp["lr"])
 
-    def batch_loss(logits, y, w):
-        return nn.functional.binary_cross_entropy_with_logits(logits, y, weight=w, reduction="mean")
+    batch_loss = batch_loss_fn(hp["task"])   # BCE, or squared error under regression
 
     best_val, best_state = np.inf, None
     for ep in range(hp["epochs"]):
@@ -267,6 +267,7 @@ def _train_one(build_model, load_tokenizer, train_df, val_df, test_df, proteins,
 
 
 def _run_models(ext, pairs, train_idx, val_idx, test_idx, seed, checkpoint_dir=None):
+    check_task(ext.task)
     ext._ensure_loaded()
     for split_name, idx in (("train", train_idx), ("val", val_idx), ("test", test_idx)):
         mask = ext.covered(pairs, idx)
@@ -345,6 +346,9 @@ class LoraxExtractor:
     batch_size: int = 21           # config_m2or train_lorax.batch_size
     max_smiles_len: int = 256
     seed_offset: int = 5000
+    # The task axis (orbind/tasks.py). `run_ensemble` overwrites this to match
+    # the run, so this head's criterion and the boosting head downstream agree.
+    task: str = "classification"
     pooling: str = "cross_attn_cat"
     dim_out: int = field(init=False, default=0)
     model_name: str = field(init=False, default="lorax_lora_mol")
@@ -386,7 +390,7 @@ class LoraxExtractor:
 
     def _hp(self, seed):
         return dict(lr=self.lr, epochs=self.epochs, batch_size=self.batch_size,
-                    max_smiles_len=self.max_smiles_len, seed=seed)
+                    max_smiles_len=self.max_smiles_len, task=self.task, seed=seed)
 
     def covered(self, pairs, idx):
         self._ensure_loaded()

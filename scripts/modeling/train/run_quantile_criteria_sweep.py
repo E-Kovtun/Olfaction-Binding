@@ -157,7 +157,7 @@ def main() -> None:
     seeds = args.seeds or DEFAULT_REPEATS[args.regime]
     mol_stem = pathlib.Path(args.mol_embeddings).stem
     out = pathlib.Path(args.out) if args.out else (
-        _root / "results/graph/full_full/v6/protein_based_graph"
+        _root / "results/graph/full_full/v7/protein_based_graph"
         / f"metrics_{regime_key}__{mol_stem}.csv")
     out.parent.mkdir(parents=True, exist_ok=True)
 

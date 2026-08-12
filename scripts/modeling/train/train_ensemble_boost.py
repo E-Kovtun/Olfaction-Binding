@@ -320,6 +320,11 @@ def parse_source_arg(raw: str):
             for pos, key in ((3, "max_steps"), (4, "warmup_steps"), (5, "eval_every")):
                 if len(parts) > pos and parts[pos]:
                     kwargs[key] = int(parts[pos])
+            # field 7: print the model's own scalar head's test metrics, which is
+            # what the paper reports -- needed to tell a port bug apart from a
+            # boosting-head effect. Diagnostic only.
+            if len(parts) > 6 and parts[6]:
+                kwargs["report_own_head"] = parts[6] not in ("0", "false", "False")
         elif len(parts) > 3 and parts[3]:
             kwargs["epochs"] = int(parts[3])
         return name, _factory(type_)(name=name, **kwargs)

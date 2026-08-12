@@ -394,6 +394,22 @@ def _embed(model, loader, device):
     return np.concatenate(out, axis=0)
 
 
+@torch.inference_mode()
+def _head_scores(model, loader, device):
+    """The model's OWN scalar output -- the thing Hladis's paper reports metrics
+    on, as opposed to the pooled vector this extractor hands to the boosting
+    head. Purely diagnostic: nothing downstream consumes it, so switching it on
+    cannot move any existing number."""
+    model.eval()
+    out, ys = [], []
+    for x, mask, src, dst, ea, prot, y, _ in loader:
+        logits, _ = model(x.to(device), mask.to(device), src.to(device), dst.to(device),
+                          ea.to(device), prot.to(device))
+        out.append(logits.detach().cpu().numpy())
+        ys.append(y.numpy())
+    return np.concatenate(out), np.concatenate(ys)
+
+
 def _endless(loader):
     while True:
         yield from loader
@@ -492,6 +508,16 @@ def _run_models(ext, pairs, train_idx, val_idx, test_idx, seed, checkpoint_dir=N
                                           w_train, w_val, w_test, hp, device, checkpoint_path=ckpt)
         train_loader = _make_loader(train_df, ext._proteins, ext._graphs, w_train,
                                     hp["batch_size"], train=False)
+        if ext.report_own_head:
+            test_loader = _make_loader(test_df, ext._proteins, ext._graphs, w_test,
+                                       hp["batch_size"], train=False)
+            s, y_true = _head_scores(model, test_loader, device)
+            if ext.task == "classification":
+                mm = D.metrics(y_true, 1.0 / (1.0 + np.exp(-s)))
+            else:
+                mm = D.regression_metrics(y_true, s)
+            print(f"    hladis[{ext.name}] model{m} OWN HEAD on test: "
+                  + " ".join(f"{k}={v:.3f}" for k, v in mm.items()), flush=True)
         return m, _embed(model, train_loader, device), e_val, e_test, model
 
     with ThreadPoolExecutor(max_workers=ext.n_models) as pool:
@@ -575,6 +601,11 @@ class HladisExtractor:
     # The task axis (orbind/tasks.py). `run_ensemble` overwrites this to match
     # the run, so this head's criterion and the boosting head downstream agree.
     task: str = "classification"
+    # Print the model's OWN scalar head's test metrics per bagged model. This is
+    # what the paper reports; the pipeline otherwise only ever scores an XGBoost
+    # fitted on the pooled vector, so a gap against the paper cannot be pinned on
+    # the port vs the head without this. Diagnostic only -- changes no output.
+    report_own_head: bool = False
     pooling: str = "attn_sum_pool"
     dim_out: int = field(init=False, default=0)
     model_name: str = field(init=False, default="hladis_normal_qk")

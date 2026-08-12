@@ -99,6 +99,7 @@ def _run_seed(seed, args, per_seed_done, emit, data):
         for q in args.quantiles:
             if ("boost_full", q) not in per_seed_done:
                 emit({"criterion": "boost_full", "quantile": q, "K": len(uniq), "seed": seed,
+                      "n_models": args.n_models,
                       **{k: float(mb[k]) for k in METRICS}}, heavy=False)
 
     for q in args.quantiles:
@@ -114,6 +115,7 @@ def _run_seed(seed, args, per_seed_done, emit, data):
                              np.concatenate([Zp_te, Xm_te], 1), seed=seed)
             m = metrics(y_te, sc)
             emit({"criterion": crit, "quantile": q, "K": int(Kq[q]), "seed": seed,
+                  "n_models": args.n_models,
                   **{k: float(m[k]) for k in METRICS}}, heavy=True)
 
 
@@ -156,9 +158,10 @@ def main() -> None:
     regime_key = REGIME_KEY[args.regime]
     seeds = args.seeds or DEFAULT_REPEATS[args.regime]
     mol_stem = pathlib.Path(args.mol_embeddings).stem
+    nm_tag = "" if args.n_models == 5 else f"__nm{args.n_models}"   # 5-model bag keeps the legacy name
     out = pathlib.Path(args.out) if args.out else (
         _root / "results/graph/full_full/v7/protein_based_graph"
-        / f"metrics_{regime_key}__{mol_stem}.csv")
+        / f"metrics_{regime_key}__{mol_stem}{nm_tag}.csv")
     out.parent.mkdir(parents=True, exist_ok=True)
 
     print(f"regime={args.regime} ({regime_key})  seeds={seeds}  quantiles={args.quantiles}\n"
@@ -169,9 +172,15 @@ def main() -> None:
     rows, done = [], set()
     if out.exists():
         prev = pd.read_csv(out)
+        if "n_models" not in prev.columns:
+            prev["n_models"] = 5          # legacy files predate n_models; they were all 5-model bags
         rows = prev.to_dict("records")
-        done = {(r["criterion"], float(r["quantile"]), int(r["seed"])) for _, r in prev.iterrows()}
-        print(f"resuming: {len(done)} cells already in {out.name}", flush=True)
+        # `done` is scoped to THIS run's n_models: a cell computed at n_models=5 must
+        # not skip its n_models=1 twin. All rows (any n_models) are kept for save().
+        done = {(r["criterion"], float(r["quantile"]), int(r["seed"]))
+                for _, r in prev.iterrows() if int(r["n_models"]) == args.n_models}
+        print(f"resuming: {len(done)} cells at n_models={args.n_models} in {out.name} "
+              f"({len(rows)} rows total across all n_models)", flush=True)
 
     def save():
         tmp = out.with_suffix(".tmp.csv")

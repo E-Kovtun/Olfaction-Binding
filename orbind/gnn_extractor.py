@@ -102,10 +102,14 @@ def _mp_edges(pairs: pd.DataFrame, train_idx, mol_to_i, prot_to_i, q: float,
     only -- every train row still gets decoded/supervised regardless.
 
     The quantile sets how many molecules to keep (coverage-quantile count); the
-    `criterion` (see orbind/mol_selection.CRITERIA) picks WHICH ones. The default
-    "coverage" reproduces the historical "keep counts >= quantile(counts, q)"
-    filter bit-for-bit on the resulting edge set (zero-coverage molecules carry
-    no edges, so their mask value is irrelevant)."""
+    `criterion` (see orbind/mol_selection.CRITERIA) picks WHICH ones.
+
+    This function's own fallback stays "coverage" because that value reproduces
+    the historical "keep counts >= quantile(counts, q)" filter bit-for-bit
+    (zero-coverage molecules carry no edges, so their mask value is
+    irrelevant). `GnnSignedExtractor` -- the only real caller -- always passes
+    its own criterion explicitly, and **its** default is now
+    "greedy_pair_cover"; see the note on that field."""
     sub = pairs.iloc[train_idx]
     mol_ids = sub["inchikey"].map(mol_to_i).to_numpy()
     prot_ids = sub["receptor"].map(prot_to_i).to_numpy()
@@ -285,7 +289,12 @@ def _train_one(build_model, x_mol, x_prot, pos_eidx, neg_eidx,
     return z_mol, z_prot, model
 
 
-_LABEL_AGNOSTIC_CRITERIA = {"coverage"}   # see orbind/mol_selection.compute_mol_scores
+# Criteria computable without labels, hence usable under task="regression".
+# `coverage` is a bincount over train edges; `greedy_pair_cover` orders molecules
+# by newly covered protein PAIRS, built from `prof`/`active` only. The other five
+# are functions of npos/nneg (`y == 1` / `y == 0`) and collapse to zeros on a
+# continuous target. See orbind/mol_selection.compute_mol_scores.
+_LABEL_AGNOSTIC_CRITERIA = {"coverage", "greedy_pair_cover"}
 
 
 def _run_models(ext, pairs: pd.DataFrame, train_idx, val_idx, test_idx, seed: int, checkpoint_dir=None):
@@ -316,11 +325,11 @@ def _run_models(ext, pairs: pd.DataFrame, train_idx, val_idx, test_idx, seed: in
     y_train = train_df["label"].to_numpy(dtype=np.float32)
 
     pos, neg = _mp_edges(pairs, train_idx, mol_to_i, prot_to_i, ext.q,
-                         getattr(ext, "criterion", "coverage"),
+                         getattr(ext, "criterion", "greedy_pair_cover"),
                          getattr(ext, "edge_threshold", 0.0))
     n_pos, n_neg = len(pos[0]), len(neg[0])
     print(f"  {ext.name}: MP graph {n_pos} positive / {n_neg} negative edges "
-          f"(q={ext.q}, criterion={getattr(ext, 'criterion', 'coverage')}, "
+          f"(q={ext.q}, criterion={getattr(ext, 'criterion', 'greedy_pair_cover')}, "
           f"edge_threshold={getattr(ext, 'edge_threshold', 0.0)})", flush=True)
     if n_pos == 0 or n_neg == 0:
         raise ValueError(
@@ -373,7 +382,21 @@ class GnnSignedExtractor:
     hidden: int = 256
     dropout: float = 0.3
     q: float = 0.99
-    criterion: str = "coverage"        # MP molecule-keep ranking (mol_selection.CRITERIA)
+    # MP molecule-keep ranking (mol_selection.CRITERIA).
+    #
+    # DEFAULT CHANGED Aug 2026: "coverage" -> "greedy_pair_cover". The quantile
+    # decides HOW MANY molecules survive, the criterion decides WHICH. At q=0.99
+    # that is 6 molecules out of 596, and the two criteria disagree almost
+    # completely (1 molecule in common): coverage takes the most-measured ones
+    # and yields a near-all-negative graph (3751 edges, 31 positive), while
+    # greedy maximises newly covered protein PAIRS and yields 2799 edges with
+    # 137 positive.
+    #
+    # Consequence to remember: every result produced before this change used
+    # "coverage" and recorded no explicit criterion in its config.json, so
+    # re-running an old command now reproduces a DIFFERENT model. Name the
+    # criterion explicitly in commands whose numbers you intend to keep.
+    criterion: str = "greedy_pair_cover"
     # The task axis (orbind/tasks.py). `run_ensemble` overwrites this to match
     # the run, so the decoder's criterion and the boosting head downstream agree.
     task: str = "classification"

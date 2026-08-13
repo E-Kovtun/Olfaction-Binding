@@ -115,11 +115,14 @@ The ProSmith/MPP baseline itself, reproducing upstream's own second stage
 The cls source takes a *per-residue* protein npz -- upstream's own ESM-1b,
 imported by scripts/embedding_generation/proteins/06_import_ofm_esm1b.py --
 while prot stays mean-pooled; both defaults, so only the BindingDB
-checkpoint (which upstream's published numbers use) has to be named::
+checkpoint (which upstream's published numbers use) has to be named. Its path
+is relative to the CWD, i.e. the repo root -- the checkpoint lives wherever
+BindingDB.zip was unpacked, which here is under `data/external/ofm/`, NOT the
+bare `saved_model/` of upstream's own tree::
 
     uv run python scripts/modeling/train/train_ensemble_boost.py \\
         --regime full_full --full-full-mode transductive \\
-        --source cls=prosmith:::1:saved_model/pretraining_IC50_6gpus_bs144_1.5e-05_layers6.txt.pkl \\
+        --source cls=prosmith::::data/external/ofm/saved_model/pretraining_IC50_6gpus_bs144_1.5e-05_layers6.txt.pkl \\
         --source prot=esm:data/embeddings/proteins/esm1b_650m_mean.npz:esm1b_t33_650M_UR50S \\
         --source mol=gin:data/embeddings/molecules/chemberta_77m_m2or.npz:chemberta_77m \\
         --combos "1 2 3 12 13 23 123" --on-missing drop

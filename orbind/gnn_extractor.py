@@ -407,7 +407,11 @@ class GnnSignedExtractor:
     weight_decay: float = 1e-4
     clip_grad: float = 1.0
     epochs: int = 900
-    n_models: int = 5
+    # DEFAULT CHANGED Aug 2026: 5 -> 1, together with the criterion switch above.
+    # The two form one "tactic": greedy selection with a single model, no
+    # init-bagging. Consequence for feature width: emit="prot" now yields
+    # `hidden` = 256 columns, not 5 x 256 = 1280.
+    n_models: int = 1
     seed_offset: int = 5000
     emit: str = "prot"
     pooling: str = "signed_sage"

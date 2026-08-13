@@ -27,6 +27,22 @@ The three families are the three generalization scenarios
 CC has all three; **HC ships only `rand`**. That asymmetry is upstream's, not
 ours -- see `available_families`.
 
+A fourth family is ours, not upstream's
+---------------------------------------
+    our_inductive   unseen odorants, stratified -- built by
+                    scripts/preprocessing/03_build_ofm_our_inductive_splits.py
+
+Same shape as `scaf` (22 test / 18 val / 70 train molecules) and the same
+claim -- cold molecule -- but the 22 are dealt by systematic sampling over the
+molecules ordered by response dynamic range instead of by blocks of a
+scaffold-sorted list. `scaf`'s rule is deterministic and its fold 1 lands on
+the carboxylic-acid homologous series: test sd 0.215 and naive R2 -4.92, which
+IS the published -1.016 average. Under `our_inductive` every CC fold has test
+sd 0.97-1.04 and naive R2 -0.000, so R2 is readable fold by fold. It is not
+scaffold-disjoint and does not claim to be -- with 71 of 110 odorants sharing
+the empty Murcko scaffold, no 5-fold scheme here can be, upstream's included.
+Both are built for HC too, which upstream left with `rand` alone.
+
 The target is continuous
 ------------------------
 `output` is a globally z-scored response, not a 0/1 flag. `ofm_pairs` puts it
@@ -54,14 +70,14 @@ DATASETS: dict[str, dict] = {
     "cc": {
         "dir": "CC",
         "raw": pathlib.Path("CC") / "raw" / "CC_reformat_z.csv",
-        "families": ("rand", "cdhit", "scaf"),
+        "families": ("rand", "cdhit", "scaf", "our_inductive"),
         "molecules": "molecule_smiles_cc.csv",
         "label": "Carey",
     },
     "hc": {
         "dir": "HC",
         "raw": pathlib.Path("HC") / "raw" / "hc_with_prot_seq_z.csv",
-        "families": ("rand",),
+        "families": ("rand", "our_inductive"),
         "molecules": "molecule_smiles_hc.csv",
         "label": "Hallem-Carlson",
     },

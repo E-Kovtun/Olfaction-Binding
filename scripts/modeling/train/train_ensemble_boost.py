@@ -43,8 +43,10 @@ orbind/regimes_ofm.py for why they aren't unified):
                    datasets from the olfactory foundation models release, with
                    upstream's own 5-fold splits: --split-family
                    {rand,cdhit,scaf} = {i.i.d., unseen receptors, unseen
-                   odorants}. HC ships only `rand`. --repeats picks folds
-                   (default 1..5). See orbind/regimes_ofm.py.
+                   odorants}. HC ships only `rand`. Plus `our_inductive`,
+                   ours: cold molecule like scaf but stratified, so every
+                   fold is scorable. --repeats picks folds (default 1..5).
+                   See orbind/regimes_ofm.py.
 
 The task axis
 -------------
@@ -501,10 +503,15 @@ def main() -> None:
     g3.add_argument("--dataset", default="cc", choices=sorted(OFM_DATASETS),
                      help="cc = Carey (50 receptors x 110 odorants), "
                           "hc = Hallem-Carlson (24 x 110)")
-    g3.add_argument("--split-family", default="rand", choices=["rand", "cdhit", "scaf"],
+    g3.add_argument("--split-family", default="rand",
+                     choices=["rand", "cdhit", "scaf", "our_inductive"],
                      help="upstream's own split families: rand = i.i.d. (transductive), "
                           "cdhit = unseen receptors, scaf = unseen odorants. "
-                          "HC ships only rand.")
+                          "HC ships only rand. our_inductive is ours: unseen odorants "
+                          "again, but stratified by response dynamic range so no fold is "
+                          "degenerate (scaf fold 1 has test sd 0.215 and naive R2 -4.92); "
+                          "build it with scripts/preprocessing/"
+                          "03_build_ofm_our_inductive_splits.py.")
     args = ap.parse_args()
 
     # The ofm datasets exist for their continuous response; defaulting them to

@@ -144,7 +144,8 @@ def _boost_rows(seed, args, P):
                      task=args.task)
     mb = METRIC_FNS[args.task](P["y_te"], sc)
     return [{"criterion": "boost_full", "quantile": q, "K": len(P["uniq"]), "seed": seed,
-             "n_models": args.n_models, **{k: float(mb[k]) for k in cols}}
+             "n_models": args.n_models, "status": "ok",
+             **{k: float(mb[k]) for k in cols}}
             for q in args.quantiles]
 
 
@@ -161,30 +162,54 @@ def _gnn_row(seed, q, crit, args, P):
                      np.concatenate([Zp_te, P["Xm_te"]], 1), seed=seed, task=args.task)
     m = METRIC_FNS[args.task](P["y_te"], sc)
     return {"criterion": crit, "quantile": q, "K": int(P["Kq"][q]), "seed": seed,
-            "n_models": args.n_models, **{k: float(m[k]) for k in cols}}
+            "n_models": args.n_models, "status": "ok",
+            **{k: float(m[k]) for k in cols}}
+
+
+def _failed_row(seed, q, crit, args, K, err):
+    """A cell that cannot be computed is still an answer -- record it as NaN with
+    the reason, so the CSV documents the hole and a resume doesn't retry it.
+
+    The one that actually happens: at a small K the kept molecules can all sit on
+    one side of `edge_threshold`, and signed message passing needs both signs. On
+    Carey at q=99 K is a SINGLE molecule, so whether its 50 receptor responses
+    straddle zero is a per-fold coin flip."""
+    return {"criterion": crit, "quantile": q, "K": int(K), "seed": seed,
+            "n_models": args.n_models, "status": f"failed: {err}",
+            **{k: float("nan") for k in TASK_METRICS[args.task]}}
 
 
 def _worker_loop(job_q, res_q, args):
     """Persistent worker: the parent pinned CUDA_VISIBLE_DEVICES before start(), so
     every torch/XGBoost op here lands on this worker's GPU. Loads the pool once and
     caches per-seed prep, then pulls (seed, quantile, criterion) jobs -- so GNN
-    training, not just the boost baseline, stays spread across every GPU."""
-    data = _prepare(args)
-    prep = {}
-    while True:
-        job = job_q.get()
-        if job is None:
-            break
-        kind, seed, q, crit = job
-        if seed not in prep:
-            prep[seed] = _seed_prep(seed, args, data)
-        P = prep[seed]
-        if kind == "boost":
-            for row in _boost_rows(seed, args, P):
-                res_q.put(("row", row, False))
-        else:
-            res_q.put(("row", _gnn_row(seed, q, crit, args, P), True))
-    res_q.put(("worker_done", None, None))
+    training, not just the boost baseline, stays spread across every GPU.
+
+    Every job is guarded and `worker_done` is sent from `finally`: a worker that
+    dies silently would leave the parent blocked forever in its collection loop,
+    which is exactly what an uncaught degenerate-graph error used to do."""
+    try:
+        data = _prepare(args)
+        prep = {}
+        while True:
+            job = job_q.get()
+            if job is None:
+                break
+            kind, seed, q, crit = job
+            try:
+                if seed not in prep:
+                    prep[seed] = _seed_prep(seed, args, data)
+                P = prep[seed]
+                if kind == "boost":
+                    for row in _boost_rows(seed, args, P):
+                        res_q.put(("row", row, False))
+                else:
+                    res_q.put(("row", _gnn_row(seed, q, crit, args, P), True))
+            except Exception as e:                       # noqa: BLE001 -- one cell must not kill the sweep
+                K = prep.get(seed, {}).get("Kq", {}).get(q, -1)
+                res_q.put(("row", _failed_row(seed, q, crit, args, K, e), True))
+    finally:
+        res_q.put(("worker_done", None, None))
 
 
 def main() -> None:
@@ -267,6 +292,8 @@ def main() -> None:
         prev = pd.read_csv(out)
         if "n_models" not in prev.columns:
             prev["n_models"] = 5          # legacy files predate n_models; they were all 5-model bags
+        if "status" not in prev.columns:
+            prev["status"] = "ok"         # ... and predate status; a written row was a good row
         rows = prev.to_dict("records")
         # `done` is scoped to THIS run's n_models: a cell computed at n_models=5 must
         # not skip its n_models=1 twin. All rows (any n_models) are kept for save().
@@ -281,6 +308,21 @@ def main() -> None:
         tmp.replace(out)
 
     # progress counter over HEAVY (GNN) cells only
+    # A complete matrix makes the CRITERION axis degenerate as well as the quantile
+    # one: `coverage` is constant, and `greedy_pair_cover`'s gain is
+    # n_touch^2 - covered_pairs, which is equal for every molecule when they all
+    # touch every receptor. Both then reduce to their own tie-break, so a
+    # criterion-vs-criterion difference on such a split is arbitrary, not
+    # informative. Say so once, up front, rather than let the plot imply meaning.
+    if len(args.criteria) > 1:
+        probe = _seed_prep(seeds[0], args, _prepare(args))
+        ik = probe["pairs"]["inchikey"].to_numpy()[probe["tr"]]
+        cnt = pd.Series(ik).value_counts().to_numpy()
+        if len(set(cnt.tolist())) == 1:
+            print(f"WARNING: every train molecule has identical coverage ({cnt[0]} receptors), "
+                  f"so both molecule-ranking criteria are ties broken arbitrarily -- read the "
+                  f"K axis, not the criterion comparison.", flush=True)
+
     total = sum(1 for s in seeds for q in args.quantiles for c in args.criteria
                 if (c, float(q), int(s)) not in done)
     t0 = time.time()
@@ -298,9 +340,10 @@ def main() -> None:
             tag = f"[{state['heavy_done']}/{total}  {_fmt(el)} elapsed  ETA {_fmt(eta)}]"
         else:
             tag = "[boost_full]"
+        body = (row.get("status", "ok") if str(row.get("status", "ok")).startswith("failed")
+                else " ".join(f"{k}={row[k]:.3f}" for k in TASK_METRICS[args.task]))
         print(f"  seed {row['seed']} q{int(row['quantile'])} {row['criterion']:18} "
-              + " ".join(f"{k}={row[k]:.3f}" for k in TASK_METRICS[args.task])
-              + f"  {tag}", flush=True)
+              f"K={row['K']} {body}  {tag}", flush=True)
 
     # ---- schedulable jobs: one GNN cell per (seed, quantile, criterion) so GNN
     #      training saturates every GPU; boost_full is one cheap job per seed.
@@ -322,11 +365,14 @@ def main() -> None:
             if s not in prep:
                 prep[s] = _seed_prep(s, args, data)
             P = prep[s]
-            if kind == "boost":
-                for row in _boost_rows(s, args, P):
-                    record(row, False)
-            else:
-                record(_gnn_row(s, q, c, args, P), True)
+            try:
+                if kind == "boost":
+                    for row in _boost_rows(s, args, P):
+                        record(row, False)
+                else:
+                    record(_gnn_row(s, q, c, args, P), True)
+            except Exception as e:                       # noqa: BLE001 -- same contract as the workers
+                record(_failed_row(s, q, c, args, P["Kq"].get(q, -1), e), True)
     else:
         import multiprocessing as mp
         ctx = mp.get_context("spawn")

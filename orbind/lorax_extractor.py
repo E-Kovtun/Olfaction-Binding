@@ -114,10 +114,19 @@ def _make_collate(tokenizer, max_smiles_len: int):
     return collate
 
 
-def _make_loader(df, proteins, weights, tokenizer, max_smiles_len, batch_size, train):
+def _make_loader(df, proteins, weights, tokenizer, max_smiles_len, batch_size, train,
+                 num_workers=4):
     ds = _LoraxDataset(df, proteins, weights)
+    # collation (SMILES tokenization + padding the per-residue ESM matrices) is
+    # CPU-heavy and, single-process, starves the GPU between tiny batches. Farm
+    # it out to worker processes with pinned memory so transfers overlap compute.
+    use_cuda = torch.cuda.is_available()
+    nw = num_workers if use_cuda else 0
+    kw = dict(num_workers=nw, pin_memory=use_cuda)
+    if nw:
+        kw["persistent_workers"] = True
     return DataLoader(ds, batch_size=batch_size, shuffle=train,
-                      collate_fn=_make_collate(tokenizer, max_smiles_len))
+                      collate_fn=_make_collate(tokenizer, max_smiles_len), **kw)
 
 
 def _to_device(tok: dict, device):

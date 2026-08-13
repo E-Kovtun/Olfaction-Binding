@@ -70,7 +70,8 @@ while not (_root / "pyproject.toml").exists():
 sys.path.insert(0, str(_root))
 
 from orbind.gnn_extractor import GnnSignedExtractor              # noqa: E402
-from orbind.mol_selection import CRITERIA, K_MODES, resolve_K    # noqa: E402
+from orbind.mol_selection import (CRITERIA, K_MODES, resolve_K,  # noqa: E402
+                                  compute_mol_scores)
 from orbind.baselines import train_boost                         # noqa: E402
 from orbind.dataset import METRICS as METRIC_FNS, load_npz_dict  # noqa: E402
 from orbind.regimes import full_full_pairs, load_split           # noqa: E402
@@ -262,14 +263,11 @@ def main() -> None:
         print("WARNING: k_mode=coverage_quantile on a complete matrix keeps every "
               "molecule at every q -- all quantiles will produce the same model.",
               flush=True)
-    # `greedy_pair_cover` and `coverage` are the only criteria that never read y,
-    # and the others are built from npos/nneg, i.e. from a 0/1 label.
-    if args.task == "regression":
-        bad = [c for c in args.criteria if c not in ("coverage", "greedy_pair_cover")]
-        if bad:
-            ap.error(f"criteria {bad} score molecules by positive/negative counts and "
-                     f"are undefined on a continuous target; use coverage and/or "
-                     f"greedy_pair_cover under --task regression")
+    # Label-based criteria work on a continuous target too: the extractor
+    # binarises at `edge_threshold` (0.0 = "responds above the pool average"),
+    # the same point the signed graph uses for edge signs. What IS worth saying
+    # out loud is which criteria carry no information on a complete matrix --
+    # see the coverage probe below.
 
     regime_key = (f"{args.dataset}_{OFM_FAMILY[args.regime]}" if is_ofm
                   else REGIME_KEY[args.regime])
@@ -308,20 +306,30 @@ def main() -> None:
         tmp.replace(out)
 
     # progress counter over HEAVY (GNN) cells only
-    # A complete matrix makes the CRITERION axis degenerate as well as the quantile
-    # one: `coverage` is constant, and `greedy_pair_cover`'s gain is
-    # n_touch^2 - covered_pairs, which is equal for every molecule when they all
-    # touch every receptor. Both then reduce to their own tie-break, so a
-    # criterion-vs-criterion difference on such a split is arbitrary, not
-    # informative. Say so once, up front, rather than let the plot imply meaning.
-    if len(args.criteria) > 1:
-        probe = _seed_prep(seeds[0], args, _prepare(args))
-        ik = probe["pairs"]["inchikey"].to_numpy()[probe["tr"]]
-        cnt = pd.Series(ik).value_counts().to_numpy()
-        if len(set(cnt.tolist())) == 1:
-            print(f"WARNING: every train molecule has identical coverage ({cnt[0]} receptors), "
-                  f"so both molecule-ranking criteria are ties broken arbitrarily -- read the "
-                  f"K axis, not the criterion comparison.", flush=True)
+    # On a COMPLETE matrix some criteria carry no information at all, and the plot
+    # would imply they do. Score them once, up front, and name the flat ones:
+    #   coverage           constant -- everything is measured against everything
+    #   greedy_pair_cover  gain = n_touch^2 - covered_pairs, equal for all
+    #   idf_coverage       df = every molecule, so idf = log2(m/m) = 0 everywhere
+    #   composite          balance x idf_coverage, hence also 0
+    # The label-based three (balance_bits, entropy_bits, disc_pairs) DO rank --
+    # and on constant coverage they rank identically, all being monotone in
+    # |pos_frac - 0.5| (measured: Spearman 1.0000 / 0.9999 on cc/our_inductive).
+    _probe = _seed_prep(seeds[0], args, _prepare(args))
+    _p = _probe["pairs"].iloc[_probe["tr"]]
+    _mols = sorted(_p["inchikey"].unique()); _rec = sorted(_p["receptor"].unique())
+    _sc = compute_mol_scores(_p["inchikey"].map({m: i for i, m in enumerate(_mols)}).to_numpy(),
+                             _p["receptor"].map({r: i for i, r in enumerate(_rec)}).to_numpy(),
+                             _p["label"].to_numpy(), len(_mols), len(_rec), need_greedy=False,
+                             pos_threshold=(0.0 if args.task == "regression" else None))
+    _flat = [c for c in args.criteria
+             if c != "greedy_pair_cover" and len(np.unique(np.round(_sc["SCORE"][c], 10))) == 1]
+    if "greedy_pair_cover" in args.criteria and len(np.unique(_sc["cov"])) == 1:
+        _flat.append("greedy_pair_cover")
+    if _flat:
+        print(f"WARNING: on this split {_flat} give every molecule the same score, so their "
+              f"selection is an arbitrary tie-break, not a ranking -- read the K axis, not "
+              f"the criterion comparison.", flush=True)
 
     total = sum(1 for s in seeds for q in args.quantiles for c in args.criteria
                 if (c, float(q), int(s)) not in done)

@@ -67,17 +67,30 @@ def _greedy_pair_cover_order(prof, active, n_prot):
 
 
 def compute_mol_scores(mol_ids, prot_ids, y, n_mol, n_prot,
-                       need_greedy: bool = True):
+                       need_greedy: bool = True, pos_threshold=None):
     """Per-molecule criterion scores from TRAIN edges.
 
     `mol_ids`/`prot_ids`/`y` are parallel arrays over train pairs (local indices,
     label 1/0). Returns a dict with `cov` (coverage vector), `SCORE` (dict of the
     six vector criteria) and `g_order` (greedy order list, or None if not needed).
+
+    `pos_threshold` makes the label-based criteria usable on a CONTINUOUS target:
+    positive becomes `y > pos_threshold` instead of `y == 1`, and negative its
+    complement instead of `y == 0`. Pass the same value the graph uses for edge
+    signs (`GnnSignedExtractor.edge_threshold`) so a molecule's "positive mix"
+    means the same thing to the ranking and to the message passing. Left None,
+    the historical exact-match rule applies and every count is empty on a
+    z-scored response -- which is why those criteria used to be refused there.
     """
     mol_ids = np.asarray(mol_ids); prot_ids = np.asarray(prot_ids)
     y = np.asarray(y)
-    pos_m = mol_ids[y == 1]
-    neg_m = mol_ids[y == 0]
+    if pos_threshold is None:
+        pos_m = mol_ids[y == 1]
+        neg_m = mol_ids[y == 0]
+    else:
+        is_pos = y > pos_threshold
+        pos_m = mol_ids[is_pos]
+        neg_m = mol_ids[~is_pos]
 
     cov = np.bincount(mol_ids, minlength=n_mol)
     npos = np.bincount(pos_m, minlength=n_mol)
@@ -173,12 +186,13 @@ def keep_mask(criterion: str, scores: dict, K: int, n_mol: int) -> np.ndarray:
 
 
 def select_keep_mask(criterion, mol_ids, prot_ids, y, n_mol, n_prot, q,
-                     k_mode: str = "coverage_quantile"):
+                     k_mode: str = "coverage_quantile", pos_threshold=None):
     """One-shot convenience: TRAIN edges + (criterion, q) -> boolean keep mask
     [n_mol]. `q` sets K (see `resolve_K` for the two readings); the criterion
     picks which K. With the default k_mode and criterion='coverage' this
     reproduces `counts >= quantile(counts, q)` bit-for-bit."""
     sc = compute_mol_scores(mol_ids, prot_ids, y, n_mol, n_prot,
-                            need_greedy=(criterion == "greedy_pair_cover"))
+                            need_greedy=(criterion == "greedy_pair_cover"),
+                            pos_threshold=pos_threshold)
     K = resolve_K(sc["cov"], q, k_mode)
     return keep_mask(criterion, sc, K, n_mol)

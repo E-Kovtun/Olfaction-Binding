@@ -97,7 +97,7 @@ def _build_universe(pairs: pd.DataFrame, all_idx, proteins: dict, molecules: dic
 
 def _mp_edges(pairs: pd.DataFrame, train_idx, mol_to_i, prot_to_i, q: float,
               criterion: str = "coverage", edge_threshold: float = 0.0,
-              k_mode: str = "coverage_quantile"):
+              k_mode: str = "coverage_quantile", task: str = "classification"):
     """Train split's own pairs -> (pos, neg) local (mol_id, prot_id) arrays,
     optionally dropping molecules below the q-th quantile from message passing
     only -- every train row still gets decoded/supervised regardless.
@@ -116,8 +116,12 @@ def _mp_edges(pairs: pd.DataFrame, train_idx, mol_to_i, prot_to_i, q: float,
     prot_ids = sub["receptor"].map(prot_to_i).to_numpy()
     y = sub["label"].to_numpy()
     if q and q > 0:
+        # Under classification pos_threshold stays None so `y == 1` -- and every
+        # M2OR number -- reproduces exactly; under regression the ranking splits
+        # positives at the very same threshold the edge signs use below.
         keep = mol_selection.select_keep_mask(
-            criterion, mol_ids, prot_ids, y, len(mol_to_i), len(prot_to_i), q, k_mode)
+            criterion, mol_ids, prot_ids, y, len(mol_to_i), len(prot_to_i), q, k_mode,
+            pos_threshold=(edge_threshold if task == "regression" else None))
         mask = keep[mol_ids]
         mol_ids, prot_ids, y = mol_ids[mask], prot_ids[mask], y[mask]
     # Which edges are "positive" for the signed message passing. `y > 0` is
@@ -300,14 +304,18 @@ _LABEL_AGNOSTIC_CRITERIA = {"coverage", "greedy_pair_cover"}
 
 def _run_models(ext, pairs: pd.DataFrame, train_idx, val_idx, test_idx, seed: int, checkpoint_dir=None):
     check_task(ext.task)
-    if ext.task == "regression" and ext.criterion not in _LABEL_AGNOSTIC_CRITERIA:
-        # Every other criterion is built from npos/nneg, i.e. `y == 1` / `y == 0`
-        # counts, which are empty on a continuous target -- the ranking would
-        # silently collapse to zeros rather than fail.
+    # Label-based criteria on a continuous target are fine as long as "positive"
+    # is DEFINED -- `_mp_edges` passes `edge_threshold` down as the binarisation
+    # point, the same one the signed graph uses for edge signs. What is not fine
+    # is leaving it undefined: `y == 1` matches nothing on a z-score and the
+    # ranking would silently collapse to all-zeros instead of failing.
+    if ext.task == "regression" and ext.criterion not in _LABEL_AGNOSTIC_CRITERIA \
+            and getattr(ext, "edge_threshold", None) is None:
         raise ValueError(
             f"{ext.name}: criterion {ext.criterion!r} scores molecules by their "
-            f"positive/negative mix and is undefined for task='regression'; "
-            f"use one of {sorted(_LABEL_AGNOSTIC_CRITERIA)}")
+            f"positive/negative mix, which needs a threshold on a continuous "
+            f"target; set `edge_threshold` or use one of "
+            f"{sorted(_LABEL_AGNOSTIC_CRITERIA)}")
     for split_name, idx in (("train", train_idx), ("val", val_idx), ("test", test_idx)):
         mask = ext.covered(pairs, idx)
         if not mask.all():
@@ -328,7 +336,7 @@ def _run_models(ext, pairs: pd.DataFrame, train_idx, val_idx, test_idx, seed: in
     pos, neg = _mp_edges(pairs, train_idx, mol_to_i, prot_to_i, ext.q,
                          getattr(ext, "criterion", "greedy_pair_cover"),
                          getattr(ext, "edge_threshold", 0.0),
-                         getattr(ext, "k_mode", "coverage_quantile"))
+                         getattr(ext, "k_mode", "coverage_quantile"), ext.task)
     n_pos, n_neg = len(pos[0]), len(neg[0])
     print(f"  {ext.name}: MP graph {n_pos} positive / {n_neg} negative edges "
           f"(q={ext.q}, criterion={getattr(ext, 'criterion', 'greedy_pair_cover')}, "

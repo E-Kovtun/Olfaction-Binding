@@ -114,19 +114,16 @@ def _make_collate(tokenizer, max_smiles_len: int):
     return collate
 
 
-def _make_loader(df, proteins, weights, tokenizer, max_smiles_len, batch_size, train,
-                 num_workers=4):
+def _make_loader(df, proteins, weights, tokenizer, max_smiles_len, batch_size, train):
     ds = _LoraxDataset(df, proteins, weights)
-    # collation (SMILES tokenization + padding the per-residue ESM matrices) is
-    # CPU-heavy and, single-process, starves the GPU between tiny batches. Farm
-    # it out to worker processes with pinned memory so transfers overlap compute.
-    use_cuda = torch.cuda.is_available()
-    nw = num_workers if use_cuda else 0
-    kw = dict(num_workers=nw, pin_memory=use_cuda)
-    if nw:
-        kw["persistent_workers"] = True
-    return DataLoader(ds, batch_size=batch_size, shuffle=train,
-                      collate_fn=_make_collate(tokenizer, max_smiles_len), **kw)
+    # pin_memory overlaps the host->device copy with compute (a pin-memory THREAD
+    # in this process -- safe). Deliberately NO num_workers>0: each repeat already
+    # runs inside a spawn-ed, CUDA-initialised process, so fork-based DataLoader
+    # workers would hit the same fork-after-CUDA landmine the driver's spawn design
+    # exists to avoid -- and the Dataset holds the whole per-residue ESM dict, which
+    # every worker would re-pickle. Collation stays in-process.
+    return DataLoader(ds, batch_size=batch_size, shuffle=train, pin_memory=torch.cuda.is_available(),
+                      collate_fn=_make_collate(tokenizer, max_smiles_len))
 
 
 def _to_device(tok: dict, device):

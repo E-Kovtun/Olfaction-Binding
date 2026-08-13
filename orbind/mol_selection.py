@@ -112,12 +112,44 @@ def compute_mol_scores(mol_ids, prot_ids, y, n_mol, n_prot,
 def quality_K(cov, q: float) -> int:
     """How many molecules the quantile keeps: the coverage-quantile count
     (`counts >= quantile(counts, q)`), criterion-independent — identical to
-    hetero.quality_mol_mask / gnn_extractor._mp_edges. `q` is a fraction in [0,1]."""
+    hetero.quality_mol_mask / gnn_extractor._mp_edges. `q` is a fraction in [0,1].
+
+    Thin alias for `resolve_K(cov, q, "coverage_quantile")`, kept because it is
+    the name every M2OR-era caller uses."""
+    return resolve_K(cov, q, "coverage_quantile")
+
+
+K_MODES = ("coverage_quantile", "fraction")
+
+
+def resolve_K(cov, q: float, k_mode: str = "coverage_quantile") -> int:
+    """How many molecules to keep, under either reading of `q`.
+
+    `coverage_quantile` (the historical one, M2OR): keep every molecule whose
+    coverage reaches the q-th quantile of the coverage distribution. On M2OR
+    that distribution is long-tailed, so this isolates a hub core.
+
+    `fraction`: keep the top (1-q) share of the eligible molecules outright.
+
+    The two agree whenever coverage is tie-free, but on the Carey/Hallem
+    matrices they diverge completely, because **every** molecule is measured
+    against **every** receptor. There the coverage vector is constant on any
+    transductive-style train split and near-constant on a cold-molecule one, so
+    `np.quantile` returns that same value and `cov >= threshold` keeps
+    everything -- q becomes a no-op and the whole sweep collapses to one point.
+    Verified: on CC/our_inductive, q=0.99 and q=0 both give K=70 of 70.
+    `fraction` is the tie-free reading of the same intent and is what those
+    datasets have to use if the x-axis is to mean anything.
+    """
     cov = np.asarray(cov)
+    eligible = int((cov > 0).sum())
+    if k_mode not in K_MODES:
+        raise ValueError(f"k_mode must be one of {K_MODES}, got {k_mode!r}")
     if not q or q <= 0:
-        return int((cov > 0).sum())
-    threshold = np.quantile(cov, q)
-    return int((cov >= threshold).sum())
+        return eligible
+    if k_mode == "fraction":
+        return max(1, int(round((1.0 - q) * eligible)))
+    return int((cov >= np.quantile(cov, q)).sum())
 
 
 def keep_mask(criterion: str, scores: dict, K: int, n_mol: int) -> np.ndarray:
@@ -140,11 +172,13 @@ def keep_mask(criterion: str, scores: dict, K: int, n_mol: int) -> np.ndarray:
     return mask
 
 
-def select_keep_mask(criterion, mol_ids, prot_ids, y, n_mol, n_prot, q):
+def select_keep_mask(criterion, mol_ids, prot_ids, y, n_mol, n_prot, q,
+                     k_mode: str = "coverage_quantile"):
     """One-shot convenience: TRAIN edges + (criterion, q) -> boolean keep mask
-    [n_mol]. K comes from the coverage quantile; the criterion picks which K.
-    For criterion='coverage' this reproduces `counts >= quantile(counts, q)`."""
+    [n_mol]. `q` sets K (see `resolve_K` for the two readings); the criterion
+    picks which K. With the default k_mode and criterion='coverage' this
+    reproduces `counts >= quantile(counts, q)` bit-for-bit."""
     sc = compute_mol_scores(mol_ids, prot_ids, y, n_mol, n_prot,
                             need_greedy=(criterion == "greedy_pair_cover"))
-    K = quality_K(sc["cov"], q)
+    K = resolve_K(sc["cov"], q, k_mode)
     return keep_mask(criterion, sc, K, n_mol)

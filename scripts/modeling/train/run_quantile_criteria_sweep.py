@@ -30,6 +30,28 @@ race-free. Re-running skips finished (criterion, quantile, seed) cells.
         --regime inductive --boost-full \
         --mol-embeddings data/embeddings/molecules/chemberta_77m_m2or.npz \
         --max-parallel 4 --gpus 0 1 2 3
+
+Carey / Hallem-Carlson (`--dataset cc|hc`)
+------------------------------------------
+Same sweep on a continuous target: repeats become upstream's folds 1..5, the
+head becomes an XGBRegressor, and the reported columns become R2/RMSE/MAE/
+Pearson/Spearman. Two things change by necessity, not by taste:
+
+* **k_mode defaults to `fraction`.** These matrices are COMPLETE (CC 50x110,
+  HC 24x110), so every train molecule has identical coverage, the coverage
+  quantile has nothing to cut on, and `cov >= quantile(cov, q)` keeps all of
+  them -- on CC/our_inductive, q=0.99 and q=0 both give K=70 of 70. `fraction`
+  keeps the top (1-q) share outright, which is the tie-free reading of the same
+  intent. Passing `--k-mode coverage_quantile` there is allowed but warns.
+* **Only `coverage` and `greedy_pair_cover` are available.** The other five
+  criteria score molecules by positive/negative counts, which need a 0/1 label.
+
+    python scripts/modeling/train/run_quantile_criteria_sweep.py \
+        --dataset cc --regime inductive --boost-full \
+        --criteria coverage greedy_pair_cover --n-models 1 \
+        --mol-embeddings data/embeddings/molecules/chemberta_77m_cc.npz \
+        --prot-embeddings data/embeddings/proteins/esm1b_650m_mean_cc.npz \
+        --max-parallel 4 --gpus 0 1 2 3
 """
 from __future__ import annotations
 
@@ -47,15 +69,24 @@ while not (_root / "pyproject.toml").exists():
     _root = _root.parent
 sys.path.insert(0, str(_root))
 
-from orbind.gnn_extractor import GnnSignedExtractor          # noqa: E402
-from orbind.mol_selection import CRITERIA, quality_K         # noqa: E402
-from orbind.baselines import train_boost                     # noqa: E402
-from orbind.dataset import metrics, load_npz_dict            # noqa: E402
-from orbind.regimes import full_full_pairs, load_split       # noqa: E402
+from orbind.gnn_extractor import GnnSignedExtractor              # noqa: E402
+from orbind.mol_selection import CRITERIA, K_MODES, resolve_K    # noqa: E402
+from orbind.baselines import train_boost                         # noqa: E402
+from orbind.dataset import METRICS as METRIC_FNS, load_npz_dict  # noqa: E402
+from orbind.regimes import full_full_pairs, load_split           # noqa: E402
+from orbind.regimes_ofm import ofm_pairs, ofm_indices            # noqa: E402
 
-METRICS = ["AUROC", "AUPRC", "MCC", "F1"]
+TASK_METRICS = {"classification": ["AUROC", "AUPRC", "MCC", "F1"],
+                "regression": ["R2", "RMSE", "MAE", "Pearson", "Spearman"]}
 REGIME_KEY = {"inductive": "inductive_molecule_v5", "transductive": "transductive"}
 DEFAULT_REPEATS = {"inductive": [42, 43, 44, 45, 46], "transductive": [1, 2, 3, 4, 5]}
+
+# On the ofm datasets `--regime` names a split family instead of an M2OR regime.
+# `rand` is i.i.d. (transductive); `our_inductive` is our stratified cold-molecule
+# family (scripts/preprocessing/03_build_ofm_our_inductive_splits.py) -- upstream's
+# `scaf` is cold-molecule too but has a degenerate fold 1 (test sd 0.215), so it is
+# not what a sweep should be read off.
+OFM_FAMILY = {"inductive": "our_inductive", "transductive": "rand"}
 
 
 def _pair_matrix(emb: dict, keys) -> np.ndarray:
@@ -69,53 +100,68 @@ def _fmt(sec: float) -> str:
 
 def _prepare(args):
     """Load the pool + embeddings + coverage mask once (per process)."""
-    pairs = full_full_pairs(pool_fold=args.pool_fold)
+    pairs = (ofm_pairs(args.dataset) if args.dataset != "m2or"
+             else full_full_pairs(pool_fold=args.pool_fold))
     mol_emb = load_npz_dict(str(_root / args.mol_embeddings))
     prot_emb = load_npz_dict(str(_root / args.prot_embeddings))
     cov = pairs["inchikey"].isin(mol_emb).to_numpy() & pairs["receptor"].isin(prot_emb).to_numpy()
     return pairs, mol_emb, prot_emb, cov
 
 
+def _split(args, seed):
+    """`seed` is an M2OR split seed, or an ofm FOLD number (1..5)."""
+    if args.dataset != "m2or":
+        return ofm_indices(args.dataset, OFM_FAMILY[args.regime], int(seed))
+    return load_split(REGIME_KEY[args.regime], seed)
+
+
 def _seed_prep(seed, args, data):
     """Per-seed tensors reused across all quantiles/criteria of that seed."""
-    regime_key = REGIME_KEY[args.regime]
     pairs, mol_emb, prot_emb, cov = data
     ik = pairs["inchikey"].to_numpy(); rc = pairs["receptor"].to_numpy()
     lab = pairs["label"].to_numpy().astype(np.float32)
-    tr, va, te = (np.asarray(a)[cov[np.asarray(a)]] for a in load_split(regime_key, seed))
+    tr, va, te = (np.asarray(a)[cov[np.asarray(a)]] for a in _split(args, seed))
     y_tr, y_te = lab[tr], lab[te]
     Xm_tr, Xm_te = _pair_matrix(mol_emb, ik[tr]), _pair_matrix(mol_emb, ik[te])
     Xp_tr_raw, Xp_te_raw = _pair_matrix(prot_emb, rc[tr]), _pair_matrix(prot_emb, rc[te])
     uniq = pd.unique(ik[tr]); loc = {k: i for i, k in enumerate(uniq)}
     cov_counts = np.bincount([loc[k] for k in ik[tr]], minlength=len(uniq))
-    Kq = {q: quality_K(cov_counts, q / 100.0) for q in args.quantiles}
+    Kq = {q: resolve_K(cov_counts, q / 100.0, args.k_mode) for q in args.quantiles}
     return {"pairs": pairs, "tr": tr, "va": va, "te": te, "y_tr": y_tr, "y_te": y_te,
             "Xm_tr": Xm_tr, "Xm_te": Xm_te, "Xp_tr_raw": Xp_tr_raw, "Xp_te_raw": Xp_te_raw,
             "uniq": uniq, "Kq": Kq}
 
 
 def _boost_rows(seed, args, P):
-    """No-graph [protein||molecule] baseline; q-independent, replicated per quantile."""
+    """No-graph [protein||molecule] baseline; q-independent, replicated per quantile.
+
+    Under regression this doubles as the honest reference the naive row plays in
+    the ensembler: R2 here is against the test mean, so a negative number means
+    the features lost to predicting a constant."""
+    cols = TASK_METRICS[args.task]
     sc = train_boost(np.concatenate([P["Xp_tr_raw"], P["Xm_tr"]], 1), P["y_tr"],
-                     np.concatenate([P["Xp_te_raw"], P["Xm_te"]], 1), seed=seed)
-    mb = metrics(P["y_te"], sc)
+                     np.concatenate([P["Xp_te_raw"], P["Xm_te"]], 1), seed=seed,
+                     task=args.task)
+    mb = METRIC_FNS[args.task](P["y_te"], sc)
     return [{"criterion": "boost_full", "quantile": q, "K": len(P["uniq"]), "seed": seed,
-             "n_models": args.n_models, **{k: float(mb[k]) for k in METRICS}}
+             "n_models": args.n_models, **{k: float(mb[k]) for k in cols}}
             for q in args.quantiles]
 
 
 def _gnn_row(seed, q, crit, args, P):
     """One (seed, quantile, criterion) GNN cell -> boost head; the schedulable unit."""
+    cols = TASK_METRICS[args.task]
     ext = GnnSignedExtractor(
         name="gnn", protein_path=args.prot_embeddings,
         molecule_path=args.mol_embeddings, q=q / 100.0, criterion=crit,
+        k_mode=args.k_mode, task=args.task,
         n_models=args.n_models, epochs=args.epochs, emit="prot")
     Zp_tr, _Zp_va, Zp_te = ext.fit_transform(P["pairs"], P["tr"], P["va"], P["te"], seed)
     sc = train_boost(np.concatenate([Zp_tr, P["Xm_tr"]], 1), P["y_tr"],
-                     np.concatenate([Zp_te, P["Xm_te"]], 1), seed=seed)
-    m = metrics(P["y_te"], sc)
+                     np.concatenate([Zp_te, P["Xm_te"]], 1), seed=seed, task=args.task)
+    m = METRIC_FNS[args.task](P["y_te"], sc)
     return {"criterion": crit, "quantile": q, "K": int(P["Kq"][q]), "seed": seed,
-            "n_models": args.n_models, **{k: float(m[k]) for k in METRICS}}
+            "n_models": args.n_models, **{k: float(m[k]) for k in cols}}
 
 
 def _worker_loop(job_q, res_q, args):
@@ -144,7 +190,19 @@ def _worker_loop(job_q, res_q, args):
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--regime", choices=["inductive", "transductive"], default="inductive")
+    ap.add_argument("--regime", choices=["inductive", "transductive"], default="inductive",
+                    help="M2OR: inductive_molecule_v5 / transductive. ofm datasets: the "
+                         "our_inductive / rand split family.")
+    ap.add_argument("--dataset", choices=["m2or", "cc", "hc"], default="m2or",
+                    help="cc = Carey, hc = Hallem-Carlson (both continuous -> regression, "
+                         "repeats are folds 1..5)")
+    ap.add_argument("--task", choices=["classification", "regression"], default=None,
+                    help="default: regression for cc/hc, classification for m2or")
+    ap.add_argument("--k-mode", choices=list(K_MODES), default=None,
+                    help="how q becomes K. Default: coverage_quantile for m2or (the "
+                         "historical reading), fraction for cc/hc -- their matrices are "
+                         "complete, so the coverage quantile is a no-op there and the "
+                         "whole sweep would collapse to a single point.")
     ap.add_argument("--mol-embeddings", default="data/embeddings/molecules/chemberta_77m_m2or.npz",
                     help="molecule embedding npz (inchikey-keyed): GNN MP node features AND "
                          "the raw-molecule half of the boost feature")
@@ -170,8 +228,27 @@ def main() -> None:
     if unknown:
         ap.error(f"unknown criteria {unknown}; choose from {list(CRITERIA)}")
 
-    regime_key = REGIME_KEY[args.regime]
-    seeds = args.seeds or DEFAULT_REPEATS[args.regime]
+    is_ofm = args.dataset != "m2or"
+    if args.task is None:
+        args.task = "regression" if is_ofm else "classification"
+    if args.k_mode is None:
+        args.k_mode = "fraction" if is_ofm else "coverage_quantile"
+    if is_ofm and args.k_mode == "coverage_quantile":
+        print("WARNING: k_mode=coverage_quantile on a complete matrix keeps every "
+              "molecule at every q -- all quantiles will produce the same model.",
+              flush=True)
+    # `greedy_pair_cover` and `coverage` are the only criteria that never read y,
+    # and the others are built from npos/nneg, i.e. from a 0/1 label.
+    if args.task == "regression":
+        bad = [c for c in args.criteria if c not in ("coverage", "greedy_pair_cover")]
+        if bad:
+            ap.error(f"criteria {bad} score molecules by positive/negative counts and "
+                     f"are undefined on a continuous target; use coverage and/or "
+                     f"greedy_pair_cover under --task regression")
+
+    regime_key = (f"{args.dataset}_{OFM_FAMILY[args.regime]}" if is_ofm
+                  else REGIME_KEY[args.regime])
+    seeds = args.seeds or (list(range(1, 6)) if is_ofm else DEFAULT_REPEATS[args.regime])
     mol_stem = pathlib.Path(args.mol_embeddings).stem
     nm_tag = "" if args.n_models == 5 else f"__nm{args.n_models}"   # 5-model bag keeps the legacy name
     out = pathlib.Path(args.out) if args.out else (
@@ -179,7 +256,8 @@ def main() -> None:
         / f"metrics_{regime_key}__{mol_stem}{nm_tag}.csv")
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    print(f"regime={args.regime} ({regime_key})  seeds={seeds}  quantiles={args.quantiles}\n"
+    print(f"regime={args.regime} ({regime_key})  task={args.task}  k_mode={args.k_mode}\n"
+          f"seeds={seeds}  quantiles={args.quantiles}\n"
           f"criteria={args.criteria}\nmol={args.mol_embeddings}\nout={out}\n"
           f"max_parallel={args.max_parallel}  gpus={args.gpus}", flush=True)
 
@@ -221,7 +299,8 @@ def main() -> None:
         else:
             tag = "[boost_full]"
         print(f"  seed {row['seed']} q{int(row['quantile'])} {row['criterion']:18} "
-              + " ".join(f"{k}={row[k]:.3f}" for k in METRICS) + f"  {tag}", flush=True)
+              + " ".join(f"{k}={row[k]:.3f}" for k in TASK_METRICS[args.task])
+              + f"  {tag}", flush=True)
 
     # ---- schedulable jobs: one GNN cell per (seed, quantile, criterion) so GNN
     #      training saturates every GPU; boost_full is one cheap job per seed.

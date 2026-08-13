@@ -178,7 +178,7 @@ _FACTORY_SPEC = {
     "attn_noisy_or": ("orbind.attention_extractor", "MilNoisyOrExtractor"),
     "attn_lse": ("orbind.attention_extractor", "MilLseExtractor"),
     # graph-based (pulls torch_geometric):
-    # "name=type[:protein_path:molecule_path[:n_models[:emit[:q[:criterion[:edge_threshold]]]]]]".
+    # "name=type[:protein_path:molecule_path[:n_models[:emit[:q[:criterion[:edge_threshold[:k_mode]]]]]]]".
     # emit: "prot" (default, v5 probe shape) or "both". gnn_signed_dgi adds a
     # DeepGraphInfomax auxiliary loss (shared scope, lambda=0.5).
     "gnn_signed": ("orbind.gnn_extractor", "GnnSignedExtractor"),
@@ -278,6 +278,11 @@ def parse_source_arg(raw: str):
             kwargs["criterion"] = parts[6]
         if len(parts) > 7 and parts[7]:
             kwargs["edge_threshold"] = float(parts[7])
+        # k_mode: how q becomes K. Needed for the same reason -- on a complete
+        # matrix the coverage quantile is a no-op, so Carey/Hallem sweeps have
+        # to ask for "fraction". See orbind.mol_selection.resolve_K.
+        if len(parts) > 8 and parts[8]:
+            kwargs["k_mode"] = parts[8]
         return name, _factory(type_)(name=name, **kwargs)
 
     if type_ in _PROSMITH_TYPES:

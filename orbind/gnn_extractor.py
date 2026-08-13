@@ -96,7 +96,8 @@ def _build_universe(pairs: pd.DataFrame, all_idx, proteins: dict, molecules: dic
 
 
 def _mp_edges(pairs: pd.DataFrame, train_idx, mol_to_i, prot_to_i, q: float,
-              criterion: str = "coverage", edge_threshold: float = 0.0):
+              criterion: str = "coverage", edge_threshold: float = 0.0,
+              k_mode: str = "coverage_quantile"):
     """Train split's own pairs -> (pos, neg) local (mol_id, prot_id) arrays,
     optionally dropping molecules below the q-th quantile from message passing
     only -- every train row still gets decoded/supervised regardless.
@@ -116,7 +117,7 @@ def _mp_edges(pairs: pd.DataFrame, train_idx, mol_to_i, prot_to_i, q: float,
     y = sub["label"].to_numpy()
     if q and q > 0:
         keep = mol_selection.select_keep_mask(
-            criterion, mol_ids, prot_ids, y, len(mol_to_i), len(prot_to_i), q)
+            criterion, mol_ids, prot_ids, y, len(mol_to_i), len(prot_to_i), q, k_mode)
         mask = keep[mol_ids]
         mol_ids, prot_ids, y = mol_ids[mask], prot_ids[mask], y[mask]
     # Which edges are "positive" for the signed message passing. `y > 0` is
@@ -326,10 +327,12 @@ def _run_models(ext, pairs: pd.DataFrame, train_idx, val_idx, test_idx, seed: in
 
     pos, neg = _mp_edges(pairs, train_idx, mol_to_i, prot_to_i, ext.q,
                          getattr(ext, "criterion", "greedy_pair_cover"),
-                         getattr(ext, "edge_threshold", 0.0))
+                         getattr(ext, "edge_threshold", 0.0),
+                         getattr(ext, "k_mode", "coverage_quantile"))
     n_pos, n_neg = len(pos[0]), len(neg[0])
     print(f"  {ext.name}: MP graph {n_pos} positive / {n_neg} negative edges "
           f"(q={ext.q}, criterion={getattr(ext, 'criterion', 'greedy_pair_cover')}, "
+          f"k_mode={getattr(ext, 'k_mode', 'coverage_quantile')}, "
           f"edge_threshold={getattr(ext, 'edge_threshold', 0.0)})", flush=True)
     if n_pos == 0 or n_neg == 0:
         raise ValueError(
@@ -397,6 +400,13 @@ class GnnSignedExtractor:
     # re-running an old command now reproduces a DIFFERENT model. Name the
     # criterion explicitly in commands whose numbers you intend to keep.
     criterion: str = "greedy_pair_cover"
+    # How `q` turns into K (mol_selection.resolve_K). "coverage_quantile" is the
+    # M2OR-era reading and stays the default so every existing number
+    # reproduces. On Carey/Hallem it is a NO-OP -- those matrices are complete,
+    # so coverage is constant across train molecules and `cov >= quantile(cov,q)`
+    # keeps all of them (CC/our_inductive: q=0.99 and q=0 both give K=70 of 70).
+    # Use "fraction" there: keep the top (1-q) share outright.
+    k_mode: str = "coverage_quantile"
     # The task axis (orbind/tasks.py). `run_ensemble` overwrites this to match
     # the run, so the decoder's criterion and the boosting head downstream agree.
     task: str = "classification"
@@ -426,6 +436,9 @@ class GnnSignedExtractor:
         if self.criterion not in mol_selection.CRITERIA:
             raise ValueError(f"criterion must be one of {mol_selection.CRITERIA}, "
                              f"got {self.criterion!r}")
+        if self.k_mode not in mol_selection.K_MODES:
+            raise ValueError(f"k_mode must be one of {mol_selection.K_MODES}, "
+                             f"got {self.k_mode!r}")
         if self.dgi_scope not in ("shared", "prot"):
             raise ValueError(f"dgi_scope must be 'shared' or 'prot', got {self.dgi_scope!r}")
         self._proteins = D.load_npz_dict(self.protein_path)

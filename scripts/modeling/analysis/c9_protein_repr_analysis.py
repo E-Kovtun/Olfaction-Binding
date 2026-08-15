@@ -333,9 +333,13 @@ def main():
     if ext.emit != "prot":
         print(f"  note: run emit={ext.emit!r}; analysis uses node z_prot directly, unaffected.")
 
-    dataset = cfg.get("dataset", "m2or")
-    if dataset not in ("m2or", None):
-        raise SystemExit(f"this script currently wires M2OR/full_full only (config dataset={dataset!r})")
+    # gate on REGIME, not dataset: for full_full (M2OR) runs the `dataset` field is a
+    # spurious default (it only matters when --regime ofm selects cc/hc).
+    regime = cfg.get("regime")
+    if regime != "full_full":
+        raise SystemExit(f"this script currently wires M2OR full_full only "
+                         f"(config regime={regime!r}, dataset={cfg.get('dataset')!r})")
+    dataset = "m2or"
     mode = cfg.get("full_full_mode") or cfg.get("split")
     ckpt_root = run_dir / "checkpoints"
     avail = sorted(int(p.name.split("_")[1]) for p in ckpt_root.glob("repeat_*")) if ckpt_root.exists() else []

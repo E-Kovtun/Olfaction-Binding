@@ -161,8 +161,12 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--chemberta", default="data/embeddings/molecules/chemberta_77m_m2or.npz")
     ap.add_argument("--esm", default="data/embeddings/proteins/esm1b_650m_mean.npz")
+    ap.add_argument("--regime", default="transductive", choices=["transductive", "cold_receptor"],
+                    help="transductive = LORAX rand folds (receptors seen); cold_receptor = "
+                         "hold out whole receptors (group_receptor split, `folds` used as seeds)")
     ap.add_argument("--folds", type=int, nargs="+", default=[1, 2, 3, 4, 5])
-    ap.add_argument("--out", default="results/tables/prot_floor_transductive.csv")
+    ap.add_argument("--out", default=None,
+                    help="default: results/tables/prot_floor_<regime>.csv")
     args = ap.parse_args()
 
     print("loading pairs + embeddings ...", flush=True)
@@ -193,15 +197,28 @@ def main():
               ("ctd", "ctd", True), ("pseaac", "pseaac", True), ("blosum", "blosum", True),
               ("onehot_only", "onehot", False), ("mol_only", None, True)]
 
-    out = pathlib.Path(args.out)
+    out = pathlib.Path(args.out) if args.out else pathlib.Path(f"results/tables/prot_floor_{args.regime}.csv")
     if not out.is_absolute():
         out = _root / out
     out.parent.mkdir(parents=True, exist_ok=True)
 
+    # (train_idx, test_idx) per fold for the chosen regime
+    splits = {}
+    for f in args.folds:
+        if args.regime == "transductive":
+            tr, va, te = load_split("transductive", f)
+            splits[f] = (tr, te)
+        else:                                    # cold_receptor: hold out whole receptors
+            trm, tem = D.split(pairs, y_all, kind="group_receptor", seed=f)
+            splits[f] = (np.where(trm)[0], np.where(tem)[0])
+            print(f"  cold_receptor fold{f}: train {trm.sum()} / test {tem.sum()} rows "
+                  f"({pairs['receptor'].iloc[np.where(tem)[0]].nunique()} unseen receptors)", flush=True)
+
     rows = []
     for name, pm, use_mol in specs:
+        pdim = protmats[pm].shape[1] if pm is not None else 0
         for f in args.folds:
-            tr, va, te = load_split("transductive", f)
+            tr, te = splits[f]
 
             def build(idx):
                 parts = []
@@ -213,20 +230,21 @@ def main():
             model = fit_boost(Xtr, y_all[tr], seed=f, task="classification")
             p = predict_scores(model, Xte, task="classification")
             m = D.metrics(y_all[te], p)
-            rows.append({"prot": name, "fold": f, "dim": Xtr.shape[1], **m})
-            print(f"{name:12} fold{f} dim={Xtr.shape[1]:5} AUROC={m['AUROC']:.3f} "
+            rows.append({"prot": name, "fold": f, "pdim": pdim, "dim": Xtr.shape[1], **m})
+            print(f"{name:12} fold{f} pdim={pdim:5} AUROC={m['AUROC']:.3f} "
                   f"AUPRC={m['AUPRC']:.3f} MCC={m['MCC']:.3f} F1={m['F1']:.3f}", flush=True)
             pd.DataFrame(rows).to_csv(out, index=False)
 
     df = pd.DataFrame(rows); g = df.groupby("prot")
     print("\n" + "=" * 82)
-    print("TRANSDUCTIVE M2OR -- protein descriptor boost sweep (mol=ChemBERTa), 5-fold mean")
+    print(f"{args.regime.upper()} M2OR -- protein descriptor boost sweep (mol=ChemBERTa), "
+          f"{len(args.folds)}-fold mean  [pdim = protein-side dim]")
     print("=" * 82)
     for name in df.groupby("prot")["AUROC"].mean().sort_values(ascending=False).index:
         s = g.get_group(name)
         def mc(c):
             x = s[c].to_numpy(); return f"{x.mean():.3f}±{1.96 * x.std(ddof=1) / len(x) ** 0.5:.3f}"
-        print(f"{name:12} dim={int(s['dim'].iloc[0]):5}  AUROC {mc('AUROC')}  "
+        print(f"{name:12} pdim={int(s['pdim'].iloc[0]):5}  AUROC {mc('AUROC')}  "
               f"AUPRC {mc('AUPRC')}  MCC {mc('MCC')}  F1 {mc('F1')}")
     print(f"\nwrote -> {out}")
 

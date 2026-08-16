@@ -67,7 +67,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.nn import HeteroConv, SAGEConv
+from torch_geometric.nn import HeteroConv, MessagePassing, SAGEConv
 
 from . import dataset as D
 from . import mol_selection
@@ -97,10 +97,11 @@ def _build_universe(pairs: pd.DataFrame, all_idx, proteins: dict, molecules: dic
 
 def _mp_edges(pairs: pd.DataFrame, train_idx, mol_to_i, prot_to_i, q: float,
               criterion: str = "coverage", edge_threshold: float = 0.0,
-              k_mode: str = "coverage_quantile", task: str = "classification"):
-    """Train split's own pairs -> (pos, neg) local (mol_id, prot_id) arrays,
-    optionally dropping molecules below the q-th quantile from message passing
-    only -- every train row still gets decoded/supervised regardless.
+              k_mode: str = "coverage_quantile", task: str = "classification",
+              edge_center: str = "global", edge_weight_mode: str = "none"):
+    """Train split's own pairs -> (pos, neg) local (mol_id, prot_id[, weight])
+    arrays, optionally dropping molecules below the q-th quantile from message
+    passing only -- every train row still gets decoded/supervised regardless.
 
     The quantile sets how many molecules to keep (coverage-quantile count); the
     `criterion` (see orbind/mol_selection.CRITERIA) picks WHICH ones.
@@ -110,7 +111,17 @@ def _mp_edges(pairs: pd.DataFrame, train_idx, mol_to_i, prot_to_i, q: float,
     (zero-coverage molecules carry no edges, so their mask value is
     irrelevant). `GnnSignedExtractor` -- the only real caller -- always passes
     its own criterion explicitly, and **its** default is now
-    "greedy_pair_cover"; see the note on that field."""
+    "greedy_pair_cover"; see the note on that field.
+
+    Two EXPERIMENTAL continuous-label knobs, both no-ops at their defaults so the
+    historical binary path is byte-identical:
+      `edge_center="per_receptor"` compares each edge's y to that RECEPTOR's own
+        train-mean (+ edge_threshold) instead of the global edge_threshold (#4);
+      `edge_weight_mode="magnitude"` returns a per-edge weight |y - center| per
+        edge, normalised to unit mean within each sign, else the weight is None
+        (#1). On binary labels |y - 0| = 1 everywhere, so weighting is the
+        identity and this too reduces to the current graph.
+    """
     sub = pairs.iloc[train_idx]
     mol_ids = sub["inchikey"].map(mol_to_i).to_numpy()
     prot_ids = sub["receptor"].map(prot_to_i).to_numpy()
@@ -124,18 +135,37 @@ def _mp_edges(pairs: pd.DataFrame, train_idx, mol_to_i, prot_to_i, q: float,
             pos_threshold=(edge_threshold if task == "regression" else None))
         mask = keep[mol_ids]
         mol_ids, prot_ids, y = mol_ids[mask], prot_ids[mask], y[mask]
-    # Which edges are "positive" for the signed message passing. `y > 0` is
-    # IDENTICAL to the historical `y == 1` on binary labels, so every M2OR run
-    # reproduces bit-for-bit; on a z-scored continuous response it reads as
-    # "responds above the pool average", which is what a z-score's zero means.
-    # Raise `edge_threshold` to make the positive graph stricter.
-    pos_mask = y > edge_threshold
-    return (mol_ids[pos_mask], prot_ids[pos_mask]), (mol_ids[~pos_mask], prot_ids[~pos_mask])
+    # Deviation that decides an edge's sign. "global": y itself (so `y > 0` is
+    # IDENTICAL to the historical `y == 1` on binary labels -- every M2OR run
+    # reproduces bit-for-bit, and on a z-score it reads as "above the pool
+    # average"). "per_receptor": y minus that receptor's own train-mean, which
+    # removes cross-receptor baseline/dynamic-range heterogeneity (#4).
+    y = y.astype(np.float64)
+    if edge_center == "per_receptor":
+        sums = np.bincount(prot_ids, weights=y, minlength=len(prot_to_i))
+        cnts = np.bincount(prot_ids, minlength=len(prot_to_i)).astype(np.float64)
+        center = np.divide(sums, np.maximum(cnts, 1.0))
+        dev = y - center[prot_ids]
+    else:
+        dev = y
+    pos_mask = dev > edge_threshold
+    pw = nw = None
+    if edge_weight_mode == "magnitude":
+        w = np.abs(dev)
+        pw, nw = w[pos_mask], w[~pos_mask]
+        # normalise to unit mean per sign so the weighted graph keeps the same
+        # overall message scale as the unweighted (all-ones) one
+        if len(pw):
+            pw = (pw / (pw.mean() + 1e-8)).astype(np.float32)
+        if len(nw):
+            nw = (nw / (nw.mean() + 1e-8)).astype(np.float32)
+    return ((mol_ids[pos_mask], prot_ids[pos_mask], pw),
+            (mol_ids[~pos_mask], prot_ids[~pos_mask], nw))
 
 
 def _edge_index_dict(pos, neg):
-    pm, pp = pos
-    nm, npt = neg
+    pm, pp = pos[0], pos[1]
+    nm, npt = neg[0], neg[1]
     def _idx(a, b):
         if len(a) == 0:
             return torch.zeros((2, 0), dtype=torch.long)
@@ -145,7 +175,46 @@ def _edge_index_dict(pos, neg):
     return pos_eidx, neg_eidx
 
 
+def _edge_weights(pos, neg):
+    """Per-edge weight dicts aligned with `_edge_index_dict`, or (None, None)
+    when `_mp_edges` produced no weights (the default unweighted graph)."""
+    pw = pos[2] if len(pos) > 2 else None
+    nw = neg[2] if len(neg) > 2 else None
+    if pw is None and nw is None:
+        return None, None
+    def _t(a):
+        return None if a is None else torch.as_tensor(a, dtype=torch.float32)
+    pos_ew = None if pw is None else {ETYPE: _t(pw), RTYPE: _t(pw)}
+    neg_ew = None if nw is None else {ETYPE_NEG: _t(nw), RTYPE_NEG: _t(nw)}
+    return pos_ew, neg_ew
+
+
 # --------------------------------------------------------------------------- model
+
+class _WSAGE(MessagePassing):
+    """Weighted bipartite conv used ONLY in the experimental magnitude-weighted
+    edge mode (`edge_weight_mode="magnitude"`). Same shape as the SAGEConv it
+    replaces -- root transform plus mean-aggregated neighbour transform, hidden
+    -> hidden on both endpoints (inputs are already projected to `hidden`) --
+    but each neighbour message is scaled by its scalar edge weight. With unit
+    weights it matches SAGEConv's mean aggregation; the default path never builds
+    this class, so no existing number moves."""
+
+    def __init__(self, hidden: int):
+        super().__init__(aggr="mean")
+        self.lin_r = nn.Linear(hidden, hidden)   # neighbour
+        self.lin_l = nn.Linear(hidden, hidden)   # root (target)
+
+    def forward(self, x, edge_index, edge_weight=None):
+        x_src, x_dst = x
+        out = self.lin_r(self.propagate(edge_index, x=(x_src, x_dst), edge_weight=edge_weight))
+        if x_dst is not None:
+            out = out + self.lin_l(x_dst)
+        return out
+
+    def message(self, x_j, edge_weight):
+        return x_j if edge_weight is None else x_j * edge_weight.view(-1, 1)
+
 
 class _SignedSage(nn.Module):
     """Two-layer heterogeneous GraphSAGE. Positive and negative edges are
@@ -162,28 +231,36 @@ class _SignedSage(nn.Module):
 
     LEAK = 0.1
 
-    def __init__(self, mol_dim: int, prot_dim: int, hidden: int, dropout: float):
+    def __init__(self, mol_dim: int, prot_dim: int, hidden: int, dropout: float,
+                 weighted: bool = False):
         super().__init__()
+        self.weighted = weighted
+        # weighted mode swaps SAGEConv for the edge-weight-aware _WSAGE; the
+        # default (weighted=False) keeps PyG's SAGEConv byte-for-byte.
+        def mk():
+            return _WSAGE(hidden) if weighted else SAGEConv((-1, -1), hidden)
         self.proj_mol = nn.Linear(mol_dim, hidden)
         self.proj_prot = nn.Linear(prot_dim, hidden)
-        self.conv1 = HeteroConv({ETYPE: SAGEConv((-1, -1), hidden), RTYPE: SAGEConv((-1, -1), hidden)}, aggr="sum")
-        self.conv1_neg = HeteroConv({ETYPE_NEG: SAGEConv((-1, -1), hidden), RTYPE_NEG: SAGEConv((-1, -1), hidden)}, aggr="sum")
-        self.conv2 = HeteroConv({ETYPE: SAGEConv((-1, -1), hidden), RTYPE: SAGEConv((-1, -1), hidden)}, aggr="sum")
-        self.conv2_neg = HeteroConv({ETYPE_NEG: SAGEConv((-1, -1), hidden), RTYPE_NEG: SAGEConv((-1, -1), hidden)}, aggr="sum")
+        self.conv1 = HeteroConv({ETYPE: mk(), RTYPE: mk()}, aggr="sum")
+        self.conv1_neg = HeteroConv({ETYPE_NEG: mk(), RTYPE_NEG: mk()}, aggr="sum")
+        self.conv2 = HeteroConv({ETYPE: mk(), RTYPE: mk()}, aggr="sum")
+        self.conv2_neg = HeteroConv({ETYPE_NEG: mk(), RTYPE_NEG: mk()}, aggr="sum")
         self.dec = nn.Sequential(
             nn.Linear(2 * hidden, hidden), nn.LeakyReLU(self.LEAK), nn.Dropout(dropout),
             nn.Linear(hidden, hidden // 2), nn.LeakyReLU(self.LEAK), nn.Dropout(dropout),
             nn.Linear(hidden // 2, 1),
         )
 
-    def encode(self, x_mol, x_prot, pos_eidx, neg_eidx):
+    def encode(self, x_mol, x_prot, pos_eidx, neg_eidx, pos_ew=None, neg_ew=None):
         x = {MOL: F.leaky_relu(self.proj_mol(x_mol), self.LEAK),
              PROT: F.leaky_relu(self.proj_prot(x_prot), self.LEAK)}
-        x_p = self.conv1(x, pos_eidx)
-        x_n = self.conv1_neg(x, neg_eidx)
+        kp = {"edge_weight_dict": pos_ew} if (self.weighted and pos_ew is not None) else {}
+        kn = {"edge_weight_dict": neg_ew} if (self.weighted and neg_ew is not None) else {}
+        x_p = self.conv1(x, pos_eidx, **kp)
+        x_n = self.conv1_neg(x, neg_eidx, **kn)
         x = {k: F.leaky_relu(x_p[k] - x_n.get(k, torch.zeros_like(x_p[k])), self.LEAK) for k in x_p}
-        x_p = self.conv2(x, pos_eidx)
-        x_n = self.conv2_neg(x, neg_eidx)
+        x_p = self.conv2(x, pos_eidx, **kp)
+        x_n = self.conv2_neg(x, neg_eidx, **kn)
         return {k: x_p[k] - x_n.get(k, torch.zeros_like(x_p[k])) for k in x_p}
 
     def decode(self, z, mol_idx, prot_idx):
@@ -216,7 +293,7 @@ def _dgi_loss(weight_mat, z_pos, z_neg):
 
 def _train_one(build_model, x_mol, x_prot, pos_eidx, neg_eidx,
                 mol_idx_train, prot_idx_train, y_train, hp, device, checkpoint_path=None,
-                dgi_weight=0.0, dgi_scope="shared", hidden=None):
+                dgi_weight=0.0, dgi_scope="shared", hidden=None, pos_ew=None, neg_ew=None):
     """Full-batch training loop (the whole graph is small enough to fit in
     one forward/backward per epoch): BCE loss on train-row decodes, fixed
     epoch count, no early stopping, no LR scheduler -- matches the actual v5
@@ -242,12 +319,14 @@ def _train_one(build_model, x_mol, x_prot, pos_eidx, neg_eidx,
     x_mol_d, x_prot_d = x_mol.to(device), x_prot.to(device)
     pos_eidx_d = {k: v.to(device) for k, v in pos_eidx.items()}
     neg_eidx_d = {k: v.to(device) for k, v in neg_eidx.items()}
+    pos_ew_d = None if pos_ew is None else {k: v.to(device) for k, v in pos_ew.items()}
+    neg_ew_d = None if neg_ew is None else {k: v.to(device) for k, v in neg_ew.items()}
 
     if checkpoint_path is not None and checkpoint_path.exists():
         model.load_state_dict(torch.load(checkpoint_path, map_location=device))
         model.eval()
         with torch.no_grad():
-            z = model.encode(x_mol_d, x_prot_d, pos_eidx_d, neg_eidx_d)
+            z = model.encode(x_mol_d, x_prot_d, pos_eidx_d, neg_eidx_d, pos_ew_d, neg_ew_d)
             return z[MOL].cpu().numpy(), z[PROT].cpu().numpy(), model
 
     mi_tr = torch.as_tensor(mol_idx_train, dtype=torch.long, device=device)
@@ -275,12 +354,12 @@ def _train_one(build_model, x_mol, x_prot, pos_eidx, neg_eidx,
     for _ in range(hp["epochs"]):
         model.train()
         opt.zero_grad(set_to_none=True)
-        z = model.encode(x_mol_d, x_prot_d, pos_eidx_d, neg_eidx_d)
+        z = model.encode(x_mol_d, x_prot_d, pos_eidx_d, neg_eidx_d, pos_ew_d, neg_ew_d)
         loss = loss_fn(model.decode(z, mi_tr, pi_tr), y_tr)
         if dgi_w is not None:
             x_mol_c = x_mol_d[torch.randperm(x_mol_d.shape[0], device=device)]
             x_prot_c = x_prot_d[torch.randperm(x_prot_d.shape[0], device=device)]
-            z_c = model.encode(x_mol_c, x_prot_c, pos_eidx_d, neg_eidx_d)
+            z_c = model.encode(x_mol_c, x_prot_c, pos_eidx_d, neg_eidx_d, pos_ew_d, neg_ew_d)
             loss = loss + dgi_weight * _dgi_loss(dgi_w, _dgi_pool(z, dgi_scope), _dgi_pool(z_c, dgi_scope))
         loss.backward()
         nn.utils.clip_grad_norm_(params, hp["clip_grad"])
@@ -288,7 +367,7 @@ def _train_one(build_model, x_mol, x_prot, pos_eidx, neg_eidx,
 
     model.eval()
     with torch.no_grad():
-        z = model.encode(x_mol_d, x_prot_d, pos_eidx_d, neg_eidx_d)
+        z = model.encode(x_mol_d, x_prot_d, pos_eidx_d, neg_eidx_d, pos_ew_d, neg_ew_d)
         z_mol = z[MOL].cpu().numpy()
         z_prot = z[PROT].cpu().numpy()
     return z_mol, z_prot, model
@@ -336,18 +415,23 @@ def _run_models(ext, pairs: pd.DataFrame, train_idx, val_idx, test_idx, seed: in
     pos, neg = _mp_edges(pairs, train_idx, mol_to_i, prot_to_i, ext.q,
                          getattr(ext, "criterion", "greedy_pair_cover"),
                          getattr(ext, "edge_threshold", 0.0),
-                         getattr(ext, "k_mode", "coverage_quantile"), ext.task)
+                         getattr(ext, "k_mode", "coverage_quantile"), ext.task,
+                         getattr(ext, "edge_center", "global"),
+                         getattr(ext, "edge_weight_mode", "none"))
     n_pos, n_neg = len(pos[0]), len(neg[0])
     print(f"  {ext.name}: MP graph {n_pos} positive / {n_neg} negative edges "
           f"(q={ext.q}, criterion={getattr(ext, 'criterion', 'greedy_pair_cover')}, "
           f"k_mode={getattr(ext, 'k_mode', 'coverage_quantile')}, "
-          f"edge_threshold={getattr(ext, 'edge_threshold', 0.0)})", flush=True)
+          f"edge_threshold={getattr(ext, 'edge_threshold', 0.0)}, "
+          f"edge_center={getattr(ext, 'edge_center', 'global')}, "
+          f"edge_weight_mode={getattr(ext, 'edge_weight_mode', 'none')})", flush=True)
     if n_pos == 0 or n_neg == 0:
         raise ValueError(
             f"{ext.name}: signed message passing needs both edge signs, got "
             f"{n_pos} positive / {n_neg} negative. Check `edge_threshold` "
             f"(={getattr(ext, 'edge_threshold', 0.0)}) against the label scale.")
     pos_eidx, neg_eidx = _edge_index_dict(pos, neg)
+    pos_ew, neg_ew = _edge_weights(pos, neg)
 
     def model_job(m):
         hp = ext._hp(seed + ext.seed_offset * m)
@@ -358,7 +442,7 @@ def _run_models(ext, pairs: pd.DataFrame, train_idx, val_idx, test_idx, seed: in
                                            checkpoint_path=checkpoint_path,
                                            dgi_weight=getattr(ext, "dgi_weight", 0.0),
                                            dgi_scope=getattr(ext, "dgi_scope", "shared"),
-                                           hidden=ext.hidden)
+                                           hidden=ext.hidden, pos_ew=pos_ew, neg_ew=neg_ew)
         return m, z_mol, z_prot, model
 
     with ThreadPoolExecutor(max_workers=ext.n_models) as pool:
@@ -421,6 +505,18 @@ class GnnSignedExtractor:
     # Label above which an edge joins the POSITIVE message-passing graph.
     # 0.0 reproduces the historical `y == 1` exactly on binary labels.
     edge_threshold: float = 0.0
+    # EXPERIMENTAL continuous-label edge modes (off by default -> the graph is
+    # byte-identical to the historical signed one; every M2OR number reproduces).
+    # Meant for one-off Carey/Hallem probing, NOT default or mass runs.
+    #   edge_center      "global" (compare y to edge_threshold, historical) |
+    #                    "per_receptor" (compare y to that receptor's own
+    #                    train-mean + edge_threshold -- #4)
+    #   edge_weight_mode "none" (unweighted messages, historical) |
+    #                    "magnitude" (scale each edge's message by |y - center|,
+    #                    unit-mean-normalised per sign -- #1; on binary labels
+    #                    |y|=1 so it is the identity)
+    edge_center: str = "global"
+    edge_weight_mode: str = "none"
     lr: float = 3e-3
     weight_decay: float = 1e-4
     clip_grad: float = 1.0
@@ -449,6 +545,10 @@ class GnnSignedExtractor:
                              f"got {self.k_mode!r}")
         if self.dgi_scope not in ("shared", "prot"):
             raise ValueError(f"dgi_scope must be 'shared' or 'prot', got {self.dgi_scope!r}")
+        if self.edge_center not in ("global", "per_receptor"):
+            raise ValueError(f"edge_center must be 'global' or 'per_receptor', got {self.edge_center!r}")
+        if self.edge_weight_mode not in ("none", "magnitude"):
+            raise ValueError(f"edge_weight_mode must be 'none' or 'magnitude', got {self.edge_weight_mode!r}")
         self._proteins = D.load_npz_dict(self.protein_path)
         self._molecules = D.load_npz_dict(self.molecule_path)
         per_model = self.hidden if self.emit == "prot" else 2 * self.hidden
@@ -458,7 +558,8 @@ class GnnSignedExtractor:
     def _build_model(self):
         mol_dim = next(iter(self._molecules.values())).shape[-1]
         prot_dim = next(iter(self._proteins.values())).shape[-1]
-        return _SignedSage(mol_dim, prot_dim, self.hidden, self.dropout)
+        return _SignedSage(mol_dim, prot_dim, self.hidden, self.dropout,
+                           weighted=(self.edge_weight_mode != "none"))
 
     def _hp(self, seed):
         return dict(lr=self.lr, weight_decay=self.weight_decay, clip_grad=self.clip_grad,

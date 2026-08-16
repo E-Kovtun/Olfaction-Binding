@@ -283,6 +283,13 @@ def parse_source_arg(raw: str):
         # to ask for "fraction". See orbind.mol_selection.resolve_K.
         if len(parts) > 8 and parts[8]:
             kwargs["k_mode"] = parts[8]
+        # Fields 9/10: EXPERIMENTAL continuous-label edge modes (defaults off, so
+        # binary M2OR is unchanged). edge_center global|per_receptor (#4),
+        # edge_weight_mode none|magnitude (#1). See GnnSignedExtractor.
+        if len(parts) > 9 and parts[9]:
+            kwargs["edge_center"] = parts[9]
+        if len(parts) > 10 and parts[10]:
+            kwargs["edge_weight_mode"] = parts[10]
         return name, _factory(type_)(name=name, **kwargs)
 
     if type_ in _PROSMITH_TYPES:

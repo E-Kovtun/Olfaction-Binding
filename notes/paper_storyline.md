@@ -15,6 +15,23 @@ One line: *"the molecule was already boosted with adapters; we show the receptor
 is the undercultivated side, and that its representation can be improved not by a
 new encoder but by binding data via a graph."*
 
+### Corollary — why biologically-inspired attention may underperform (incorporation TBD)
+The same underexploration argument transfers directly to the attention family
+(bio-inspired cross-attention between per-residue protein tokens and molecule
+atoms/tokens). Those methods are only as good as the **per-residue** protein
+representation they attend over — and that is exactly the receptor side we argue is
+underexplored and weak. If the mean-pooled receptor descriptor already reads mostly
+as identity + a weak similarity prior (our C2/C8 evidence), the per-residue tokens
+that attention consumes are unlikely to carry clean, position-resolved pocket
+chemistry either (no OR structures, weak domain, embeddings never trained for this).
+So an architecture that *looks* biologically right (attend molecule atoms to binding-
+site residues) can fail not because the mechanism is wrong but because its substrate
+— the residue embeddings — is impoverished. Every argument we make in the
+underexploration section applies here unchanged; this predicts (and would explain) a
+null for cross-attention on cold molecules. How/whether we incorporate this (a full
+attention re-impl, an ablation swapping residue sources, or just a framed remark) is
+left for later.
+
 We already have partial receptor-side evidence: ESM variants give ~equal boosting;
 one-hot nearly matches ESM; ESM reads mostly as receptor identity + a weak
 similarity prior. Missing: (1) head-to-head of protein embedding sources, (2)
@@ -80,6 +97,7 @@ C7 transfer to Carey/Hallem — IN PROGRESS — ourind runs, regression
 C8 protein side underexplored: sources ≈ / underused — PARTIAL — need protein-source head-to-head
 C9 graph actually IMPROVES the protein representation (info before/after) — TODO — the key new experiment
 C10 method behaves sensibly across proteins — TODO — per-protein slice
+C11 bio-inspired attention underperforms b/c per-residue reps are weak — HYPOTHESIS — corollary of the underexploration thesis; incorporation TBD (re-impl / residue-source ablation / framed remark)
 Most important open = C9: isolation (C4) says "gain comes from protein refinement";
 info criteria say "the representation became more informative" — different claims;
 together they make the paper.
@@ -87,9 +105,33 @@ together they make the paper.
 ## Figures & tables (sections 7–8)
 See chat message of this session for the annotated axis-by-axis list. Summary:
 - Teaser Fig: receptor geometry before/after graph (phylo-colored vs function-colored).
-- T1 M2OR cold-molecule head-to-head (methods × metrics); our cls+mol wins.
-- T2 robustness across molecule-embedding sources (source × metric); gain holds.
-- T3 transductive M2OR (base = ceiling; honest).
+- **Split the M2OR numbers into TWO tables on purpose** (framing choice, decided
+  Aug 2026):
+  - **T1 — competitor head-to-head, ChemBERTa, BOTH regimes** (methods × metrics,
+    transductive block + inductive block). boost vs ProSmith/LORAX/MolOR/Hladiš/our
+    GNN. This is where "no fancy model beats boost; only our graph does (inductive)"
+    lives. Transductive competitors sit here too, mixed with everyone — so our own
+    transductive shortfall is just one row among many, not spotlighted.
+  - **T2 — OUR GNN vs boost across ALL molecule embeddings, BOTH regimes**
+    (source {ChemBERTa,GIN,ECFP} × regime, Δ = GNN−boost). Isolated to just the two
+    of us, this table's story is the consistent-sign inductive win (+0.010…+0.022 on
+    all three sources); the transductive rows (−0.01…−0.017) read as an honest,
+    expected ceiling rather than a defeat, because the table's axis is "robustness of
+    OUR effect to the molecule embedding", not "who wins".
+  Rationale: keeping the competitor comparison and the molecule-source robustness in
+  ONE mega-table would bury the inductive win and put our transductive loss on the
+  same line as the competitors we beat elsewhere. Separated, T1 makes the inductive
+  point against the field and T2 makes the robustness point about us — and the
+  transductive ceiling is stated plainly in both without ever being the headline.
+- **Why T2 is boost vs our GNN only** (pre-empt the reviewer): the molecule-source
+  swap is only defined for methods that consume a fixed-length molecule VECTOR (boost,
+  our GNN). ProSmith attends over per-SITE molecule tokens (ECFP has none — it is one
+  hashed vector; GIN would need its per-atom variant), and LORAX fine-tunes a chemical
+  TRANSFORMER, so neither can be repointed at GIN/ECFP without changing its
+  architecture. So they stay single-source (ChemBERTa) in T1. This is itself a small
+  argument for C11: a method's reach is bounded by the molecule substrate it can eat —
+  the same substrate-boundedness we invoke for weak per-residue protein reps.
+- T3 (Supp / optional) full per-regime numbers behind T1–T2 if a reviewer wants them.
 - F2 Carey/Hallem per-fold regression vs methods + naive floor.
 - T4/F3 protein-embedding sources head-to-head; method behavior across proteins.
 - F4 (C9 core) before/after info-criteria panel (profile recoverability, functional-

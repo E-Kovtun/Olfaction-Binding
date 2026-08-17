@@ -64,17 +64,22 @@ def embed_prott5(seqs, batch=8):
         # safetensors weights STRAIGHT onto the GPU, and assign them. Every op
         # touches only cuda; GPU forward + .cpu() on the OUTPUT are proven fine
         # (the GNN pipeline does exactly that on this box).
-        from safetensors.torch import load_file
         from transformers import T5Config
         from transformers.utils import cached_file
         cfg = T5Config.from_pretrained(card)
         with torch.device("meta"):
             model = T5EncoderModel(cfg)
-        # resolve the weights path via transformers' OWN cache logic (the same
-        # one from_pretrained used to find them here) -- not hf_hub_download,
-        # which looked in a different cache and missed.
-        wpath = cached_file(card, "model.safetensors")
-        sd = load_file(wpath, device="cuda")
+        # Resolve weights via transformers' OWN cache logic (same one
+        # from_pretrained used). This repo ships pytorch_model.bin (no
+        # safetensors); torch.load(map_location="cuda") lands every tensor
+        # straight on the GPU, keeping fp16 -- so no CPU fp16->fp32 cast, which
+        # is the exact op this container's /proc/cpuinfo kills.
+        try:
+            from safetensors.torch import load_file
+            sd = load_file(cached_file(card, "model.safetensors"), device="cuda")
+        except Exception:
+            sd = torch.load(cached_file(card, "pytorch_model.bin"),
+                            map_location="cuda", weights_only=True)
         model.load_state_dict(sd, strict=False, assign=True)
         model.tie_weights()                       # re-link encoder.embed_tokens -> shared
         leftover = [n for n, p in model.named_parameters() if p.is_meta]

@@ -94,7 +94,7 @@ C4 gain isolated to protein refinement (cls+mol vs prot+mol) — HAVE — same s
 C5 robust across several molecule embeddings — PARTIAL — need molecule-source sweep
 C6 competitors don't beat base on cold molecule (common footing) — HAVE — re-impl ProSmith/LORAX/MolOR/Hladiš
 C7 transfer to Carey/Hallem — IN PROGRESS — ourind runs, regression
-C8 protein side underexplored: sources ≈ / underused — PARTIAL — need protein-source head-to-head
+C8 protein side underexplored: sources ≈ / underused — HAVE — classical-descriptor floor (prot_floor_sweep.py): ESM-1b ≈ AAC/kmer/CTD/PseAAC/BLOSUM both transductive (0.883–0.894) AND cold-receptor (0.827–0.846, ESM mid-pack); onehot_only=0.500 cold sanity; the encoder is NOT the lever
 C9 graph actually IMPROVES the protein representation (info before/after) — TODO — the key new experiment
 C10 method behaves sensibly across proteins — TODO — per-protein slice
 C11 bio-inspired attention underperforms b/c per-residue reps are weak — HYPOTHESIS — corollary of the underexploration thesis; incorporation TBD (re-impl / residue-source ablation / framed remark)

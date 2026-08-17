@@ -86,8 +86,11 @@ def summarize(pool: pathlib.Path, per_fold: bool, drop: set[str]) -> None:
         if nv is not None and len(nv) and naive_vals is None:
             naive_vals = {c: nv[c].values for c in cols}
         combo = d[d["kind"] == "combo"]
-        if drop:
-            combo = combo[~combo["name"].isin(drop)]
+        for spec in drop:
+            run_pat, _, name = spec.rpartition(":")
+            if run_pat and run_pat not in r.name:
+                continue                  # scoped to another run
+            combo = combo[combo["name"] != name]
         for name, g in combo.groupby("name", sort=True):
             g = g.sort_values("repeat")
             row = {"run": r.name, "combo": name, "folds": f"{g['repeat'].nunique()}/5"}
@@ -140,9 +143,11 @@ def main() -> None:
                          "datasets is a different set of molecules, not a reseed, so its "
                          "spread is structural)")
     ap.add_argument("--drop-combo", nargs="*", default=[],
-                    help="combo names to hide, e.g. --drop-combo cls+mol. Hides the row, "
-                         "does not touch metrics.csv -- hladis's cls+mol is a wash against its "
-                         "cls (0.729 vs 0.734 AUPRC transductive) and we report cls.")
+                    help="rows to hide, as `combo` or `run_substring:combo`. SCOPE IT: a bare "
+                         "`cls+mol` also hides every GNN run, whose only combo is cls+mol. To "
+                         "drop hladis's secondary row (a wash against its cls: 0.729 vs 0.734 "
+                         "AUPRC transductive) use `--drop-combo hladis:cls+mol`. Hides the row "
+                         "only; metrics.csv is untouched.")
     ap.add_argument("--base", default=str(BASE))
     args = ap.parse_args()
 

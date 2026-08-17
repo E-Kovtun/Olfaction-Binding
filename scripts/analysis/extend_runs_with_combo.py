@@ -30,6 +30,7 @@ runs in the default env.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import pathlib
 import sys
@@ -92,10 +93,35 @@ def main() -> None:
     for name, c in sorted(runs.items()):
         srcs = [parse(s) for s in c.get("sources", [])]
         learned = [(n, t) for n, t in srcs if t not in ENTITY]
-        if len(learned) != 1 or len(srcs) != 1:
-            continue                      # boost-only, or already has prot/mol
-        cls_src = c["sources"][0]
+        if len(learned) != 1:
+            continue                                     # boost-only, or multi-model
+        cls_src = next(s for s in c["sources"] if parse(s)[1] not in ENTITY)
         _, typ = learned[0]
+
+        # Decide on what was actually COMPUTED, not on the source list. config.json
+        # is written at start-up, so a run that was extended and then died still
+        # advertises three sources -- that false "already done" is exactly how the
+        # crashed inductive molor/prosmith went unnoticed.
+        target = "+".join(["cls", "prot", "mol"])
+        m = pool / name / "metrics.csv"
+        done, have_combos = 0, set()
+        if m.exists():
+            with open(m, newline="") as fh:
+                rows = [r for r in csv.DictReader(fh) if r.get("kind") == "combo"]
+            have_combos = {r["name"] for r in rows}
+            done = len({r["repeat"] for r in rows if r["name"] == target})
+        if done >= 5:
+            print(f"# --- {name}: {target} уже посчитан на {done} фолдах, пропускаю\n")
+            continue
+        # A run whose computed combos go beyond {cls, target} is built differently
+        # -- the GNN's only combo is `cls+mol`, which under the emitted source
+        # order (1=cls, 2=prot, 3=mol) would be `13`, not `12`. Re-running it with
+        # `--combos "1 123"` would silently DROP that row for every redone repeat.
+        stray = have_combos - {"cls", target}
+        if stray:
+            print(f"# --- {name}: пропускаю, у него свои комбо {sorted(stray)} — "
+                  f"перезапуск с другой нумерацией источников их затрёт\n")
+            continue
         py = PYTHON.get(typ, DEFAULT_PYTHON)
         regime = c.get("regime", "full_full")
         mode = c.get("full_full_mode", "transductive")
@@ -106,12 +132,16 @@ def main() -> None:
                    else [1, 2, 3, 4, 5])
         ckpt = pool / name / "checkpoints"
         have = sorted(p.name for p in ckpt.glob("repeat_*")) if ckpt.exists() else []
-        print(f"# --- {name}  [{typ}]  чекпойнты: {len(have)} repeat_* "
-              f"{'(обучение пропустится)' if len(have) >= 5 else '!! ПЕРЕОБУЧИТСЯ'}")
+        pts = sorted(ckpt.glob(f"repeat_*/{typ}_cls_model0.pt")) if ckpt.exists() else []
+        print(f"# --- {name}  [{typ}]  {target}: {done}/5 посчитано | "
+              f"чекпойнтов модели {len(pts)}/{len(have)} repeat_* "
+              f"{'-> обучение пропустится' if len(pts) >= 5 else '-> !! ПЕРЕОБУЧИТСЯ'}")
         print(f"{py} scripts/modeling/train/train_ensemble_boost.py \\\n"
               f"  --regime {regime} --full-full-mode {mode} "
               f"--repeats {' '.join(map(str, repeats))} \\\n"
-              f"  --max-parallel {args.max_parallel} --gpus {args.gpus} \\\n"
+              + (f"  --max-parallel {args.max_parallel} --gpus {args.gpus} \\\n"
+                 if args.max_parallel > 1 else "  --max-parallel 1 \\\n")
+              +
               f"  --source {cls_src} \\\n"
               f"  --source {prot} \\\n"
               f"  --source {mol} \\\n"

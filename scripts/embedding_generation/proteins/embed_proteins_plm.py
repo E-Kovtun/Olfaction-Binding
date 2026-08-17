@@ -56,9 +56,17 @@ def embed_prott5(seqs, batch=8):
     card = "Rostlab/prot_t5_xl_half_uniref50-enc"
     device = "cuda" if torch.cuda.is_available() else "cpu"
     tok = T5Tokenizer.from_pretrained(card, do_lower_case=False, legacy=True)
-    model = T5EncoderModel.from_pretrained(card).to(device).eval()
     if device == "cuda":
-        model = model.half()
+        # Load weights STRAIGHT onto the GPU. On this container torch's CPU
+        # tensor .copy_() dies with "Failed to initialize cpuinfo!" (broken
+        # /proc/cpuinfo), so the default "materialise on CPU, then .to(cuda)"
+        # path fails while copying each parameter. device_map places every
+        # weight on the GPU as it loads, so no CPU copy ever happens. GPU forward
+        # + .cpu() on the OUTPUT are fine (the GNN pipeline does exactly that).
+        model = T5EncoderModel.from_pretrained(
+            card, device_map={"": 0}, torch_dtype=torch.float16, low_cpu_mem_usage=True).eval()
+    else:
+        model = T5EncoderModel.from_pretrained(card).to(device).eval()
     out = []
     for i in range(0, len(seqs), batch):
         chunk = seqs[i:i + batch]

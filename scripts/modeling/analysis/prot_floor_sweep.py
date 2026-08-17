@@ -1,15 +1,34 @@
-"""Transductive M2OR boosting sweep over CLASSICAL protein descriptors.
+"""Protein-representation FLOOR sweep: does a real pLM beat amino-acid counts?
 
-Molecule side = ChemBERTa (fair). Protein side = each of:
-  esm (anchor), onehot_prot, AAC, kmer2, AAindex, CTD, PseAAC, BLOSUM,
-  onehot_prot ALONE (no molecule), chemberta ALONE (no protein).
+For one dataset x one regime, boosts `[protein_feature || ChemBERTa]` with the
+pipeline's own fit_boost/predict_scores (auto-GPU) and reports the fold-mean
+metric for each protein feature side by side:
 
-Uses the pipeline's own fit_boost/predict_scores/metrics (so the ESM anchor
-reproduces the ~0.894 transductive boost) -- fit_boost auto-uses the GPU when
-CUDA is present. 5 transductive folds, train=train_idx, test=test_idx; writes
-an incremental CSV and prints a 5-fold-mean summary.
+  * real pLMs      -- esm1b, esm2, prott5  (loaded from npz, keyed by SEQUENCE;
+                      each is included only if its npz exists AND covers every
+                      receptor, so a box that is missing one just skips it)
+  * classical floor -- AAC, kmer2, AAindex, CTD, PseAAC, BLOSUM (computed here
+                      from the receptor sequence, no learning)
+  * controls       -- onehot (identity), onehot_only (no molecule), mol_only.
 
-    .venv/bin/python scripts/modeling/analysis/prot_floor_sweep.py
+Datasets and regimes (the point is one comparable table per cell):
+  m2or  classification, AUROC  -- transductive = LORAX rand folds (receptors
+                                  seen); inductive = cold receptor (group_receptor
+                                  split, `--folds` used as seeds).
+  cc/hc regression,     R2     -- transductive = upstream `rand` folds; inductive
+                                  = `cdhit` (cold receptors). HC ships no cdhit,
+                                  so HC has transductive only.
+
+`inductive` here means COLD RECEPTOR everywhere -- that is the axis a protein
+representation is supposed to help on (generalising to an unseen receptor),
+which is exactly what this floor is probing. It is deliberately NOT the
+cold-molecule regime used in the graph story.
+
+    # one cell:
+    .venv/bin/python scripts/modeling/analysis/prot_floor_sweep.py --dataset m2or --regime transductive
+    # everything (skips cells a dataset can't do):
+    for d in m2or cc hc; do for r in transductive inductive; do \
+      .venv/bin/python scripts/modeling/analysis/prot_floor_sweep.py --dataset $d --regime $r; done; done
 """
 import argparse
 import pathlib
@@ -25,7 +44,6 @@ while not (_root / "pyproject.toml").exists():
     _root = _root.parent
 sys.path.insert(0, str(_root))
 
-from orbind.regimes import full_full_pairs, load_split          # noqa: E402
 from orbind import dataset as D                                 # noqa: E402
 from orbind.baselines import fit_boost, predict_scores          # noqa: E402
 
@@ -156,63 +174,147 @@ def d_pseaac(seq, lam=5, w=0.05):
 DESC = {"aac": d_aac, "kmer2": d_kmer2, "aaindex": d_aaindex,
         "ctd": d_ctd, "pseaac": d_pseaac, "blosum": d_blosum}
 
+# ---------------- per-dataset config ------------------------------------------
+# The pLM order here is the order they appear in the table. A file that is
+# absent (or doesn't cover every receptor) is skipped with a warning, so the
+# same command runs on any box -- ProtT5 shows up wherever prott5_<ds>.npz was
+# built, esm2 only on M2OR until insect esm2 exists.
+EMB = "data/embeddings"
+DATASETS = {
+    "m2or": {"task": "classification", "primary": "AUROC",
+             "mol": f"{EMB}/molecules/chemberta_77m_m2or.npz",
+             "plms": {"esm1b": f"{EMB}/proteins/esm1b_650m_mean.npz",
+                      "esm2":  f"{EMB}/proteins/esm2_650m_mean.npz",
+                      "prott5": f"{EMB}/proteins/prott5_m2or.npz"}},
+    "cc":   {"task": "regression", "primary": "R2",
+             "mol": f"{EMB}/molecules/chemberta_77m_cc.npz",
+             "plms": {"esm1b": f"{EMB}/proteins/esm1b_650m_mean_cc.npz",
+                      "esm2":  f"{EMB}/proteins/esm2_650m_mean_cc.npz",
+                      "prott5": f"{EMB}/proteins/prott5_cc.npz"}},
+    "hc":   {"task": "regression", "primary": "R2",
+             "mol": f"{EMB}/molecules/chemberta_77m_hc.npz",
+             "plms": {"esm1b": f"{EMB}/proteins/esm1b_650m_mean_hc.npz",
+                      "esm2":  f"{EMB}/proteins/esm2_650m_mean_hc.npz",
+                      "prott5": f"{EMB}/proteins/prott5_hc.npz"}},
+}
+
+
+def load_pairs(dataset):
+    """(pairs, task) for the dataset, with `receptor`/`inchikey`/`label` cols."""
+    if dataset == "m2or":
+        from orbind.regimes import full_full_pairs
+        return full_full_pairs(pool_fold=1), "classification"
+    from orbind.regimes_ofm import ofm_pairs
+    return ofm_pairs(dataset), "regression"
+
+
+def make_splits(dataset, pairs, y_all, regime, folds):
+    """{fold: (train_idx, test_idx)} for the (dataset, regime) cell.
+
+    inductive == cold receptor for every dataset. m2or draws it with a
+    group_receptor split seeded by `fold`; the insects use upstream's `cdhit`
+    (cold-cluster) folds. transductive uses M2OR's LORAX `rand` folds / the
+    insects' upstream `rand` folds. Insect train = upstream train+val (no
+    tuning here, so val is just more training rows).
+    """
+    splits = {}
+    if dataset == "m2or":
+        from orbind.regimes import load_split
+        for f in folds:
+            if regime == "transductive":
+                tr, va, te = load_split("transductive", f)
+                splits[f] = (tr, te)
+            else:                                     # cold receptor
+                trm, tem = D.split(pairs, y_all, kind="group_receptor", seed=f)
+                splits[f] = (np.where(trm)[0], np.where(tem)[0])
+                print(f"  cold_receptor fold{f}: train {trm.sum()} / test {tem.sum()} rows "
+                      f"({pairs['receptor'].iloc[np.where(tem)[0]].nunique()} unseen receptors)",
+                      flush=True)
+        return splits
+    # insects
+    from orbind.regimes_ofm import ofm_indices, available_families
+    family = "rand" if regime == "transductive" else "cdhit"
+    if family not in available_families(dataset):
+        raise SystemExit(f"{dataset} ships no {family!r} split -> no {regime} cell "
+                         f"(has {available_families(dataset)})")
+    for f in folds:
+        tr, va, te = ofm_indices(dataset, family, f)
+        splits[f] = (np.concatenate([tr, va]), te)
+    return splits
+
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--chemberta", default="data/embeddings/molecules/chemberta_77m_m2or.npz")
-    ap.add_argument("--esm", default="data/embeddings/proteins/esm1b_650m_mean.npz")
-    ap.add_argument("--regime", default="transductive", choices=["transductive", "cold_receptor"],
-                    help="transductive = LORAX rand folds (receptors seen); cold_receptor = "
-                         "hold out whole receptors (group_receptor split, `folds` used as seeds)")
+    ap.add_argument("--dataset", default="m2or", choices=sorted(DATASETS))
+    ap.add_argument("--regime", default="transductive", choices=["transductive", "inductive"])
     ap.add_argument("--folds", type=int, nargs="+", default=[1, 2, 3, 4, 5])
+    ap.add_argument("--mol", default=None, help="override molecule npz")
+    ap.add_argument("--extra-prot", action="append", default=[], metavar="name=path",
+                    help="add a protein npz (keyed by sequence); repeatable")
     ap.add_argument("--out", default=None,
-                    help="default: results/tables/prot_floor_<regime>.csv")
+                    help="default: results/tables/prot_floor_<dataset>_<regime>.csv")
     args = ap.parse_args()
 
-    print("loading pairs + embeddings ...", flush=True)
-    pairs = full_full_pairs(pool_fold=1)
+    cfg = DATASETS[args.dataset]
+    task = cfg["task"]; primary = cfg["primary"]
+    metric_fn = D.METRICS[task]
+
+    print(f"[{args.dataset} / {args.regime}] loading pairs + embeddings ...", flush=True)
+    pairs, _ = load_pairs(args.dataset)
     recs = pd.unique(pairs["receptor"]); mols = pd.unique(pairs["inchikey"])
     rec_i = {r: i for i, r in enumerate(recs)}; mol_i = {m: i for i, m in enumerate(mols)}
     row_r = pairs["receptor"].map(rec_i).to_numpy()
     row_m = pairs["inchikey"].map(mol_i).to_numpy()
     y_all = pairs["label"].to_numpy().astype(np.float32)
 
-    chem = D.load_npz_dict(args.chemberta)
+    mol_path = args.mol or cfg["mol"]
+    chem = D.load_npz_dict((_root / mol_path) if not pathlib.Path(mol_path).is_absolute() else mol_path)
+    missing_mol = [m for m in mols if m not in chem]
+    if missing_mol:
+        raise SystemExit(f"{len(missing_mol)} molecules missing from {mol_path}, e.g. {missing_mol[:3]}")
     Xmol = np.stack([chem[m] for m in mols]).astype(np.float32)
-    esm = D.load_npz_dict(args.esm)
-    have_esm = all(r in esm for r in recs)
-    print(f"receptors={len(recs)} mols={len(mols)} chem_dim={Xmol.shape[1]} esm_keys_ok={have_esm}", flush=True)
 
+    # protein matrices: classical descriptors (always) + onehot + available pLMs
     protmats = {}
     for name, fn in DESC.items():
         protmats[name] = np.stack([fn(r) for r in recs]).astype(np.float32)
-        print(f"  built {name}: {protmats[name].shape}", flush=True)
     protmats["onehot"] = np.eye(len(recs), dtype=np.float32)
-    if have_esm:
-        protmats["esm"] = np.stack([esm[r] for r in recs]).astype(np.float32)
 
-    specs = [("esm", "esm", True)] if have_esm else []
-    specs += [("onehot", "onehot", True),
-              ("aac", "aac", True), ("kmer2", "kmer2", True), ("aaindex", "aaindex", True),
-              ("ctd", "ctd", True), ("pseaac", "pseaac", True), ("blosum", "blosum", True),
-              ("onehot_only", "onehot", False), ("mol_only", None, True)]
+    plm_specs = dict(cfg["plms"])
+    for kv in args.extra_prot:                          # ad-hoc additions/overrides
+        name, path = kv.split("=", 1)
+        plm_specs[name] = path
+    plm_names = []
+    for name, path in plm_specs.items():
+        p = (_root / path) if not pathlib.Path(path).is_absolute() else pathlib.Path(path)
+        if not p.exists():
+            print(f"  [skip pLM {name}] {path} not found", flush=True)
+            continue
+        emb = D.load_npz_dict(p)
+        miss = [r for r in recs if r not in emb]
+        if miss:
+            print(f"  [skip pLM {name}] covers {len(recs)-len(miss)}/{len(recs)} receptors", flush=True)
+            continue
+        protmats[name] = np.stack([emb[r] for r in recs]).astype(np.float32)
+        plm_names.append(name)
+        print(f"  loaded pLM {name}: {protmats[name].shape}", flush=True)
 
-    out = pathlib.Path(args.out) if args.out else pathlib.Path(f"results/tables/prot_floor_{args.regime}.csv")
+    print(f"receptors={len(recs)} mols={len(mols)} chem_dim={Xmol.shape[1]} "
+          f"pLMs={plm_names} task={task}", flush=True)
+
+    # spec = (row_name, protein_matrix_key or None, use_molecule)
+    specs  = [(n, n, True) for n in plm_names]           # real pLMs first
+    specs += [("onehot", "onehot", True)]
+    specs += [(n, n, True) for n in DESC]                # classical floor
+    specs += [("onehot_only", "onehot", False), ("mol_only", None, True)]
+
+    splits = make_splits(args.dataset, pairs, y_all, args.regime, args.folds)
+
+    out = pathlib.Path(args.out) if args.out else pathlib.Path(
+        f"results/tables/prot_floor_{args.dataset}_{args.regime}.csv")
     if not out.is_absolute():
         out = _root / out
     out.parent.mkdir(parents=True, exist_ok=True)
-
-    # (train_idx, test_idx) per fold for the chosen regime
-    splits = {}
-    for f in args.folds:
-        if args.regime == "transductive":
-            tr, va, te = load_split("transductive", f)
-            splits[f] = (tr, te)
-        else:                                    # cold_receptor: hold out whole receptors
-            trm, tem = D.split(pairs, y_all, kind="group_receptor", seed=f)
-            splits[f] = (np.where(trm)[0], np.where(tem)[0])
-            print(f"  cold_receptor fold{f}: train {trm.sum()} / test {tem.sum()} rows "
-                  f"({pairs['receptor'].iloc[np.where(tem)[0]].nunique()} unseen receptors)", flush=True)
 
     rows = []
     for name, pm, use_mol in specs:
@@ -226,26 +328,28 @@ def main():
                 if pm is not None: parts.append(protmats[pm][row_r[idx]])
                 return np.concatenate(parts, axis=1).astype(np.float32)
 
-            Xtr, Xte = build(tr), build(te)
-            model = fit_boost(Xtr, y_all[tr], seed=f, task="classification")
-            p = predict_scores(model, Xte, task="classification")
-            m = D.metrics(y_all[te], p)
-            rows.append({"prot": name, "fold": f, "pdim": pdim, "dim": Xtr.shape[1], **m})
-            print(f"{name:12} fold{f} pdim={pdim:5} AUROC={m['AUROC']:.3f} "
-                  f"AUPRC={m['AUPRC']:.3f} MCC={m['MCC']:.3f} F1={m['F1']:.3f}", flush=True)
+            model = fit_boost(build(tr), y_all[tr], seed=f, task=task)
+            p = predict_scores(model, build(te), task=task)
+            m = metric_fn(y_all[te], p)
+            rows.append({"prot": name, "fold": f, "pdim": pdim,
+                         "dim": build(tr[:1]).shape[1], **m})
+            print(f"{name:12} fold{f} pdim={pdim:5} " +
+                  "  ".join(f"{k}={m[k]:.3f}" for k in list(m)[:2]), flush=True)
             pd.DataFrame(rows).to_csv(out, index=False)
 
     df = pd.DataFrame(rows); g = df.groupby("prot")
-    print("\n" + "=" * 82)
-    print(f"{args.regime.upper()} M2OR -- protein descriptor boost sweep (mol=ChemBERTa), "
-          f"{len(args.folds)}-fold mean  [pdim = protein-side dim]")
-    print("=" * 82)
-    for name in df.groupby("prot")["AUROC"].mean().sort_values(ascending=False).index:
+    metric_cols = [c for c in df.columns if c not in ("prot", "fold", "pdim", "dim")]
+    print("\n" + "=" * 84)
+    print(f"{args.dataset.upper()} / {args.regime.upper()} -- protein floor "
+          f"(mol=ChemBERTa), {len(args.folds)}-fold mean, sorted by {primary}  "
+          f"[pdim = protein-side dim]")
+    print("=" * 84)
+    for name in g[primary].mean().sort_values(ascending=False).index:
         s = g.get_group(name)
         def mc(c):
             x = s[c].to_numpy(); return f"{x.mean():.3f}±{1.96 * x.std(ddof=1) / len(x) ** 0.5:.3f}"
-        print(f"{name:12} pdim={int(s['pdim'].iloc[0]):5}  AUROC {mc('AUROC')}  "
-              f"AUPRC {mc('AUPRC')}  MCC {mc('MCC')}  F1 {mc('F1')}")
+        cells = "  ".join(f"{c} {mc(c)}" for c in metric_cols[:4])
+        print(f"{name:12} pdim={int(s['pdim'].iloc[0]):5}  {cells}")
     print(f"\nwrote -> {out}")
 
 

@@ -64,13 +64,17 @@ def embed_prott5(seqs, batch=8):
         # safetensors weights STRAIGHT onto the GPU, and assign them. Every op
         # touches only cuda; GPU forward + .cpu() on the OUTPUT are proven fine
         # (the GNN pipeline does exactly that on this box).
-        from huggingface_hub import hf_hub_download
         from safetensors.torch import load_file
         from transformers import T5Config
+        from transformers.utils import cached_file
         cfg = T5Config.from_pretrained(card)
         with torch.device("meta"):
             model = T5EncoderModel(cfg)
-        sd = load_file(hf_hub_download(card, "model.safetensors"), device="cuda")
+        # resolve the weights path via transformers' OWN cache logic (the same
+        # one from_pretrained used to find them here) -- not hf_hub_download,
+        # which looked in a different cache and missed.
+        wpath = cached_file(card, "model.safetensors")
+        sd = load_file(wpath, device="cuda")
         model.load_state_dict(sd, strict=False, assign=True)
         model.tie_weights()                       # re-link encoder.embed_tokens -> shared
         leftover = [n for n, p in model.named_parameters() if p.is_meta]

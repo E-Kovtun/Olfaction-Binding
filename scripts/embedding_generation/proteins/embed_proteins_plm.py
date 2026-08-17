@@ -57,14 +57,26 @@ def embed_prott5(seqs, batch=8):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     tok = T5Tokenizer.from_pretrained(card, do_lower_case=False, legacy=True)
     if device == "cuda":
-        # Load weights STRAIGHT onto the GPU. On this container torch's CPU
-        # tensor .copy_() dies with "Failed to initialize cpuinfo!" (broken
-        # /proc/cpuinfo), so the default "materialise on CPU, then .to(cuda)"
-        # path fails while copying each parameter. device_map places every
-        # weight on the GPU as it loads, so no CPU copy ever happens. GPU forward
-        # + .cpu() on the OUTPUT are fine (the GNN pipeline does exactly that).
-        model = T5EncoderModel.from_pretrained(
-            card, device_map={"": 0}, torch_dtype=torch.float16, low_cpu_mem_usage=True).eval()
+        # This container's /proc/cpuinfo is unparseable, so ANY CPU tensor
+        # compute (here T5's forced fp16->fp32 upcast of its layer norms during
+        # load) dies with "Failed to initialize cpuinfo!". Bypass the CPU
+        # entirely: init the model on `meta` (no allocation, no CPU op), read the
+        # safetensors weights STRAIGHT onto the GPU, and assign them. Every op
+        # touches only cuda; GPU forward + .cpu() on the OUTPUT are proven fine
+        # (the GNN pipeline does exactly that on this box).
+        from huggingface_hub import hf_hub_download
+        from safetensors.torch import load_file
+        from transformers import T5Config
+        cfg = T5Config.from_pretrained(card)
+        with torch.device("meta"):
+            model = T5EncoderModel(cfg)
+        sd = load_file(hf_hub_download(card, "model.safetensors"), device="cuda")
+        model.load_state_dict(sd, strict=False, assign=True)
+        model.tie_weights()                       # re-link encoder.embed_tokens -> shared
+        leftover = [n for n, p in model.named_parameters() if p.is_meta]
+        if leftover:
+            raise RuntimeError(f"{len(leftover)} params never loaded (still meta): {leftover[:5]}")
+        model = model.eval()
     else:
         model = T5EncoderModel.from_pretrained(card).to(device).eval()
     out = []

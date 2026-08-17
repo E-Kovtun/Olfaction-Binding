@@ -11,18 +11,20 @@ metric for each protein feature side by side:
                       from the receptor sequence, no learning)
   * controls       -- onehot (identity), onehot_only (no molecule), mol_only.
 
-Datasets and regimes (the point is one comparable table per cell):
-  m2or  classification, AUROC  -- transductive = LORAX rand folds (receptors
-                                  seen); inductive = cold receptor (group_receptor
-                                  split, `--folds` used as seeds).
-  cc/hc regression,     R2     -- transductive = upstream `rand` folds; inductive
-                                  = `cdhit` (cold receptors). HC ships no cdhit,
-                                  so HC has transductive only.
-
-`inductive` here means COLD RECEPTOR everywhere -- that is the axis a protein
-representation is supposed to help on (generalising to an unseen receptor),
-which is exactly what this floor is probing. It is deliberately NOT the
-cold-molecule regime used in the graph story.
+Regimes match the rest of the pipeline's axis (COLD MOLECULE = inductive), so
+this table sits next to every other table in the paper:
+  transductive   m2or = LORAX `rand` folds; cc/hc = upstream `rand` (receptors
+                 AND molecules seen).
+  inductive      COLD MOLECULE -- m2or = `inductive_molecule_v5` (folds 1-5 ->
+                 seeds 42-46); cc/hc = `our_inductive`. This is where the graph
+                 wins on M2OR, so the floor here says exactly the useful thing:
+                 in that regime, swapping ESM for AAC (or even onehot) barely
+                 moves the score -> the graph's gain is data-driven receptor
+                 refinement, not a better encoder. NB receptors are all SEEN, so
+                 the protein-feature spread compresses -- that IS the point.
+  cold_receptor  OPTIONAL appendix -- hold whole receptors out (m2or =
+                 group_receptor seeds; cc = upstream `cdhit`; HC has none). The
+                 protein-transfer axis; not the project's inductive.
 
     # one cell:
     .venv/bin/python scripts/modeling/analysis/prot_floor_sweep.py --dataset m2or --regime transductive
@@ -211,11 +213,12 @@ def load_pairs(dataset):
 def make_splits(dataset, pairs, y_all, regime, folds):
     """{fold: (train_idx, test_idx)} for the (dataset, regime) cell.
 
-    inductive == cold receptor for every dataset. m2or draws it with a
-    group_receptor split seeded by `fold`; the insects use upstream's `cdhit`
-    (cold-cluster) folds. transductive uses M2OR's LORAX `rand` folds / the
-    insects' upstream `rand` folds. Insect train = upstream train+val (no
-    tuning here, so val is just more training rows).
+    inductive == COLD MOLECULE (the project's axis): m2or =
+    `inductive_molecule_v5` seeds 42-46 (folds 1-5 -> seed 41+fold); cc/hc =
+    upstream `our_inductive`. transductive = `rand` folds. cold_receptor
+    (optional) holds whole receptors out: m2or = group_receptor seeds; cc =
+    upstream `cdhit`; HC ships neither, so it has no cold_receptor cell. Insect
+    train = upstream train+val (no tuning here, so val is just more rows).
     """
     splits = {}
     if dataset == "m2or":
@@ -224,7 +227,10 @@ def make_splits(dataset, pairs, y_all, regime, folds):
             if regime == "transductive":
                 tr, va, te = load_split("transductive", f)
                 splits[f] = (tr, te)
-            else:                                     # cold receptor
+            elif regime == "inductive":               # cold MOLECULE (project axis)
+                tr, va, te = load_split("inductive_molecule_v5", 41 + f)   # folds 1-5 -> seeds 42-46
+                splits[f] = (tr, te)
+            else:                                     # cold_receptor (optional appendix)
                 trm, tem = D.split(pairs, y_all, kind="group_receptor", seed=f)
                 splits[f] = (np.where(trm)[0], np.where(tem)[0])
                 print(f"  cold_receptor fold{f}: train {trm.sum()} / test {tem.sum()} rows "
@@ -233,7 +239,8 @@ def make_splits(dataset, pairs, y_all, regime, folds):
         return splits
     # insects
     from orbind.regimes_ofm import ofm_indices, available_families
-    family = "rand" if regime == "transductive" else "cdhit"
+    family = {"transductive": "rand", "inductive": "our_inductive",
+              "cold_receptor": "cdhit"}[regime]
     if family not in available_families(dataset):
         raise SystemExit(f"{dataset} ships no {family!r} split -> no {regime} cell "
                          f"(has {available_families(dataset)})")
@@ -246,7 +253,8 @@ def make_splits(dataset, pairs, y_all, regime, folds):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dataset", default="m2or", choices=sorted(DATASETS))
-    ap.add_argument("--regime", default="transductive", choices=["transductive", "inductive"])
+    ap.add_argument("--regime", default="transductive",
+                    choices=["transductive", "inductive", "cold_receptor"])
     ap.add_argument("--folds", type=int, nargs="+", default=[1, 2, 3, 4, 5])
     ap.add_argument("--mol", default=None, help="override molecule npz")
     ap.add_argument("--extra-prot", action="append", default=[], metavar="name=path",

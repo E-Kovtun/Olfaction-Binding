@@ -69,7 +69,7 @@ def task_of(run: pathlib.Path) -> tuple[str, str]:
     return task, scope
 
 
-def summarize(pool: pathlib.Path, per_fold: bool) -> None:
+def summarize(pool: pathlib.Path, per_fold: bool, drop: set[str]) -> None:
     runs = sorted(r for r in pool.iterdir() if r.is_dir())
     rows, naive_vals, task, scope = [], None, None, None
     for r in runs:
@@ -86,6 +86,8 @@ def summarize(pool: pathlib.Path, per_fold: bool) -> None:
         if nv is not None and len(nv) and naive_vals is None:
             naive_vals = {c: nv[c].values for c in cols}
         combo = d[d["kind"] == "combo"]
+        if drop:
+            combo = combo[~combo["name"].isin(drop)]
         for name, g in combo.groupby("name", sort=True):
             g = g.sort_values("repeat")
             row = {"run": r.name, "combo": name, "folds": f"{g['repeat'].nunique()}/5"}
@@ -137,6 +139,10 @@ def main() -> None:
                     help="also print the primary metric fold by fold (a fold on the ofm "
                          "datasets is a different set of molecules, not a reseed, so its "
                          "spread is structural)")
+    ap.add_argument("--drop-combo", nargs="*", default=[],
+                    help="combo names to hide, e.g. --drop-combo cls+mol. Hides the row, "
+                         "does not touch metrics.csv -- hladis's cls+mol is a wash against its "
+                         "cls (0.729 vs 0.734 AUPRC transductive) and we report cls.")
     ap.add_argument("--base", default=str(BASE))
     args = ap.parse_args()
 
@@ -148,7 +154,7 @@ def main() -> None:
     if not pools:
         sys.exit(f"под фильтр --pool {args.pool!r} ничего не попало")
     for p in pools:
-        summarize(p, args.folds)
+        summarize(p, args.folds, set(args.drop_combo))
 
 
 if __name__ == "__main__":

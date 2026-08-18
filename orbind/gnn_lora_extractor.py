@@ -42,10 +42,11 @@ import torch.utils.checkpoint as _ckpt
 
 from . import dataset as D
 from . import mol_selection
-from .tasks import check_task
+from .tasks import check_task, batch_loss_fn
 from .gnn_extractor import (MOL, PROT, _SignedSage, _mp_edges, _edge_index_dict,
                             _edge_weights, _LABEL_AGNOSTIC_CRITERIA)
 from .lorax_extractor import _build_lora_chemberta, CHEMBERTA_CARD
+from .prosmith_extractor import _M2ORWeights   # Hladis/M2OR sample weights (LORAX protocol)
 
 
 # --------------------------------------------------------------------------- model
@@ -98,12 +99,16 @@ def _universe(pairs: pd.DataFrame, all_idx, proteins: dict, ik2smiles: dict):
 
 # --------------------------------------------------------------------------- training
 
-def _train_one(ext, tokenizer, smiles, x_prot, pos_eidx, neg_eidx, pos_ew, neg_ew,
-               mol_idx_train, prot_idx_train, y_train, hp, device, checkpoint_path=None):
-    """Full-batch graph training with a live LoRA-ChemBERTa molecule encoder.
-    Mirrors gnn_extractor._train_one (fixed epochs, no scheduler/early stop, last
-    epoch kept, grad-clip) but re-encodes all molecules through ChemBERTa every
-    step. Only the trainable subset (LoRA adapters + sage) is checkpointed."""
+def _train_one(ext, tokenizer, smiles, x_prot, pos_eidx, neg_eidx,
+               tr, va, hp, device, checkpoint_path=None):
+    """LORAX-protocol training of the graph+LoRA hybrid: the whole graph is still
+    encoded every step (LoRA-ChemBERTa over all molecules + signed message
+    passing), but supervision is MINIBATCHED over train pairs, the loss is the
+    M2OR-weighted BCE (batch_loss_fn), and the best-validation-loss epoch's
+    weights are kept -- exactly the schedule lorax_extractor/prosmith_extractor
+    use, at their lr (1e-4), not the graph's full-batch/last-epoch one. `tr`/`va`
+    are dicts of {mol,prot,y,w} index arrays for train/val. Only the trainable
+    subset (LoRA adapters + sage) is (de)serialised."""
     torch.manual_seed(hp["seed"])
     model = ext._build_model().to(device)
 
@@ -112,50 +117,64 @@ def _train_one(ext, tokenizer, smiles, x_prot, pos_eidx, neg_eidx, pos_ew, neg_e
     input_ids = tok["input_ids"].to(device)
     attn = tok["attention_mask"].to(device)
     x_prot_d = x_prot.to(device)
-    pos_eidx_d = {k: v.to(device) for k, v in pos_eidx.items()}
-    neg_eidx_d = {k: v.to(device) for k, v in neg_eidx.items()}
+    pos_d = {k: v.to(device) for k, v in pos_eidx.items()}
+    neg_d = {k: v.to(device) for k, v in neg_eidx.items()}
+    trainable_keys = set(n for n, p in model.named_parameters() if p.requires_grad)
 
-    trainable_keys = [n for n, p in model.named_parameters() if p.requires_grad]
+    def encode():
+        x_mol = model.encode_mols(input_ids, attn, hp["mol_chunk"])
+        return model.sage.encode(x_mol, x_prot_d, pos_d, neg_d)
+
     if checkpoint_path is not None and checkpoint_path.exists():
-        sd = torch.load(checkpoint_path, map_location=device)
-        model.load_state_dict(sd, strict=False)
+        model.load_state_dict(torch.load(checkpoint_path, map_location=device), strict=False)
         model.eval()
         with torch.no_grad():
-            x_mol = model.encode_mols(input_ids, attn, hp["mol_chunk"])
-            z = model.sage.encode(x_mol, x_prot_d, pos_eidx_d, neg_eidx_d)
+            z = encode()
             return z[MOL].cpu().numpy(), z[PROT].cpu().numpy(), model, trainable_keys
 
-    mi_tr = torch.as_tensor(mol_idx_train, dtype=torch.long, device=device)
-    pi_tr = torch.as_tensor(prot_idx_train, dtype=torch.long, device=device)
-    y_tr = torch.as_tensor(y_train, dtype=torch.float32, device=device)
+    def dev(a, dt=torch.long):
+        return torch.as_tensor(a, dtype=dt, device=device)
+    mi_tr, pi_tr = dev(tr["mol"]), dev(tr["prot"])
+    yt, wt = dev(tr["y"], torch.float32), dev(tr["w"], torch.float32)
+    mi_va, pi_va = dev(va["mol"]), dev(va["prot"])
+    yv, wv = dev(va["y"], torch.float32), dev(va["w"], torch.float32)
 
-    if hp["task"] == "regression":
-        loss_fn = nn.MSELoss()
-    else:
-        pos = float(y_train.sum())
-        pos_weight = torch.tensor([(len(y_train) - pos) / max(pos, 1.0)], device=device)
-        loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-
+    batch_loss = batch_loss_fn(hp["task"])
     params = [p for p in model.parameters() if p.requires_grad]
     opt = torch.optim.Adam(params, lr=hp["lr"], weight_decay=hp["weight_decay"])
 
+    n, bs = len(mi_tr), hp["batch_size"]
+    best_val, best_state = float("inf"), None
     for ep in range(hp["epochs"]):
         model.train()
-        opt.zero_grad(set_to_none=True)
-        x_mol = model.encode_mols(input_ids, attn, hp["mol_chunk"])
-        z = model.sage.encode(x_mol, x_prot_d, pos_eidx_d, neg_eidx_d)
-        loss = loss_fn(model.sage.decode(z, mi_tr, pi_tr), y_tr)
-        loss.backward()
-        nn.utils.clip_grad_norm_(params, hp["clip_grad"])
-        opt.step()
-        if (ep + 1) % hp["log_every"] == 0 or ep == 0:
-            print(f"    gnn_lora epoch {ep + 1}/{hp['epochs']}  loss={float(loss):.4f}",
-                  flush=True)
+        perm = torch.randperm(n, device=device)
+        run, seen = 0.0, 0
+        for i in range(0, n, bs):
+            b = perm[i:i + bs]
+            opt.zero_grad(set_to_none=True)
+            z = encode()
+            loss = batch_loss(model.sage.decode(z, mi_tr[b], pi_tr[b]), yt[b], wt[b])
+            loss.backward()
+            nn.utils.clip_grad_norm_(params, hp["clip_grad"])
+            opt.step()
+            run += float(loss) * len(b); seen += len(b)
+        model.eval()
+        with torch.no_grad():
+            z = encode()
+            vloss = float(batch_loss(model.sage.decode(z, mi_va, pi_va), yv, wv)) if len(mi_va) else float("inf")
+        is_best = vloss < best_val
+        if is_best:
+            best_val = vloss
+            best_state = {k: v.detach().cpu().clone()
+                          for k, v in model.state_dict().items() if k in trainable_keys}
+        print(f"    gnn_lora ep {ep + 1}/{hp['epochs']}  train={run / max(seen, 1):.4f}  "
+              f"val={vloss:.4f}{'  *best' if is_best else ''}", flush=True)
 
+    if best_state is not None:
+        model.load_state_dict(best_state, strict=False)
     model.eval()
     with torch.no_grad():
-        x_mol = model.encode_mols(input_ids, attn, hp["mol_chunk"])
-        z = model.sage.encode(x_mol, x_prot_d, pos_eidx_d, neg_eidx_d)
+        z = encode()
         return z[MOL].cpu().numpy(), z[PROT].cpu().numpy(), model, trainable_keys
 
 
@@ -179,22 +198,26 @@ def _run_models(ext, pairs, train_idx, val_idx, test_idx, seed, checkpoint_dir=N
     all_idx = np.concatenate([train_idx, val_idx, test_idx])
     mol_to_i, prot_to_i, smiles, x_prot = _universe(pairs, all_idx, ext._proteins, ik2smiles)
 
-    train_df = pairs.iloc[train_idx]
-    mol_idx_train = train_df["inchikey"].map(mol_to_i).to_numpy().copy()
-    prot_idx_train = train_df["receptor"].map(prot_to_i).to_numpy().copy()
-    y_train = train_df["label"].to_numpy(dtype=np.float32)
+    # M2OR sample weights (quality x imbalance, Hladis eq.) -- LORAX protocol; None off M2OR.
+    W = _M2ORWeights.maybe_build(pairs)
+    def pack(idx):
+        sub = pairs.iloc[idx]
+        return {"mol": sub["inchikey"].map(mol_to_i).to_numpy(),
+                "prot": sub["receptor"].map(prot_to_i).to_numpy(),
+                "y": sub["label"].to_numpy(dtype=np.float32),
+                "w": (np.ones(len(idx), np.float32) if W is None else W.per_row[idx].astype(np.float32))}
+    tr, va = pack(train_idx), pack(val_idx)
 
     pos, neg = _mp_edges(pairs, train_idx, mol_to_i, prot_to_i, ext.q, ext.criterion,
                          ext.edge_threshold, ext.k_mode, ext.task)
     n_pos, n_neg = len(pos[0]), len(neg[0])
     print(f"  {ext.name}: MP graph {n_pos} positive / {n_neg} negative edges "
           f"(q={ext.q}, criterion={ext.criterion}, mols={len(smiles)}, "
-          f"lora_r={ext.lora_r}, epochs={ext.epochs})", flush=True)
+          f"lora_r={ext.lora_r}, lr={ext.lr}, epochs={ext.epochs}, batch={ext.batch_size})", flush=True)
     if n_pos == 0 or n_neg == 0:
         raise ValueError(f"{ext.name}: signed MP needs both edge signs, got "
                          f"{n_pos} positive / {n_neg} negative.")
     pos_eidx, neg_eidx = _edge_index_dict(pos, neg)
-    pos_ew, neg_ew = _edge_weights(pos, neg)
 
     results = []
     for m in range(ext.n_models):
@@ -202,10 +225,10 @@ def _run_models(ext, pairs, train_idx, val_idx, test_idx, seed, checkpoint_dir=N
         ckpt = (pathlib.Path(checkpoint_dir) / f"gnnlora_{ext.name}_model{m}.pt"
                 if checkpoint_dir is not None else None)
         z_mol, z_prot, model, trainable_keys = _train_one(
-            ext, tokenizer, smiles, x_prot, pos_eidx, neg_eidx, pos_ew, neg_ew,
-            mol_idx_train, prot_idx_train, y_train, hp, device, checkpoint_path=ckpt)
+            ext, tokenizer, smiles, x_prot, pos_eidx, neg_eidx, tr, va, hp, device,
+            checkpoint_path=ckpt)
         if ckpt is not None and not ckpt.exists():
-            torch.save({k: v for k, v in model.state_dict().items() if k in set(trainable_keys)}, ckpt)
+            torch.save({k: v for k, v in model.state_dict().items() if k in trainable_keys}, ckpt)
         results.append((m, z_mol, z_prot))
 
     def features_for(idx):
@@ -255,14 +278,15 @@ class GnnLoraExtractor:
     lora_alpha: int = 8
     lora_dropout: float = 0.1
     mol_hidden: int = 384
-    # graph training protocol (verbatim from GnnSignedExtractor)
-    lr: float = 3e-3
-    weight_decay: float = 1e-4
+    # LORAX training protocol: low lr, minibatched M2OR-weighted BCE, best-val
+    # checkpoint. Full graph still encoded every step; only supervision is batched.
+    lr: float = 1e-4
+    weight_decay: float = 0.0
     clip_grad: float = 1.0
-    epochs: int = 900
+    epochs: int = 15
+    batch_size: int = 256
     max_smiles_len: int = 256
     mol_chunk: int = 128          # molecules per checkpointed ChemBERTa forward
-    log_every: int = 100
     seed_offset: int = 5000
     task: str = "classification"
     pooling: str = "signed_sage_lora"
@@ -307,9 +331,8 @@ class GnnLoraExtractor:
 
     def _hp(self, seed):
         return dict(lr=self.lr, weight_decay=self.weight_decay, clip_grad=self.clip_grad,
-                    epochs=self.epochs, task=self.task, seed=seed,
-                    max_smiles_len=self.max_smiles_len, mol_chunk=self.mol_chunk,
-                    log_every=self.log_every)
+                    epochs=self.epochs, batch_size=self.batch_size, task=self.task, seed=seed,
+                    max_smiles_len=self.max_smiles_len, mol_chunk=self.mol_chunk)
 
     def covered(self, pairs, idx):
         self._ensure_loaded()

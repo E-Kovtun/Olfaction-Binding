@@ -183,6 +183,12 @@ _FACTORY_SPEC = {
     # DeepGraphInfomax auxiliary loss (shared scope, lambda=0.5).
     "gnn_signed": ("orbind.gnn_extractor", "GnnSignedExtractor"),
     "gnn_signed_dgi": ("orbind.gnn_extractor", "GnnSignedDgiExtractor"),
+    # signed GNN whose MOLECULE node features come from a live LoRA-ChemBERTa
+    # (LORAX's encoder), trained end-to-end with the graph; protein stays frozen
+    # mean-ESM. Pulls torch_geometric + transformers + peft. Fields:
+    # "name=gnn_lora[:protein_path:chemberta_card[:n_models[:emit[:q[:criterion[:edge_threshold[:k_mode[:lora_r[:epochs]]]]]]]]]".
+    # See orbind/gnn_lora_extractor.py.
+    "gnn_lora": ("orbind.gnn_lora_extractor", "GnnLoraExtractor"),
     # ProSmith/MPP transformer over a *per-residue* protein npz + pooled molecule npz
     # (torch only): "name=prosmith[:protein_path:molecule_path[:n_models[:pretrained_path[:faithful_bugs]]]]".
     # pretrained_path = upstream BindingDB checkpoint; empty trains from scratch
@@ -215,6 +221,7 @@ _FACTORY_SPEC = {
 _ENTITY_TYPES    = {"esm", "gin"}
 _ATTENTION_TYPES = {"attn_noisy_or", "attn_lse"}
 _GNN_TYPES       = {"gnn_signed", "gnn_signed_dgi"}
+_GNNLORA_TYPES   = {"gnn_lora"}
 _PROSMITH_TYPES  = {"prosmith"}
 _LORAX_TYPES     = {"lorax"}
 _MOLOR_TYPES     = {"molor"}
@@ -290,6 +297,33 @@ def parse_source_arg(raw: str):
             kwargs["edge_center"] = parts[9]
         if len(parts) > 10 and parts[10]:
             kwargs["edge_weight_mode"] = parts[10]
+        return name, _factory(type_)(name=name, **kwargs)
+
+    if type_ in _GNNLORA_TYPES:
+        # gnn_lora: signed GNN + live LoRA-ChemBERTa molecule encoder. Same graph
+        # fields as gnn_signed but field 2 is a chemberta_card (HF id), not an npz,
+        # and fields 9/10 are lora_r/epochs instead of the edge-mode knobs.
+        kwargs = {}
+        if len(parts) > 1 and parts[1]:
+            kwargs["protein_path"] = parts[1]
+        if len(parts) > 2 and parts[2]:
+            kwargs["chemberta_card"] = parts[2]
+        if len(parts) > 3 and parts[3]:
+            kwargs["n_models"] = int(parts[3])
+        if len(parts) > 4 and parts[4]:
+            kwargs["emit"] = parts[4]
+        if len(parts) > 5 and parts[5]:
+            kwargs["q"] = float(parts[5])
+        if len(parts) > 6 and parts[6]:
+            kwargs["criterion"] = parts[6]
+        if len(parts) > 7 and parts[7]:
+            kwargs["edge_threshold"] = float(parts[7])
+        if len(parts) > 8 and parts[8]:
+            kwargs["k_mode"] = parts[8]
+        if len(parts) > 9 and parts[9]:
+            kwargs["lora_r"] = int(parts[9])
+        if len(parts) > 10 and parts[10]:
+            kwargs["epochs"] = int(parts[10])
         return name, _factory(type_)(name=name, **kwargs)
 
     if type_ in _PROSMITH_TYPES:

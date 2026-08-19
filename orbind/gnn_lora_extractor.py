@@ -44,7 +44,7 @@ from . import dataset as D
 from . import mol_selection
 from .tasks import check_task, batch_loss_fn
 from .gnn_extractor import (MOL, PROT, _SignedSage, _mp_edges, _edge_index_dict,
-                            _edge_weights, _LABEL_AGNOSTIC_CRITERIA)
+                            _edge_weights, _LABEL_AGNOSTIC_CRITERIA, _fit_pca)
 from .lorax_extractor import _build_lora_chemberta, CHEMBERTA_CARD
 from .prosmith_extractor import _M2ORWeights   # Hladis/M2OR sample weights (LORAX protocol)
 
@@ -58,10 +58,11 @@ class _GnnLoraModel(nn.Module):
     [molecule || protein] nodes."""
 
     def __init__(self, mol_model, mol_hidden: int, prot_dim: int, hidden: int,
-                 dropout: float):
+                 dropout: float, pca_mol=None, pca_prot=None):
         super().__init__()
         self.mol_model = mol_model
-        self.sage = _SignedSage(mol_hidden, prot_dim, hidden, dropout, weighted=False)
+        self.sage = _SignedSage(mol_hidden, prot_dim, hidden, dropout, weighted=False,
+                                pca_mol=pca_mol, pca_prot=pca_prot)
 
     def encode_mols(self, input_ids, attn, chunk: int) -> torch.Tensor:
         """Mean-pooled LoRA-ChemBERTa embedding for every molecule in the node
@@ -208,6 +209,30 @@ def _run_models(ext, pairs, train_idx, val_idx, test_idx, seed, checkpoint_dir=N
                 "w": (np.ones(len(idx), np.float32) if W is None else W.per_row[idx].astype(np.float32))}
     tr, va = pack(train_idx), pack(val_idx)
 
+    if ext.dummy_compression:
+        tr_prots = pd.unique(pairs.iloc[train_idx]["receptor"])
+        ext._pca_prot = _fit_pca(np.stack([ext._proteins[p] for p in tr_prots]), ext.hidden)
+        tr_mols = pd.unique(pairs.iloc[train_idx]["inchikey"])
+        tr_smiles = [ik2smiles[m] for m in tr_mols]
+        tmp, _ = _build_lora_chemberta(ext.chemberta_card, ext.lora_r, ext.lora_alpha, ext.lora_dropout)
+        tmp = tmp.to(device).eval()
+        tk = tokenizer(tr_smiles, padding=True, truncation=True,
+                       max_length=ext.max_smiles_len, return_tensors="pt")
+        ii, am = tk["input_ids"].to(device), tk["attention_mask"].to(device)
+        embs = []
+        with torch.no_grad():
+            for i in range(0, len(tr_smiles), ext.mol_chunk):
+                h = tmp(input_ids=ii[i:i + ext.mol_chunk],
+                        attention_mask=am[i:i + ext.mol_chunk]).last_hidden_state
+                m = am[i:i + ext.mol_chunk].unsqueeze(-1).float()
+                embs.append(((h * m).sum(1) / (m.sum(1) + 1e-8)).cpu().numpy())
+        ext._pca_mol = _fit_pca(np.concatenate(embs, 0), ext.hidden)
+        del tmp
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+        print(f"  {ext.name}: dummy_compression PCA fit "
+              f"({len(tr_mols)} train mols / {len(tr_prots)} train prots)", flush=True)
+
     pos, neg = _mp_edges(pairs, train_idx, mol_to_i, prot_to_i, ext.q, ext.criterion,
                          ext.edge_threshold, ext.k_mode, ext.task)
     n_pos, n_neg = len(pos[0]), len(neg[0])
@@ -278,6 +303,9 @@ class GnnLoraExtractor:
     lora_alpha: int = 8
     lora_dropout: float = 0.1
     mol_hidden: int = 384
+    # dummy_compression: freeze the sage's input projections to a train-fit PCA
+    # (protein on frozen ESM, molecule on the initial ChemBERTa train outputs).
+    dummy_compression: bool = False
     # LORAX training protocol: low lr, minibatched M2OR-weighted BCE, best-val
     # checkpoint. Full graph still encoded every step; only supervision is batched.
     lr: float = 1e-4
@@ -305,6 +333,8 @@ class GnnLoraExtractor:
         self.path = f"{self.protein_path} + LoRA({self.chemberta_card})"
         self._proteins = None
         self._tokenizer = None
+        self._pca_mol = None
+        self._pca_prot = None
 
     def _ensure_loaded(self):
         if self._proteins is None:
@@ -327,7 +357,8 @@ class GnnLoraExtractor:
                                                   self.lora_alpha, self.lora_dropout)
         prot_dim = next(iter(self._proteins.values())).shape[-1]
         self.mol_hidden = hidden
-        return _GnnLoraModel(mol_model, hidden, prot_dim, self.hidden, self.dropout)
+        return _GnnLoraModel(mol_model, hidden, prot_dim, self.hidden, self.dropout,
+                             pca_mol=self._pca_mol, pca_prot=self._pca_prot)
 
     def _hp(self, seed):
         return dict(lr=self.lr, weight_decay=self.weight_decay, clip_grad=self.clip_grad,

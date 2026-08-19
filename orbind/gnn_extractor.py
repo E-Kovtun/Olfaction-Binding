@@ -191,6 +191,29 @@ def _edge_weights(pos, neg):
 
 # --------------------------------------------------------------------------- model
 
+def _fit_pca(X: np.ndarray, k: int):
+    """PCA basis (components [k, dim], mean [dim]) fit on train node features,
+    for the `dummy_compression` variant: the learned input projection to `hidden`
+    is replaced by this fixed linear map. Fit on TRAIN entities only (no leak)."""
+    from sklearn.decomposition import PCA
+    n, d = X.shape
+    if k > min(n, d):
+        raise ValueError(f"dummy_compression: PCA n_components={k} needs "
+                         f"min(n_train={n}, dim={d}) >= {k}")
+    p = PCA(n_components=k, random_state=0).fit(X.astype(np.float64))
+    return p.components_.astype(np.float32), p.mean_.astype(np.float32)
+
+
+def _freeze_pca(linear: nn.Linear, comp: np.ndarray, mean: np.ndarray):
+    """Overwrite a Linear with a fixed PCA projection and freeze it, so
+    `linear(x) = comp @ (x - mean)` and it carries no trainable parameters."""
+    with torch.no_grad():
+        linear.weight.copy_(torch.as_tensor(comp, dtype=linear.weight.dtype))
+        linear.bias.copy_(torch.as_tensor(-(comp @ mean), dtype=linear.bias.dtype))
+    linear.weight.requires_grad_(False)
+    linear.bias.requires_grad_(False)
+
+
 class _WSAGE(MessagePassing):
     """Weighted bipartite conv used ONLY in the experimental magnitude-weighted
     edge mode (`edge_weight_mode="magnitude"`). Same shape as the SAGEConv it
@@ -232,7 +255,7 @@ class _SignedSage(nn.Module):
     LEAK = 0.1
 
     def __init__(self, mol_dim: int, prot_dim: int, hidden: int, dropout: float,
-                 weighted: bool = False):
+                 weighted: bool = False, pca_mol=None, pca_prot=None):
         super().__init__()
         self.weighted = weighted
         # weighted mode swaps SAGEConv for the edge-weight-aware _WSAGE; the
@@ -241,6 +264,12 @@ class _SignedSage(nn.Module):
             return _WSAGE(hidden) if weighted else SAGEConv((-1, -1), hidden)
         self.proj_mol = nn.Linear(mol_dim, hidden)
         self.proj_prot = nn.Linear(prot_dim, hidden)
+        # dummy_compression: freeze the two input projections to a fixed PCA basis
+        # fit on train features, so ~426k learned weights become non-trainable.
+        if pca_mol is not None:
+            _freeze_pca(self.proj_mol, *pca_mol)
+        if pca_prot is not None:
+            _freeze_pca(self.proj_prot, *pca_prot)
         self.conv1 = HeteroConv({ETYPE: mk(), RTYPE: mk()}, aggr="sum")
         self.conv1_neg = HeteroConv({ETYPE_NEG: mk(), RTYPE_NEG: mk()}, aggr="sum")
         self.conv2 = HeteroConv({ETYPE: mk(), RTYPE: mk()}, aggr="sum")
@@ -407,6 +436,15 @@ def _run_models(ext, pairs: pd.DataFrame, train_idx, val_idx, test_idx, seed: in
     all_idx = np.concatenate([train_idx, val_idx, test_idx])
     mol_to_i, prot_to_i, x_mol, x_prot = _build_universe(pairs, all_idx, ext._proteins, ext._molecules)
 
+    if getattr(ext, "dummy_compression", False):
+        tr_mols = pd.unique(pairs.iloc[train_idx]["inchikey"])
+        tr_prots = pd.unique(pairs.iloc[train_idx]["receptor"])
+        ext._pca_mol = _fit_pca(np.stack([ext._molecules[m] for m in tr_mols]), ext.hidden)
+        ext._pca_prot = _fit_pca(np.stack([ext._proteins[p] for p in tr_prots]), ext.hidden)
+        print(f"  {ext.name}: dummy_compression PCA fit on {len(tr_mols)} train mols / "
+              f"{len(tr_prots)} train prots -> hidden {ext.hidden} "
+              f"(frozen input projections)", flush=True)
+
     train_df = pairs.iloc[train_idx]
     mol_idx_train = train_df["inchikey"].map(mol_to_i).to_numpy().copy()
     prot_idx_train = train_df["receptor"].map(prot_to_i).to_numpy().copy()
@@ -528,6 +566,10 @@ class GnnSignedExtractor:
     n_models: int = 1
     seed_offset: int = 5000
     emit: str = "prot"
+    # dummy_compression: replace the learned input projections (mol_dim->hidden,
+    # prot_dim->hidden) with a fixed PCA fit on train node features. Drops ~426k
+    # learned weights; message passing + decoder still train on top.
+    dummy_compression: bool = False
     pooling: str = "signed_sage"
     dgi_weight: float = 0.0            # >0 enables the DeepGraphInfomax auxiliary loss
     dgi_scope: str = "shared"          # "shared" (mol+prot) or "prot"
@@ -551,6 +593,8 @@ class GnnSignedExtractor:
             raise ValueError(f"edge_weight_mode must be 'none' or 'magnitude', got {self.edge_weight_mode!r}")
         self._proteins = D.load_npz_dict(self.protein_path)
         self._molecules = D.load_npz_dict(self.molecule_path)
+        self._pca_mol = None
+        self._pca_prot = None
         per_model = self.hidden if self.emit == "prot" else 2 * self.hidden
         self.dim_out = self.n_models * per_model
         self.path = f"{self.protein_path} + {self.molecule_path}"
@@ -559,7 +603,8 @@ class GnnSignedExtractor:
         mol_dim = next(iter(self._molecules.values())).shape[-1]
         prot_dim = next(iter(self._proteins.values())).shape[-1]
         return _SignedSage(mol_dim, prot_dim, self.hidden, self.dropout,
-                           weighted=(self.edge_weight_mode != "none"))
+                           weighted=(self.edge_weight_mode != "none"),
+                           pca_mol=self._pca_mol, pca_prot=self._pca_prot)
 
     def _hp(self, seed):
         return dict(lr=self.lr, weight_decay=self.weight_decay, clip_grad=self.clip_grad,

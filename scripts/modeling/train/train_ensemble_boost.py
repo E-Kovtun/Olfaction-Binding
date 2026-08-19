@@ -297,6 +297,9 @@ def parse_source_arg(raw: str):
             kwargs["edge_center"] = parts[9]
         if len(parts) > 10 and parts[10]:
             kwargs["edge_weight_mode"] = parts[10]
+        # field 11: dummy_compression (freeze input projections to a train-fit PCA).
+        if len(parts) > 11 and parts[11]:
+            kwargs["dummy_compression"] = parts[11] not in ("0", "false", "False")
         return name, _factory(type_)(name=name, **kwargs)
 
     if type_ in _GNNLORA_TYPES:
@@ -324,6 +327,8 @@ def parse_source_arg(raw: str):
             kwargs["lora_r"] = int(parts[9])
         if len(parts) > 10 and parts[10]:
             kwargs["epochs"] = int(parts[10])
+        if len(parts) > 11 and parts[11]:
+            kwargs["dummy_compression"] = parts[11] not in ("0", "false", "False")
         return name, _factory(type_)(name=name, **kwargs)
 
     if type_ in _PROSMITH_TYPES:

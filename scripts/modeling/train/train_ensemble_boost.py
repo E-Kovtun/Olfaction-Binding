@@ -183,10 +183,12 @@ _FACTORY_SPEC = {
     # DeepGraphInfomax auxiliary loss (shared scope, lambda=0.5).
     "gnn_signed": ("orbind.gnn_extractor", "GnnSignedExtractor"),
     "gnn_signed_dgi": ("orbind.gnn_extractor", "GnnSignedDgiExtractor"),
-    # signed GNN whose MOLECULE node features come from a live LoRA-ChemBERTa
-    # (LORAX's encoder), trained end-to-end with the graph; protein stays frozen
-    # mean-ESM. Pulls torch_geometric + transformers + peft. Fields:
-    # "name=gnn_lora[:protein_path:chemberta_card[:n_models[:emit[:q[:criterion[:edge_threshold[:k_mode[:lora_r[:epochs]]]]]]]]]".
+    # TWO-STAGE signed GNN: stage 1 fine-tunes LoRA-ChemBERTa the LORAX way and
+    # freezes it -> static per-molecule features; stage 2 runs our signed graph on
+    # those + frozen mean-ESM proteins, our protocol. Pulls torch_geometric +
+    # transformers + peft. Fields (field 1 = MEAN-pooled ESM npz; field 10 =
+    # PER-RESIDUE ESM npz for LORAX cross-attn):
+    # "name=gnn_lora[:protein_path:chemberta_card[:n_models[:emit[:q[:criterion[:edge_threshold[:k_mode[:lora_r[:lora_protein_path[:dummy_compression]]]]]]]]]]".
     # See orbind/gnn_lora_extractor.py.
     "gnn_lora": ("orbind.gnn_lora_extractor", "GnnLoraExtractor"),
     # ProSmith/MPP transformer over a *per-residue* protein npz + pooled molecule npz
@@ -303,9 +305,13 @@ def parse_source_arg(raw: str):
         return name, _factory(type_)(name=name, **kwargs)
 
     if type_ in _GNNLORA_TYPES:
-        # gnn_lora: signed GNN + live LoRA-ChemBERTa molecule encoder. Same graph
-        # fields as gnn_signed but field 2 is a chemberta_card (HF id), not an npz,
-        # and fields 9/10 are lora_r/epochs instead of the edge-mode knobs.
+        # gnn_lora: TWO-STAGE signed GNN. Stage 1 fine-tunes LoRA-ChemBERTa the
+        # LORAX way, freezes it -> static per-molecule features; stage 2 runs our
+        # signed graph on those, our protocol. field 1 = MEAN-pooled ESM npz (the
+        # graph's protein node features); field 2 = chemberta_card (HF id); graph
+        # fields 3-8 mirror gnn_signed; field 9 = lora_r; field 10 = the
+        # PER-RESIDUE ESM npz for LORAX cross-attention (default set); field 11 =
+        # dummy_compression. See orbind/gnn_lora_extractor.py.
         kwargs = {}
         if len(parts) > 1 and parts[1]:
             kwargs["protein_path"] = parts[1]
@@ -326,7 +332,7 @@ def parse_source_arg(raw: str):
         if len(parts) > 9 and parts[9]:
             kwargs["lora_r"] = int(parts[9])
         if len(parts) > 10 and parts[10]:
-            kwargs["epochs"] = int(parts[10])
+            kwargs["lora_protein_path"] = parts[10]
         if len(parts) > 11 and parts[11]:
             kwargs["dummy_compression"] = parts[11] not in ("0", "false", "False")
         return name, _factory(type_)(name=name, **kwargs)

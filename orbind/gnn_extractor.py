@@ -499,6 +499,12 @@ def _run_models(ext, pairs: pd.DataFrame, train_idx, val_idx, test_idx, seed: in
         pi = sub["receptor"].map(prot_to_i).to_numpy()
         if ext.emit == "prot":
             blocks = [z_prot[pi] for _, _, z_prot, _ in results]
+        elif ext.emit == "mol":
+            # mirror of emit="prot": the graph-refined MOLECULE vector, for the
+            # cold-RECEPTOR regime where molecules are the seen (transductive)
+            # side, so pairing [raw receptor || refined molecule] is the honest
+            # reversal of our cold-molecule "refined protein" paradigm.
+            blocks = [z_mol[mi] for _, z_mol, _, _ in results]
         else:
             blocks = [np.concatenate([z_mol[mi], z_prot[pi]], axis=1)
                        for _, z_mol, z_prot, _ in results]
@@ -577,8 +583,8 @@ class GnnSignedExtractor:
     model_name: str = field(init=False, default="gnn_signed")
 
     def __post_init__(self):
-        if self.emit not in ("prot", "both"):
-            raise ValueError(f"emit must be 'prot' or 'both', got {self.emit!r}")
+        if self.emit not in ("prot", "mol", "both"):
+            raise ValueError(f"emit must be 'prot', 'mol' or 'both', got {self.emit!r}")
         if self.criterion not in mol_selection.CRITERIA:
             raise ValueError(f"criterion must be one of {mol_selection.CRITERIA}, "
                              f"got {self.criterion!r}")
@@ -595,7 +601,7 @@ class GnnSignedExtractor:
         self._molecules = D.load_npz_dict(self.molecule_path)
         self._pca_mol = None
         self._pca_prot = None
-        per_model = self.hidden if self.emit == "prot" else 2 * self.hidden
+        per_model = 2 * self.hidden if self.emit == "both" else self.hidden
         self.dim_out = self.n_models * per_model
         self.path = f"{self.protein_path} + {self.molecule_path}"
 

@@ -283,14 +283,19 @@ class GnnLoraExtractor:
                     epochs=self.epochs, task=self.task, seed=seed)
 
     def covered(self, pairs, idx):
-        # Graph-stage coverage (mean protein + a static molecule feature). Called
-        # by the graph runner AFTER stage 1 populates `_molecules`.
+        # A row is usable iff both ESM views (mean for the graph, per-residue for
+        # LORAX) have its receptor AND it has a SMILES -- the static molecule
+        # feature is then DERIVED, so it is not a separate coverage condition.
+        # Must not reference `_molecules`: the ensemble intersects coverage UP
+        # FRONT (ensemble.py, on_missing="drop") to pick the drop mask, before
+        # stage 1 has produced any static vectors -- checking `_molecules` there
+        # marks every row uncovered and empties the train split.
         self._ensure_loaded()
         prot = pairs["receptor"].to_numpy()[idx]
-        mol = pairs["inchikey"].to_numpy()[idx]
-        mols = self._molecules or {}
-        return np.fromiter(((p in self._proteins) and (m in mols) for p, m in zip(prot, mol)),
-                           dtype=bool, count=len(idx))
+        smi = pairs["smiles"].to_numpy()[idx]
+        return np.fromiter(((p in self._proteins) and (p in self._lora_proteins)
+                            and isinstance(s, str) and len(s) > 0
+                            for p, s in zip(prot, smi)), dtype=bool, count=len(idx))
 
     def fit_transform(self, pairs, train_idx, val_idx, test_idx, seed, checkpoint_dir=None):
         return _run_models(self, pairs, train_idx, val_idx, test_idx, seed, checkpoint_dir=checkpoint_dir)

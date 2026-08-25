@@ -1,75 +1,291 @@
 # orbind
 
-Research code and executable notebooks for modelling olfactory receptor–molecule interactions in M2OR. The repository contains the experiment definitions, analysis notebooks, and training/evaluation code. Datasets, embeddings, model checkpoints, logs, and generated result files are intentionally distributed separately.
+Receptor-side modelling of olfactory receptor–odorant binding.
 
-## Quick start
+The question the code is built around is **what a protein representation has to
+carry** for a binding model to generalize. A plain gradient-boosted head over
+frozen embeddings (`ESM ‖ ChemBERTa → XGBoost`) is a very strong baseline that
+mostly reads *receptor identity*; this repository contains the experiments that
+measure that, the refinement that adds function-derived structure to the
+receptor vector (a signed bipartite receptor↔odorant graph), and the head-to-head
+against four published interaction models re-implemented on our splits.
 
-The supported runtime is CPython 3.11. The main environment is managed by uv in the repository-level `.venv`.
+Three datasets, one pipeline: **M2OR** (human ORs, binary), **Carey** (`cc`,
+mosquito *AgOr*, 50×110 continuous) and **Hallem–Carlson** (`hc`, fly, 24×110
+continuous).
+
+---
+
+## Layout
+
+```text
+orbind/       the library: datasets, splits, extractors, the ensembler
+scripts/      entry points (preprocessing, embeddings, training, analysis)
+notebooks/    display/analysis notebooks; the models they read come from scripts
+notes/        protocol decisions and the paper's storyline
+legacy/       every closed line — scripts, notebooks, notes (see legacy/README.md)
+experiments/  self-contained side directions with their own dependencies
+data/         external datasets and embeddings (not versioned — see data/README.md)
+results/      run outputs: metrics, logs, checkpoints (not versioned)
+```
+
+Two rules make the tree readable:
+
+* **Nothing in `legacy/` feeds a paper table**, and nothing live imports from it.
+  Most of it is a negative result kept so nobody re-runs it. Archived *library*
+  modules are the one exception to the location: they sit in `orbind/legacy/`
+  because they must stay on the import path for archived consumers to run.
+* **Notebooks never train the models they display.** Every number in the paper
+  comes from a script writing to `results/`.
+
+---
+
+## Environments
+
+Four, on purpose — the source dispatch in the trainer imports each method's deps
+lazily, so a ProSmith/LORAX run needs no PyG and the fragile torch↔PyG pin stays
+confined to the graph pipeline.
+
+| env | path | holds |
+|---|---|---|
+| project | `.venv` | graph + ensemble pipeline (torch, torch-geometric, xgboost) |
+| controls | `.venv-controls` | ProSmith / LORAX baselines, PyG-free |
+| embeddings | `.venv-embeddings` | run-once embedding generation (fair-esm, deepchem, rdkit) |
+| molor | `.venv-molor` | MolOR only (dgl 2.4 + dgllife — install `dgl` **before** `dgllife`) |
 
 ```bash
 uv python install 3.11
-uv sync --frozen
-uv run python -m ipykernel install --user --name orbind --display-name "orbind (uv)"
-uv run jupyter lab
+uv sync --frozen                 # the project env (.venv)
+bash scripts/setup_envs.sh       # controls + embeddings
 ```
 
-Open notebooks from the repository root. Their setup cells locate the root via `pyproject.toml`, so they also work when Jupyter starts inside a notebook subdirectory.
+Scripts add the repo root to `sys.path` themselves, so `orbind` imports without
+being installed — call an env's interpreter directly:
+`.venv-controls/bin/python scripts/modeling/train/train_ensemble_boost.py ...`.
 
-The default PyTorch build installed on this workstation is CPU-only. GPU execution is supported by the graph scripts through `--device auto`, but the CUDA PyTorch installation must be prepared and validated on the target machine separately.
+**Running a method in the wrong env is the failure mode to watch for.** It does
+not always crash: it can silently fall back to an existing checkpoint. A MolOR
+"training run" that finished in 5 s was exactly this.
 
-## External data
+---
 
-`data/` is not versioned. Unpack the external data bundle into the repository so that paths begin with `data/processed/`, `data/embeddings/`, and, for the full_full/LORAX `transductive` splits, `data/splits_indexes/lorax_m2or/` (see that folder's README for why these 5 folds are kept as their own borrowed split rather than merged into our own conventions). The current code deliberately uses repository-relative paths rather than machine-specific absolute paths.
+## Data
 
-Until the data bundle receives a formal manifest, the notebooks themselves are the most precise record of the files required by each experiment.
+`data/` is not versioned. **[`data/README.md`](data/README.md)** is the manifest:
+what each file is, which script produces it, and which experiment needs it.
+
+---
+
+## The pipeline: one entry point
+
+Every table in the paper comes from
+[`scripts/modeling/train/train_ensemble_boost.py`](scripts/modeling/train/train_ensemble_boost.py).
+It fits one boosting head per *combination of sources* and writes a timestamped
+run folder under `results/ensemble_logs/`.
+
+**Sources.** Each `--source name=type:...` registers one embedding extractor.
+Entity-level ones (`esm`, `gin`) are static npz lookups; the rest train their own
+model per fold and emit a pair-level `cls` vector:
+
+| type | what it is |
+|---|---|
+| `esm`, `gin` | frozen protein / molecule embeddings from an npz |
+| `gnn_signed` | **ours** — signed bipartite receptor↔odorant graph, refines the receptor vector |
+| `lorax` | LoRA-ChemBERTa + cross-attention over frozen per-residue ESM-1b |
+| `prosmith` | ProSmith/MPP transformer over per-residue protein + pooled molecule |
+| `molor` | dgllife GCN cross-attending frozen per-residue ESM-1b |
+| `hladis` | Receptor2Odorant (ICLR 2023): MPNN-attention, receptor broadcast onto every atom |
+
+**Combos.** `--combos "1 2 12"` is a digit-string mini-language: each digit is the
+**1-based position of a `--source` flag on that command line**. With
+`--source cls=... --source prot=... --source mol=...`, `1` = cls alone, `23` =
+prot+mol (the boosting baseline), `123` = cls+prot+mol.
+
+> Adding or reordering a `--source` flag silently changes what every digit means.
+> Combo names in `metrics.csv` are written from the source *names*, so read those,
+> never the digits, when comparing runs.
+
+**Regimes and splits.**
+
+| `--regime` | splits | flag |
+|---|---|---|
+| `curated_full` | stratified / group_molecule / group_receptor over a pairs csv | `--split`, `--seeds` |
+| `full_full` | M2OR on LORAX's own pool: `transductive`, `inductive_molecule`, `inductive_molecule_v5` | `--full-full-mode`, `--repeats` |
+| `ofm` | Carey / Hallem: `rand`, `cdhit`, `scaf`, `our_inductive` | `--dataset`, `--split-family`, `--repeats` |
+
+`inductive_molecule_v5` is the cold-molecule split every M2OR baseline is compared
+on. On the insect datasets the cold-molecule split of record is **`our_inductive`**,
+ours, not upstream's `scaf` — see [Split validity](#split-validity) below.
+
+**Task.** `--task {classification,regression}`; `--regime ofm` defaults to
+regression, which swaps the head to `XGBRegressor` and the metrics to
+R²/RMSE/MAE/Pearson/Spearman.
+
+---
+
+## Reproducing the paper
+
+All runs go to `results/ensemble_logs/<pool>/<run>/metrics.csv`, one row per
+(fold, combo) plus a `naive[train-mean]` row. Pool names below are the ones the
+recorded results use.
+
+Shared paths (M2OR):
+
+```bash
+PROT=data/embeddings/proteins/esm1b_650m_mean.npz
+PRES=data/embeddings/proteins/esm1b_650m_per_residue_full_full.npz
+MOL=data/embeddings/molecules/chemberta_77m_m2or.npz
+```
+
+### T1 / T1b — competitors head-to-head on M2OR
+
+Every method as a `cls` source, scored both alone (T1) and concatenated with the
+raw protein and molecule embeddings (T1b), against the boosting base.
+Pools: `m2or-{transductive,inductive}-chemberta-fixed`.
+
+```bash
+.venv-controls/bin/python scripts/modeling/train/train_ensemble_boost.py \
+    --regime full_full --full-full-mode inductive_molecule_v5 \
+    --run-name inductive_lorax_chemberta \
+    --source cls=lorax \
+    --source prot=esm:$PROT:esm1b_t33_650M_UR50S \
+    --source mol=gin:$MOL:chemberta_77m \
+    --combos "1 123" --on-missing drop --max-parallel 1 --repeats 42 43 44 45 46
+```
+
+Swap `cls=lorax` for `cls=prosmith::::data/external/ofm/saved_model/pretraining_IC50_6gpus_bs144_1.5e-05_layers6.txt.pkl`,
+`cls=hladis`, or (in `.venv-molor`) `cls=molor`. Our graph runs in the project env:
+
+```bash
+.venv/bin/python scripts/modeling/train/train_ensemble_boost.py \
+    --regime full_full --full-full-mode inductive_molecule_v5 \
+    --run-name inductive_gnn99signed_chemberta \
+    --source cls=gnn_signed:$PROT:$MOL \
+    --source prot=esm:$PROT:esm1b_t33_650M_UR50S \
+    --source mol=gin:$MOL:chemberta_77m \
+    --combos "13 123" --on-missing drop --repeats 42 43 44 45 46
+```
+
+`gnn_signed` defaults are the headline configuration: `q=0.99`,
+`criterion=greedy_pair_cover`, `emit=prot`, `n_models=1`. The graph's headline row
+is `cls+mol` (`13`) — it deliberately excludes raw ESM. Replace
+`--full-full-mode inductive_molecule_v5` with `transductive` and `--repeats 1 2 3 4 5`
+for the other regime.
+
+### T2 — molecule-source robustness (M2OR)
+
+The same graph-vs-base comparison with `mol` set to each of ChemBERTa, GIN and
+ECFP, both regimes: six pools `m2or-{inductive,transductive}-{chemberta,gin,ecfp}-fixed`.
+Only the `mol=` path changes (`gin_supervised_contextpred_all_m2or.npz`,
+`ecfp_m2or.npz`), and `gnn_signed`'s own molecule field with it.
+
+### T4 / T5 — transfer to insects (Carey, Hallem–Carlson)
+
+Pools `{cc,hc}-{rand,ourind}-molcross-fixed`; `rand` is the transductive column,
+`our_inductive` the cold-molecule one. Regression throughout.
+
+```bash
+.venv/bin/python scripts/modeling/train/train_ensemble_boost.py \
+    --regime ofm --dataset cc --split-family our_inductive \
+    --run-name cc_ourind_gnn_chemberta \
+    --source cls=gnn_signed:data/embeddings/proteins/esm1b_650m_mean_cc.npz:data/embeddings/molecules/chemberta_77m_cc.npz \
+    --source prot=esm:data/embeddings/proteins/esm1b_650m_mean_cc.npz:esm1b_t33_650M_UR50S \
+    --source mol=gin:data/embeddings/molecules/chemberta_77m_cc.npz:chemberta_77m \
+    --combos "13 23" --on-missing drop --repeats 1 2 3 4 5
+```
+
+A `_pm` run-name suffix marks the variant that also adds raw ESM (`cls+prot+mol`);
+it is null everywhere on these datasets. Only the `*-molcross-fixed` complexes feed
+the paper tables — the other cc/hc complexes on disk are older exploratory grids.
+
+### Tp — protein-source floor
+
+Separate script, not the ensembler: real pLMs (ESM-1b, ProtT5) against a classical
+amino-acid floor (kmer2, CTD, PseAAC, BLOSUM, AAC, AAIndex) plus `onehot`,
+`onehot_only` and `mol_only` controls.
+
+```bash
+.venv/bin/python scripts/modeling/analysis/prot_floor_sweep.py --help
+```
+
+### T6 — mechanism holdout
+
+Hold out every odorant of a chemical class, train the graph without it, then ask
+whether the receptor embedding still says something true about that class.
+Notebooks, not scripts: `notebooks/graph/mechanism_holdout/{M2OR,CC,HC}.ipynb`.
+Metric of record is RSA/Mantel (no head, no hyperparameters); a predictive-OOD
+boosting readout runs on the same masks as a second, differently-shaped check.
+
+### Appendix — quantile × criterion sweep
+
+```bash
+.venv/bin/python scripts/modeling/train/run_quantile_criteria_sweep.py --dataset cc
+```
+
+Read by `notebooks/graph/alternatives/protein_based_graph{,_carey}.ipynb`.
+Note the two datasets need different readings of `q`: M2OR's coverage quantile
+cuts a long-tailed distribution, while the insect matrices are complete, so
+coverage is constant and the quantile is a no-op — `--k-mode fraction` is what
+makes the axis mean anything there (`orbind/mol_selection.resolve_K`).
+
+---
+
+## Reading results
+
+```bash
+python scripts/analysis/summarize_runs.py                      # everything
+python scripts/analysis/summarize_runs.py --pool cc-ourind      # substring filter
+python scripts/analysis/summarize_runs.py --pool m2or --folds   # per-fold values
+```
+
+One row per (run, combo), mean ± 95% t-CI, columns chosen by task. Fold counts are
+printed rather than filtered, so a half-finished run is visible instead of silently
+averaged. `scripts/analysis/extend_runs_with_combo.py` prints the commands that add
+a `cls+prot+mol` row to an existing cls-only run by reusing its checkpoints.
+
+---
+
+## Conventions and traps
+
+**The `naive[train-mean]` row is not decoration.** R² is measured against the
+**test** mean while the naive predictor uses the **train** mean, so a model can beat
+naive and still score below zero. On a cold-molecule split that gap is the whole
+story.
+
+<a name="split-validity"></a>**Upstream's `scaf` split is an unusable instrument on Carey.** Its rule is
+deterministic; with 71 of 110 odorants sharing the empty Bemis–Murcko scaffold,
+folds 1–3 are three slices of that one group, and fold 1 lands on the carboxylic-acid
+homologous series — test sd 0.215, naive R² −4.92, which *is* the published −1.016
+average. `our_inductive`
+(`scripts/preprocessing/03_build_ofm_our_inductive_splits.py`) makes the same
+cold-molecule claim with test sd 0.97–1.04 and naive R² ≈ 0 on every fold. It is
+seedless and deterministic: molecules ordered by response dynamic range, dealt by
+systematic sampling.
+
+**Five seeds is the minimum on cold-molecule regimes.** Per-seed swings there reach
+±0.1 AUROC; a one-seed "win" of +0.045 in this project turned out to be noise.
+
+**Checkpoint reuse is silent.** An extractor that finds
+`checkpoints/repeat_{R}/<type>_<name>_model{m}.pt` loads it and skips training.
+That is the point for incremental runs — and a trap for any timing or from-scratch
+measurement. Pass `--skip-checkpoints` (it disables loading as well as saving).
+
+**Hladiš's budget is in passes, not steps.** Upstream's `train_epoch` iterates the
+full loader and loops `while epoch <= N_EPOCH`, so the paper's "10 000 epochs" is
+~4.09M optimizer steps. Our re-implementation runs a small fraction of that, which is
+why its own head reaches 0.600 AUPRC against a published 0.765. It is a compute gap,
+not a port bug; the ensemble rows built on its features are unaffected.
+
+---
 
 ## Notebooks
 
-All experiment notebooks are versioned and are the primary research record.
+See [`notebooks/README.md`](notebooks/README.md). All of them locate the repo root
+by walking up to `pyproject.toml`, so they run from any depth.
 
-- `notebooks/baseline_screening.ipynb` — curated baseline comparison.
-- `notebooks/interaction_research.ipynb` — interaction-feature experiments.
-- `notebooks/graph/` — heterogeneous bipartite GNN/GAT link predictor, grouped into `benchmarks/` (per-dataset sweeps: `full_full`, `full_full_compressed`, `curated`), `mechanism/` (`inductive_vs_transductive`, `training_diagnostics`), and `alternatives/` (`molecule_side_graphs` — the "none beats raw boost" ledger). See `notebooks/graph/README.md`.
-- `notebooks/molecule_embeddings/` — molecular embedding and PCA screening.
-- `notebooks/protein_embeddings/` — ESM embedding, PCA, and neighbourhood analyses.
+## Archive
 
-Notebook outputs retain scientific figures and concise summaries. Transient tracebacks, full run inventories, and long training logs should not be committed.
-
-## Main commands
-
-```bash
-# Build the curated pair table from the M2OR export
-uv run python scripts/preprocessing/01_build_table.py
-
-# Generate receptor and molecule representations
-uv run python scripts/embedding_generation/proteins/02_embed_receptors.py
-uv run python scripts/embedding_generation/molecules/03_embed_molecules.py
-
-# Baseline pair model
-uv run python scripts/modeling/train/train_mp.py --split group_molecule
-
-# Resumable full_full v5 graph grid (PowerShell)
-./scripts/modeling/train/run_graph_full_full_v5.ps1
-```
-
-Training outputs are written below `results/`. That directory is local-only and ignored by Git; move or archive it separately when transferring experiments to a server.
-
-## Environment policy
-
-`pyproject.toml` and `uv.lock` are the sole dependency specification for the main project. Use `uv sync --frozen` to reproduce it; do not install packages manually into `.venv`.
-
-`experiments/struct_interaction/` is a legacy docking exploration retained for provenance. It has no separate environment and is not part of the active notebook or modelling pipeline.
-
-The core environment currently verified on Windows is Python 3.11 with Torch 2.2.2, DGL 2.2.1, PyG 2.8, NumPy 1.26, and XGBoost 2.1.
-
-## Repository layout
-
-```text
-orbind/       reusable dataset, embedding, baseline, and graph code
-scripts/      preprocessing, embedding generation, training, and evaluation entry points
-notebooks/    versioned experiment definitions and scientific outputs
-data/         external datasets and embeddings (ignored)
-results/      generated metrics, logs, figures, and checkpoints (ignored)
-experiments/  isolated exploratory directions
-notes/        experiment notes and protocol decisions
-```
+[`legacy/README.md`](legacy/README.md) indexes every closed line and says what each
+one showed — the graph line v3–v6, the attention/site-MIL branch, the molecule-side
+graph nulls, the pocket/protein-variant cluster, and the exploratory embedding
+notebooks. Kept rather than deleted because most of them are negative results.

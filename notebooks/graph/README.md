@@ -6,7 +6,7 @@ the models and tables they read are produced by scripts, not here.
 The graph itself is `orbind/gnn_extractor.py` (`GnnSignedExtractor`), reached through
 `scripts/modeling/train/train_ensemble_boost.py` as a `cls` source. Everything from the
 earlier standalone graph line (v3-v6 trainers, benchmark sweeps, the alternative-graph
-ledger) is archived under [`../legacy/`](../legacy/README.md).
+ledger) is archived under [`../../legacy/`](../../legacy/README.md).
 
 ```
 notebooks/graph/

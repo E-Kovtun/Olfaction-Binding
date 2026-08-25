@@ -51,7 +51,7 @@ def inductive_molecule_indices(seed: int, lorax_dir: str = LORAX_DIR, pool_fold:
                                 holdout_fraction: float = 0.30,
                                 test_fraction_within_holdout: float = 2.0 / 3.0):
     """Cold-molecule split of the pool: mirrors
-    scripts/legacy/modeling/train/train_full_full_site_mil_attention.py's own inductive_molecule logic
+    legacy/scripts/modeling/train/train_full_full_site_mil_attention.py's own inductive_molecule logic
     exactly (val/test drawn only from ec50-quality rows of held-out
     molecules; train is every pool row whose molecule isn't held out,
     regardless of quality)."""
@@ -79,7 +79,7 @@ def inductive_molecule_indices(seed: int, lorax_dir: str = LORAX_DIR, pool_fold:
 
 def inductive_molecule_v5_indices(seed: int, lorax_dir: str = LORAX_DIR, pool_fold: int = 1,
                                    test_frac: float = 0.2, val_frac: float = 0.1):
-    """Cold-molecule split reproducing `orbind.lorax.build_inductive_molecule`
+    """Cold-molecule split reproducing `orbind.legacy.lorax.build_inductive_molecule`
     *exactly* -- the split the v5 graph screen actually ran, as opposed to
     `inductive_molecule_indices` above (our own later variant: 30% holdout,
     stratified by whether a molecule has any positive, 2/3-1/3 test/val).

@@ -2,6 +2,7 @@
 data/**
 !data/**/
 !data/**/.gitkeep
+!data/**/README.md
 
 # python
 __pycache__/
@@ -47,7 +48,7 @@ Thumbs.db
 ensemble_test_out/
 
 # server-local queue variants
-scripts/queues/*.local.sh
+**/queues/*.local.sh
 
 # the manuscript lives outside the repo's history (user's call, Aug 2026)
 paper/

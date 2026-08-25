@@ -8,6 +8,7 @@ legacy/
   scripts/     mirrors scripts/ one level down    -> scripts/README.md
   notebooks/   mirrors notebooks/ one level down  -> notebooks/README.md
   notes/       the notes belonging to those lines
+  experiments/ isolated side directions with their own deps and binaries
   config.yaml  the pre-`regimes.py` data descriptor (read by nothing since)
 ```
 
@@ -95,6 +96,24 @@ not help cold molecules). `ensemble_run_status` was replaced by
 **`run_quantile_sweep.py`** — superseded by
 `scripts/modeling/train/run_quantile_criteria_sweep.py`, which is live and produces
 the appendix's quantile × criterion sweeps.
+
+**Structure-based interaction** (`experiments/struct_interaction/`) — AutoDock Vina
+docking of odorants into AF2 OR pockets, to test whether a physics-based teacher
+could pretrain an interaction model that M2OR then merely validates. Paused at the
+positive control: over 8 well-characterised ORs the per-receptor AUROC of
+−affinity against the M2OR label is **~0.57 (Stouffer p ≈ 0.012)**, with only OR1A1
+individually clear — an honest but far too noisy teacher to pretrain on.
+
+This one is **not** dead weight: §01 and §02 of the paper assert that docking and
+structural approaches are out for this family because the structures are weakly
+characterised, and this is the measurement behind that sentence. If a reviewer
+challenges it, the numbers are in `struct_interaction/data/dock_results.csv`
+(480 receptor×odorant dockings) and the log at the bottom of its README.
+
+It kept its own directory (rather than being folded into `legacy/scripts/`) because
+the isolation was the point: its own venv, its own `vina.exe`, its own data tree,
+importing nothing from `orbind`. Its scripts walk up to `pyproject.toml` like every
+other, so the move did not touch them.
 
 **`config.yaml`** — the original data/filter descriptor. Every path in it moved into
 `orbind/regimes*.py` and every filter into `orbind/filters.py`; by the time it was

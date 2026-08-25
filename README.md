@@ -23,8 +23,7 @@ orbind/       the library: datasets, splits, extractors, the ensembler
 scripts/      entry points (preprocessing, embeddings, training, analysis)
 notebooks/    display/analysis notebooks; the models they read come from scripts
 notes/        protocol decisions and the paper's storyline
-legacy/       every closed line — scripts, notebooks, notes (see legacy/README.md)
-experiments/  self-contained side directions with their own dependencies
+legacy/       every closed line — scripts, notebooks, notes, experiments
 data/         external datasets and embeddings (not versioned — see data/README.md)
 results/      run outputs: metrics, logs, checkpoints (not versioned)
 ```

@@ -98,7 +98,7 @@ pairs. This is mature ground (proteochemometrics / DeepDTA / GraphDTA / ESM-DTI)
 
 > **[user: leave point 3 without comments for now.]**
 > Status: paused at the positive control. Vina v1.2.7 + AF2 pockets pipeline built
-> and isolated under `experiments/struct_interaction/`. Positive control (8 ORs,
+> and isolated under `legacy/experiments/struct_interaction/`. Positive control (8 ORs,
 > per-receptor AUROC of −affinity vs M2OR label): mean ~0.57, Stouffer p=0.012 —
 > a *weak/honest-but-noisy* teacher; only OR1A1 individually clear.
 

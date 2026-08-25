@@ -35,10 +35,10 @@ results/**
 
 # isolated experiments: keep scripts, READMEs and compact CSV manifests/results;
 # ignore native binaries and regenerable structures/poses/ligand files
-experiments/**/bin/
-experiments/**/data/**
-!experiments/**/data/
-!experiments/**/data/*.csv
+legacy/experiments/**/bin/
+legacy/experiments/**/data/**
+!legacy/experiments/**/data/
+!legacy/experiments/**/data/*.csv
 
 # editor / OS noise
 .DS_Store

@@ -10,7 +10,7 @@ this runs in the project `.venv`; ProSmith/LORAX need `.venv-controls`, MolOR ne
 `.venv-molor`, and embedding generation needs `.venv-embeddings`.
 
 Self-contained side directions with their own dependencies live in
-[`../experiments/`](../experiments/) instead.
+[`../legacy/experiments/`](../legacy/experiments/) instead.
 
 ## Stages
 

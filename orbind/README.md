@@ -7,6 +7,16 @@ Scripts put the repo root on `sys.path` themselves, so `orbind` imports without
 being installed (`package = false` in `pyproject.toml` — this is an application,
 not a distributable).
 
+## Documentation
+
+The ensembler is large enough to have its own write-up rather than a docstring:
+
+* [`docs/ensembler.md`](docs/ensembler.md) — how the mechanism works layer by
+  layer, **and which half of it we deliberately do not use** (combo stacking and
+  per-head tuning are implemented, and switched off in everything reported).
+* [`docs/gotchas.md`](docs/gotchas.md) — the pipeline-wide traps, each with the
+  failure that produced it.
+
 ## Map
 
 **Data and splits**
@@ -48,6 +58,8 @@ there is its own business.
 Extractor modules are imported **lazily** by the trainer, so a run pulls only the
 deps its sources need. That is what lets the ProSmith/LORAX controls run in a
 PyG-free environment.
+
+**`docs/`** — prose about the ensembler and the pipeline's traps, above.
 
 **`legacy/`** — four archived modules (`hetero`, `hetero_gat`, `lorax`,
 `attention`), kept importable because archived scripts and notebooks import them.

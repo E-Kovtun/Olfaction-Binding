@@ -99,11 +99,17 @@ model per fold and emit a pair-level `cls` vector:
 **Combos.** `--combos "1 2 12"` is a digit-string mini-language: each digit is the
 **1-based position of a `--source` flag on that command line**. With
 `--source cls=... --source prot=... --source mol=...`, `1` = cls alone, `23` =
-prot+mol (the boosting baseline), `123` = cls+prot+mol.
+prot+mol (the boosting baseline), `123` = cls+prot+mol. One combo = one boosting
+head over the concatenation of its sources' features.
 
 > Adding or reordering a `--source` flag silently changes what every digit means.
-> Combo names in `metrics.csv` are written from the source *names*, so read those,
-> never the digits, when comparing runs.
+> `metrics.csv` records combos by *name*, so compare names, never digits.
+
+**What we report.** One combo, one head, fixed hyperparameters. The machine can
+also weight several combos into an ensemble and tune each head by hyperparameter
+search; both are implemented, and both are deliberately switched off in everything
+reported — see [`orbind/docs/ensembler.md`](orbind/docs/ensembler.md) for the whole
+mechanism and the reasoning.
 
 **Regimes and splits.**
 
@@ -245,38 +251,42 @@ a `cls+prot+mol` row to an existing cls-only run by reusing its checkpoints.
 
 ---
 
-## Conventions and traps
+## Before you read a number
 
-**The `naive[train-mean]` row is not decoration.** R² is measured against the
-**test** mean while the naive predictor uses the **train** mean, so a model can beat
-naive and still score below zero. On a cold-molecule split that gap is the whole
-story.
+Four things decide whether a result means what it looks like. The full list, with
+the failures that produced each one, is in
+[`orbind/docs/gotchas.md`](orbind/docs/gotchas.md).
 
-<a name="split-validity"></a>**Upstream's `scaf` split is an unusable instrument on Carey.** Its rule is
-deterministic; with 71 of 110 odorants sharing the empty Bemis–Murcko scaffold,
-folds 1–3 are three slices of that one group, and fold 1 lands on the carboxylic-acid
-homologous series — test sd 0.215, naive R² −4.92, which *is* the published −1.016
-average. `our_inductive`
-(`scripts/preprocessing/03_build_ofm_our_inductive_splits.py`) makes the same
-cold-molecule claim with test sd 0.97–1.04 and naive R² ≈ 0 on every fold. It is
-seedless and deterministic: molecules ordered by response dynamic range, dealt by
-systematic sampling.
+* **One combo, one head, fixed hyperparameters** — no combo stacking, no per-head
+  tuning, identical settings for us and for every baseline. Why:
+  [`orbind/docs/ensembler.md`](orbind/docs/ensembler.md#the-convention-first).
+* **Read the `naive[train-mean]` row next to every R².** R² is measured against the
+  **test** mean while naive predicts the **train** mean, so a model can beat naive
+  and still score below zero.
+* **Five seeds minimum on cold-molecule regimes.** Per-seed swings there reach
+  ±0.1 AUROC; a one-seed win in this project has already turned out to be noise.
+* <a name="split-validity"></a>**On Carey, `our_inductive` is the cold-molecule
+  split, not upstream's `scaf`.** `scaf`'s fold 1 lands on the carboxylic-acid
+  homologous series (test sd 0.215, naive R² −4.92, which *is* the published
+  −1.016 average); `our_inductive` holds naive R² ≈ 0 on every fold.
 
-**Five seeds is the minimum on cold-molecule regimes.** Per-seed swings there reach
-±0.1 AUROC; a one-seed "win" of +0.045 in this project turned out to be noise.
+Two more that bite during a run rather than after it: a method run in the wrong
+environment can silently load a checkpoint instead of training (pass
+`--skip-checkpoints` for anything timed), and `config.json` records what a run was
+*asked* to do — read `metrics.csv` for what it actually produced.
 
-**Checkpoint reuse is silent.** An extractor that finds
-`checkpoints/repeat_{R}/<type>_<name>_model{m}.pt` loads it and skips training.
-That is the point for incremental runs — and a trap for any timing or from-scratch
-measurement. Pass `--skip-checkpoints` (it disables loading as well as saving).
+## Tests
 
-**Hladiš's budget is in passes, not steps.** Upstream's `train_epoch` iterates the
-full loader and loops `while epoch <= N_EPOCH`, so the paper's "10 000 epochs" is
-~4.09M optimizer steps. Our re-implementation runs a small fraction of that, which is
-why its own head reaches 0.600 AUPRC against a published 0.765. It is a compute gap,
-not a port bug; the ensemble rows built on its features are unaffected.
+```bash
+uv sync --frozen --group dev     # once, for pytest
+uv run pytest
+```
 
----
+They cover the pure, semantics-carrying functions -- the two readings of the
+quantile (`resolve_K`), what "positive" means on a continuous target
+(`pos_threshold`), the `--combos` digit language and the `--source` field order.
+No data, no GPU, ~10 s. This is deliberately not a test suite for the models: it
+pins the plumbing whose meaning can shift without anything crashing.
 
 ## Notebooks
 

@@ -39,6 +39,9 @@ gin = [
     "torchdata<0.8",          # dgl 2.2.1 imports torchdata.datapipes (removed in >=0.10)
 ]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
 [tool.uv]
 # application, not a library; all deps mandatory so `uv run` always has a full env.
 package = false
@@ -47,4 +50,5 @@ package = false
 dev = [
     "nbformat>=5.10.4",
     "jupyterlab>=4,<5",
+    "pytest>=8",
 ]

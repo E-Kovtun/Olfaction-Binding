@@ -1,101 +1,57 @@
 # notebooks/graph/
 
-Evaluation of the **heterogeneous bipartite GNN/GAT link predictor** (molecule ↔ protein)
-across the curated and full_full dataset variants, plus mechanism analyses and the ledger of
-alternative graph formulations.
+Live notebooks around the signed bipartite graph. All of them are **display / analysis**:
+the models and tables they read are produced by scripts, not here.
 
-> **Protocol status — exploratory, rerun required.** Existing graph checkpoints,
-> tables, plots, and notebook outputs must not be treated as final benchmark results.
-> The old runs have three evaluation problems: the `full_full` cold-molecule split is
-> reconstructed from the same row universe for every nominal LORAX fold; train labels
-> are also used as message-passing edges; and the original sweeps used the final epoch
-> rather than a validation-selected checkpoint. Future runs should create genuinely
-> distinct group-molecule folds, checkpoint by validation metrics, and touch test only
-> once after model selection. The notebooks remain useful as exploratory diagnostics.
-
-All notebooks read checkpoints/CSVs produced by `scripts/modeling/train/` and
-`scripts/modeling/eval/`. They resolve the repo root by walking up to `pyproject.toml`,
-so they run correctly from any sub-folder depth.
-
-## Layout
-
-The notebooks are grouped by role. Filenames are short because the sub-folder already
-carries the context (no more `graph_`/`gnn_` prefixes).
+The graph itself is `orbind/gnn_extractor.py` (`GnnSignedExtractor`), reached through
+`scripts/modeling/train/train_ensemble_boost.py` as a `cls` source. Everything from the
+earlier standalone graph line (v3-v6 trainers, benchmark sweeps, the alternative-graph
+ledger) is archived under [`../legacy/`](../legacy/README.md).
 
 ```
 notebooks/graph/
-  benchmarks/     the main link-predictor sweeps, one per dataset variant
-  mechanism/      why/how the graph adds signal + training diagnostics
-  alternatives/   molecule-side / CF / metapath graphs — the "none beats raw boost" ledger
+  mechanism_holdout/    ligand-class holdout: does the refined receptor transfer a
+                        MECHANISM to a chemistry it never trained on?
+  refinement_geometry/  what refinement does to the receptor geometry
+  alternatives/         display-only readers for the quantile x criterion sweeps
 ```
 
-## The model
+## `mechanism_holdout/` -- `{M2OR, CC, HC}`
 
-A bipartite graph: molecule nodes (ChemBERTa / GIN features) and protein nodes (ESM2-650M).
-Message-passing enriches the **protein** embedding from the molecules each receptor binds.
-The reported head is an unentangled **XGBoost probe** on `[raw mol ‖ graph-enriched prot]`
-(the MLP probe was dropped). Knobs swept: MP mode (`pos_only` / `all_edges` / `signed`),
-architecture (GNN / GAT), molecule-coverage quality filter (`q87/q95/q99`), history depth
-(`[x0‖x1]` vs `[x0‖x1‖x2]`), and — in v6 — representation-shaping add-ons (DGI auxiliary
-loss, SimGCL contrastive noise) and an alternative BPR main loss.
+Hold out every molecule of a chemical class (SMARTS), train the signed graph without it,
+then ask whether the resulting receptor embedding still says something true about that
+class. Three receptor representations throughout: **raw ESM** (structure only),
+**GNN+ESM** (both), **GNN one-hot** (function only -- the same graph fed a one-hot
+receptor identity, so the geometry comes from binding alone).
 
-Transductive runs have an additional opt-in probe, `--transductive-exp`, using
-`[graph-enriched mol ‖ graph-enriched prot]`. The default transductive probe remains
-`[raw mol ‖ graph-enriched prot]`; inductive-molecule always keeps the raw molecule
-embedding because held-out molecules have no graph context. Checkpoint/table variants
-from the new probe carry the `_transductive_exp` suffix. A transductive molecule whose
-train edges were removed (for example by the quality filter) still receives the GNN/GAT
-root/self transformation, but no neighbor-derived context; this is expected.
+Two readouts, deliberately different in kind:
 
-For a stricter probe protocol, `--disjoint-probe-train` partitions the original train
-edges into two class-stratified subsets. GNN/GAT message passing and decoder training
-use only the first; XGBoost/MLP fitting uses only the second. Thus no downstream-probe
-training label was already present as the exact same MP edge. The default split is 50/50
-and result variants carry the `_disjoint` suffix.
+* **RSA / Mantel** -- the metric of record. Spearman between the off-diagonals of
+  embedding similarity and residualised held-out-class-profile similarity. No head, no
+  hyperparameters, predicts nothing. Feeds the paper's mechanism table.
+* **Predictive OOD** (section 5) -- the pipeline's own boosting head fitted on pairs
+  outside the class and scored on the class, against `naive` and `receptor tuning`
+  references. Agreement between the two is the point: a conclusion that survives both
+  does not live in either one's moving parts. Section 6 optionally runs a competitor
+  (Hladis) on exactly the same masks.
 
-## Notebooks
+`M2OR` is kept for completeness but is **not** the stand for the RSA claim -- its
+sparsity, receptor cross-correlation and non-random assay design make it unreadable
+there. The two complete insect matrices (CC 50x110, HC 24x110) are.
 
-### `benchmarks/`
+The legacy LOO-kNN readout is still present as a deprecated panel; do not quote it.
 
-| notebook | dataset | regimes | what it shows |
-|----------|---------|---------|---------------|
-| `full_full.ipynb` | full_full (LORAX/Hladis release) | transductive + inductive_molecule | **the main sweep.** LORAX folds; EC50-only test; ChemBERTa‖ESM; the v5 grid (MP-mode / arch / quality / history) + the v6 add-on studies (DGI, SimGCL, BPR) |
-| `full_full_compressed.ipynb` | full_full | both | capacity variant — same folds with PCA32/PCA16 domain embeddings; two forks only (regime × supervision) |
-| `curated.ipynb` | curated (409 rec / 21k pairs) | transductive + inductive_molecule | the MP-mode / arch / quality / history sweep on curated vs no-graph XGBoost (GIN‖ESM) |
+## `refinement_geometry/` -- `{M2OR, CC, HC}`
 
-### `mechanism/`
+The geometry companion to the same study: what moves when the receptor vector is refined.
 
-| notebook | dataset | regimes | what it shows |
-|----------|---------|---------|---------------|
-| `inductive_vs_transductive.ipynb` | full_full | both | **mechanism**: the `rawp` ablation (`[ChemBERTa ‖ raw ESM ‖ z_prot]`) that disentangles "graph compresses away raw ESM" from "graph adds transferable signal", plus the cold-molecule enrichment ladder and a compressed/full capacity check |
-| `training_diagnostics.ipynb` | full_full | inductive_molecule | **training curves** (900-epoch study + clean 1500-epoch rerun): val vs test per epoch, loss, correlation scatter, key-epoch table; shows why an early 300-epoch stop is suboptimal |
+## `alternatives/`
 
-### `alternatives/`
+`protein_based_graph.ipynb` (M2OR) and `protein_based_graph_carey.ipynb` (Carey/Hallem)
+display the quantile x criterion sweeps behind the appendix. **Display only** -- the CSVs
+come from `scripts/modeling/train/run_quantile_criteria_sweep.py`.
 
-| notebook | what it shows |
-|----------|---------------|
-| `molecule_side_graphs.ipynb` | combined ledger of the molecule-side / interaction-matrix graphs — **A/B/C/D** (receptor co-response, collaborative SVD, metapath M-P-M-P), **interaction-profile CF** (borrow neighbours' binding profiles over the ChemBERTa kNN graph), and **similarity-graph MP** (one hop over the ChemBERTa kNN graph, untrained `Â·X` vs trained). Shared verdict: **none beats the raw XGBoost boost** over multiple seeds |
-
-## Provisional observations (full_full, fold 1; require rerun)
-
-- **Quality filter is the strongest knob**: `signed + q95` lifts the graph well above plain
-  `signed` (`q99` over-prunes and degrades).
-- **History helps only transductive**; depth barely matters (`[x0‖x1]` ≈ `[x0‖x1‖x2]`).
-- **The transductive↔inductive flip is real**: the no-graph baseline is inflated in
-  transductive by **identity memorization** (test molecules 99% seen) and collapses when
-  molecules go cold; the graph degrades far less.
-- **`rawp` ablation verdict**: in transductive the graph is ≈ lossy compression of ESM
-  (raw ESM recovers most of the gap, `z_prot` adds nothing extra); in inductive the pure
-  graph **beats** baseline and raw ESM even *hurts* — the binding-profile signal genuinely
-  transfers to new molecules. See `mechanism/inductive_vs_transductive.ipynb`.
-- **Alternative molecule-side graphs don't help**: co-response, SVD-CF, metapath,
-  profile-CF, and similarity-MP all fail to beat raw boost over multiple seeds. See
-  `alternatives/molecule_side_graphs.ipynb`.
-
-## Data sources
-
-`scripts/modeling/train/train_gnn_link.py`, `train_gat_link.py` → `results/curated/{checkpoints,tables}/`
-and `results/full/...`; `train_graph_full_full.py` → an explicit directory under `results/graph/`
-(v5/v6 sweeps live in `results/graph/full_full/...`);
-`scripts/modeling/eval/eval_full_full_baseline.py` → `results/full_full/tables/baselines.csv`;
-`eval_on_lorax_splits.py` → `results/full_full/article_results/lorax_compare.csv`.
+Note the two datasets need different readings of `q`: on M2OR the coverage quantile cuts a
+long-tailed distribution, while the insect matrices are complete, so coverage is constant
+and the quantile is a no-op there. The sweep's `k_mode="fraction"` is what makes the axis
+mean anything on Carey/Hallem -- see `orbind/mol_selection.resolve_K`.

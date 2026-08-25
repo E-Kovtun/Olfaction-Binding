@@ -19,39 +19,45 @@ File-name number prefixes (`00_`, `01_`, …) encode the original global order w
 
 ## modeling/ layout
 
-Was a flat dump; now split by purpose:
-
 ```
 modeling/
-  train/        model-fitting entry points
-    train_gnn_link.py        bipartite GraphSAGE link predictor (curated / full)
-    train_gat_link.py        bipartite GAT link predictor (curated / full)
-    train_graph_full_full.py GNN/GAT on full_full (LORAX folds, EC50 test, 2 regimes)
-    train_mp.py              LORAX-style concat[mol||prot] -> MLP baseline
-    train_attention.py       curated flat/site cross- and self-attention (incremental table)
+  train/
+    train_ensemble_boost.py        THE entry point: multi-source boosting ensemble.
+                                   Every paper table on M2OR/Carey/Hallem comes from here.
+    run_quantile_criteria_sweep.py quantile x criterion sweep of the pipeline GNN
+                                   (appendix); read by
+                                   notebooks/graph/alternatives/protein_based_graph*.ipynb
 
-  eval/         baselines & comparison tables (produce CSVs)
-    eval_mp_table.py         MP table: protein {ESM,random} x split {stratified,molecule}
-    eval_protein_variants.py XGBoost across protein-embedding variants
-    eval_onehot_protein.py   control: one-hot protein blocks (no ESM)
-    eval_on_lorax_splits.py  our boost on LORAX splits (reproduces their protocol)
-    eval_full_full_baseline.py  no-graph boost baseline for full_full (both regimes)
-    _append_concat22.py / _append_concat22pca.py   append-only helpers for
-                             eval_protein_variants (must stay beside it — sibling import)
+  eval/         the protein-side head-to-head (Table "protein sources")
+    eval_protein_variants.py       XGBoost across protein-embedding variants
+    _append_concat22.py / _append_concat22pca.py   append-only helpers; they import
+                                   eval_protein_variants as a sibling, so they must
+                                   stay beside it
+    eval_onehot_protein.py         control: one-hot protein blocks (no ESM)
+    build_pocket_variants_cache.py caches the pocket/ECL2 receptor variants
 
-  analysis/     mechanism investigations (not just leaderboard numbers)
-    pocket_binding_signal.py / _v2.py   does pocket/ECL2 divergence predict binding
-                             divergence, controlling for phylogeny
-    (interaction ladder + bilinear structure → notebooks/interaction_research.ipynb)
+  analysis/
+    prot_floor_sweep.py            produces the protein-source table cited in the paper
+    pocket_binding_signal_v2.py    does pocket/ECL2 divergence predict binding
+                                   divergence, controlling for phylogeny
+    c9_protein_repr_analysis.py    information-criteria battery (paper section 8, pending)
 ```
 
-Graph runners support `--transductive-exp`: in transductive mode the final probe uses
-`[graph-enriched molecule || graph-enriched protein]` instead of the default
-`[raw molecule || graph-enriched protein]`. It is deliberately unavailable for an
-explicit `inductive_molecule` run.
+## analysis/ (repo-level dashboards)
 
-`--disjoint-probe-train` removes the easier same-edge setup: the original train labels
-are split (class-stratified) into a GNN MP/decoder subset and a separate downstream
-probe subset. `--probe-train-frac` controls the latter share (default 0.5).
+```
+analysis/
+  summarize_runs.py          one row per (run, combo) over results/ensemble_logs/,
+                             mean +- 95% CI, task-aware columns
+  extend_runs_with_combo.py  prints the commands that add a cls+prot+mol row to
+                             existing cls-only runs, reusing their checkpoints
+```
+
+## legacy/
+
+Closed experiment lines live in [`legacy/`](legacy/), mirroring this tree one level down
+(`legacy/modeling/train/`, `legacy/modeling/eval/`, `legacy/queues/`, ...). Nothing there
+feeds a paper table; most of it is a negative result worth not repeating. See
+[`legacy/README.md`](legacy/README.md) for what each line showed.
 
 Notebooks in [`../notebooks/`](../notebooks/) consume the CSVs / checkpoints these write.

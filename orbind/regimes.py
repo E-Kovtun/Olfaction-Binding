@@ -51,7 +51,7 @@ def inductive_molecule_indices(seed: int, lorax_dir: str = LORAX_DIR, pool_fold:
                                 holdout_fraction: float = 0.30,
                                 test_fraction_within_holdout: float = 2.0 / 3.0):
     """Cold-molecule split of the pool: mirrors
-    train_full_full_site_mil_attention.py's own inductive_molecule logic
+    scripts/legacy/modeling/train/train_full_full_site_mil_attention.py's own inductive_molecule logic
     exactly (val/test drawn only from ec50-quality rows of held-out
     molecules; train is every pool row whose molecule isn't held out,
     regardless of quality)."""

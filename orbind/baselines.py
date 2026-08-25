@@ -1,6 +1,6 @@
 """Reusable MP baselines (MLP + XGBoost) over in-memory embedding dicts.
 
-Shared by scripts/modeling/eval/eval_mp_table.py and notebooks/. Works on dicts so a
+Shared by scripts/legacy/modeling/eval/eval_mp_table.py and notebooks/. Works on dicts so a
 notebook can pass *modified* protein embeddings (e.g. transformed ESM-2) without
 touching files.
 """

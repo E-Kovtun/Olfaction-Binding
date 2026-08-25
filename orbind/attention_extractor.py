@@ -5,7 +5,7 @@ Per this project's own site-MIL screen, these two per-site pooling rules
 (noisy-OR and log-sum-exp over per-site logits) are the current leaders.
 Each wraps its own small torch model over protein mean-ESM + per-atom
 molecule-GIN embeddings -- the architecture is written out directly here,
-not imported from scripts/modeling/train/train_full_full_site_mil_attention.py.
+not imported from scripts/legacy/modeling/train/train_full_full_site_mil_attention.py.
 Only generic, model-agnostic plumbing (dataset/collate/training-loop/OOF
 driver) is shared between the two, so each model's own definition stays
 fully independent and directly editable.

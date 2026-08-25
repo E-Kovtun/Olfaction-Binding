@@ -9,6 +9,7 @@ __pycache__/
 .venv/
 .venv-controls/
 .venv-embeddings/
+.venv-molor/
 .uv-cache/
 .pytest_cache/
 .mypy_cache/
@@ -41,6 +42,9 @@ experiments/**/data/**
 # editor / OS noise
 .DS_Store
 Thumbs.db
+
+# ensembler smoke-test output
+ensemble_test_out/
 
 # server-local queue variants
 scripts/queues/*.local.sh

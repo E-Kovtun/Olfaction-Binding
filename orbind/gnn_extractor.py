@@ -36,7 +36,7 @@ identical either way -- the decoder always sees both sides):
                       what the v5 graph screen's own "unentangled boost"
                       probe did: it fed XGBoost
                       [raw ChemBERTa molecule || graph-enriched ESM protein]
-                      (see train_graph_full_full.py's `probe_with`), never
+                      (see scripts/legacy/modeling/train/train_graph_full_full.py's `probe_with`), never
                       the graph's molecule vector -- consistent with this
                       project's finding that the graph helps cold-molecule
                       generalization through the *protein* side, while
@@ -48,7 +48,7 @@ identical either way -- the decoder always sees both sides):
                       `n_models * 2 * hidden` columns.
 
 Training protocol matches the actual v5 graph-architecture-screen runs
-(scripts/modeling/train/run_graph_full_full_v5.ps1: lr=3e-3, epochs=900,
+(scripts/legacy/modeling/train/run_graph_full_full_v5.ps1: lr=3e-3, epochs=900,
 `--probe-checkpoint last`, no `--lr-scheduler`) rather than this project's
 earlier anti-collapse fix (lr=1e-3 + grad-clip + ReduceLROnPlateau +
 best-val checkpoint selection, see notes/ and orbind/hetero.py history) --
@@ -326,7 +326,7 @@ def _train_one(build_model, x_mol, x_prot, pos_eidx, neg_eidx,
     """Full-batch training loop (the whole graph is small enough to fit in
     one forward/backward per epoch): BCE loss on train-row decodes, fixed
     epoch count, no early stopping, no LR scheduler -- matches the actual v5
-    graph-screen protocol (scripts/modeling/train/run_graph_full_full_v5.ps1:
+    graph-screen protocol (scripts/legacy/modeling/train/run_graph_full_full_v5.ps1:
     lr=3e-3, epochs=900, `--probe-checkpoint last`, no `--lr-scheduler` flag),
     not the earlier anti-collapse fix (lr=1e-3 + ReduceLROnPlateau + best-val
     checkpoint) this module used before -- the last epoch's weights are

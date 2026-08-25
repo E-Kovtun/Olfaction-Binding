@@ -28,18 +28,14 @@ modeling/
                                    (appendix); read by
                                    notebooks/graph/alternatives/protein_based_graph*.ipynb
 
-  eval/         the protein-side head-to-head (Table "protein sources")
-    eval_protein_variants.py       XGBoost across protein-embedding variants
-    _append_concat22.py / _append_concat22pca.py   append-only helpers; they import
-                                   eval_protein_variants as a sibling, so they must
-                                   stay beside it
-    eval_onehot_protein.py         control: one-hot protein blocks (no ESM)
-    build_pocket_variants_cache.py caches the pocket/ECL2 receptor variants
+  eval/
+    eval_onehot_protein.py         control: one-hot protein blocks (no ESM). Largely
+                                   subsumed by prot_floor_sweep's own onehot controls.
 
   analysis/
-    prot_floor_sweep.py            produces the protein-source table cited in the paper
-    pocket_binding_signal_v2.py    does pocket/ECL2 divergence predict binding
-                                   divergence, controlling for phylogeny
+    prot_floor_sweep.py            the protein-source table cited in the paper: real
+                                   pLMs vs a classical amino-acid floor, plus onehot /
+                                   onehot_only / mol_only controls
     c9_protein_repr_analysis.py    information-criteria battery (paper section 8, pending)
 ```
 

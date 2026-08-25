@@ -16,30 +16,35 @@ notebooks/graph/
   alternatives/         display-only readers for the quantile x criterion sweeps
 ```
 
-## `mechanism_holdout/` -- `{M2OR, CC, HC}`
+## `mechanism_holdout/` -- one notebook, a dataset flag
 
-Hold out every molecule of a chemical class (SMARTS), train the signed graph without it,
-then ask whether the resulting receptor embedding still says something true about that
-class. Three receptor representations throughout: **raw ESM** (structure only),
-**GNN+ESM** (both), **GNN one-hot** (function only -- the same graph fed a one-hot
-receptor identity, so the geometry comes from binding alone).
+Hold out every odorant of a chemical class (SMARTS), train the signed graph without it, then
+ask whether the resulting receptor embedding still says something true about that class. Three
+receptor representations throughout: **raw ESM** (structure only), **GNN+ESM** (both),
+**GNN one-hot** (function only -- the same graph fed a one-hot receptor identity, so the
+geometry comes from binding alone).
 
-Two readouts, deliberately different in kind:
+**All computing lives in `scripts/modeling/analysis/mechanism_holdout.py`.** The notebook reads
+its artifacts and draws; set `DATASET` in the first code cell to `m2or`, `cc` or `hc`.
 
-* **RSA / Mantel** -- the metric of record. Spearman between the off-diagonals of
-  embedding similarity and residualised held-out-class-profile similarity. No head, no
-  hyperparameters, predicts nothing. Feeds the paper's mechanism table.
-* **Predictive OOD** (section 5) -- the pipeline's own boosting head fitted on pairs
-  outside the class and scored on the class, against `naive` and `receptor tuning`
-  references. Agreement between the two is the point: a conclusion that survives both
-  does not live in either one's moving parts. Section 6 optionally runs a competitor
-  (Hladis) on exactly the same masks.
+```bash
+.venv/bin/python scripts/modeling/analysis/mechanism_holdout.py --dataset all
+```
 
-`M2OR` is kept for completeness but is **not** the stand for the RSA claim -- its
-sparsity, receptor cross-correlation and non-random assay design make it unreadable
-there. The two complete insect matrices (CC 50x110, HC 24x110) are.
+Three readouts, deliberately different in kind:
 
-The legacy LOO-kNN readout is still present as a deprecated panel; do not quote it.
+* **RSA / Mantel** -- the metric of record. Spearman between the off-diagonals of embedding
+  similarity and residualised held-out-class-profile similarity. No head, no hyperparameters,
+  predicts nothing. Feeds the paper's mechanism table.
+* **Predictive OOD** -- the pipeline's own boosting head fitted on pairs outside the class and
+  scored on the class, against `naive` and `receptor tuning` references. Agreement between the
+  two is the point: a conclusion that survives both does not live in either one's moving parts.
+  `--hladis` scores a competitor on exactly the same masks.
+* **kNN** -- the original leave-one-out readout, kept as a deprecated panel. Do not quote it.
+
+`m2or` is kept for completeness but is **not** the stand for the claim -- its sparsity, receptor
+cross-correlation and non-random assay design make it unreadable there. The two complete insect
+matrices (CC 50x110, HC 24x110) are.
 
 ## `refinement_geometry/` -- `{M2OR, CC, HC}`
 

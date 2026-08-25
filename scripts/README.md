@@ -56,6 +56,9 @@ modeling/
                                     classical amino-acid floor, plus onehot /
                                     onehot_only / mol_only controls
     c9_protein_repr_analysis.py     information-criteria battery (paper section 8)
+    mechanism_holdout.py            ligand-class holdout: RSA + predictive OOD over three
+                                    receptor representations, all three datasets. Writes the
+                                    artifacts that notebooks/graph/mechanism_holdout/ draws.
 
 analysis/
   summarize_runs.py                 one row per (run, combo), mean +- 95% CI,

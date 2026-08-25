@@ -213,13 +213,21 @@ amino-acid floor (kmer2, CTD, PseAAC, BLOSUM, AAC, AAIndex) plus `onehot`,
 .venv/bin/python scripts/modeling/analysis/prot_floor_sweep.py --help
 ```
 
-### T6 — mechanism holdout
+### T6 — mechanism holdout (`tab:t6`)
 
-Hold out every odorant of a chemical class, train the graph without it, then ask
-whether the receptor embedding still says something true about that class.
-Notebooks, not scripts: `notebooks/graph/mechanism_holdout/{M2OR,CC,HC}.ipynb`.
-Metric of record is RSA/Mantel (no head, no hyperparameters); a predictive-OOD
-boosting readout runs on the same masks as a second, differently-shaped check.
+Hold out every odorant of a chemical class, train the graph without it, then ask whether the
+receptor embedding still says something true about that class. Three receptor representations:
+raw ESM (structure), GNN+ESM (both), GNN one-hot (function only).
+
+```bash
+.venv/bin/python scripts/modeling/analysis/mechanism_holdout.py --dataset all
+```
+
+Writes `results/mechanism_holdout/<ds>/`; `notebooks/graph/mechanism_holdout/mechanism_holdout.ipynb`
+reads those artifacts and draws them (set `DATASET` in its first cell). Metric of record is
+RSA/Mantel — no head, no hyperparameters. A predictive-OOD boosting readout runs on the same
+masks as a second, differently-shaped check, and `--hladis` scores a competitor on those masks
+too. The two insect matrices are the stand; M2OR is illustrative.
 
 ### Appendix — quantile × criterion sweep
 

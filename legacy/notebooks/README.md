@@ -9,8 +9,11 @@ kept importable as `orbind.legacy.*`.
 
 What stayed live, and why:
 
-* `notebooks/graph/mechanism_holdout/{M2OR,CC,HC}` -- the ligand-class holdout;
-  produces the mechanism table (RSA) and the predictive-OOD readout.
+* `notebooks/graph/mechanism_holdout/mechanism_holdout.ipynb` -- the ligand-class holdout, now
+  ONE notebook with a dataset flag, reading artifacts from
+  `scripts/modeling/analysis/mechanism_holdout.py`. The three per-dataset notebooks it replaced
+  are archived here under `graph/mechanism_holdout/`: they carried the compute inline, which is
+  exactly what moved to the script.
 * `notebooks/graph/refinement_geometry/{M2OR,CC,HC}` -- the geometry companion.
 * `notebooks/graph/alternatives/protein_based_graph{,_carey}` -- display-only readers
   for the quantile x criterion sweeps (appendix).

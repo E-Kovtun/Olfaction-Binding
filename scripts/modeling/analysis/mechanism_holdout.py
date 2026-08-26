@@ -577,7 +577,8 @@ def run_dataset(ds, args):
             **{f"{g}_null": permuted(lambda Xs, fn=fn: fn(Xs, M), Xe, args.n_perm)
                for g, fn in GEOMETRY.items()}))
         if args.embeddings:
-            emb_store[f"order__{cname}"] = np.array(order, dtype=object)
+            # str_, not object: an object array would force allow_pickle=True on every read
+            emb_store[f"order__{cname}"] = np.array(order, dtype=np.str_)
             emb_store[f"target__{cname}"] = M.astype(np.float32)
             emb_store[f"emb__{cname}__esm__0"] = Xe.astype(np.float16)
 

@@ -57,6 +57,14 @@ Three readouts, deliberately different in kind:
   `--hladis` scores a competitor on exactly the same masks.
 * **kNN** -- the original leave-one-out readout, kept as a deprecated panel. Do not quote it.
 
+Section 7 collapses the per-class numbers into **one per representation**. Dimensionless
+first -- each class scored against its own permutation null, in units of that null's spread,
+because the three geometries sit on different floors and a small class has a wider null.
+Then weighted by `trust = (1 - struct_leak)(1 - func_redund)`: how isolated the holdout
+really was, structurally (a retained near-twin of the class) and functionally (the class was
+just general tuning). The equal-weight mean is printed beside it, so a conclusion that
+depends on the weighting is visible as one. Both leaks come from the artifacts.
+
 `m2or` is kept for completeness but is **not** the stand for the claim -- its sparsity, receptor
 cross-correlation and non-random assay design make it unreadable there. The two complete insect
 matrices (CC 50x110, HC 24x110) are.

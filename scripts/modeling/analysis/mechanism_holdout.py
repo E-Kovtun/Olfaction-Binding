@@ -35,6 +35,15 @@ Readouts, deliberately different in kind:
             the pipeline's cold-molecule split hides a random 20% of odorants and this hides
             a chemistry. Optionally the same masks for a competitor (`--hladis`).
 
+ISOLATION, and why classes are weighted. A holdout only tests mechanism transfer if it
+really removed the class. Two ways it does not: `struct_leak` -- the mean best Tanimoto from
+a class member to a retained odorant, i.e. a structural twin the graph did see -- and
+`func_redund` -- the correlation across receptors between the class target and general
+responsiveness, i.e. the class was never functionally distinct. `trust = (1 - struct_leak) *
+(1 - func_redund)` weights the notebook's final per-representation number; multiplicative
+because either leak alone voids the test. Both are properties of the DATASET, not of any
+model, so weighting by them cannot favour a representation.
+
 Agreement between RSA and OOD is the point: RSA has no moving parts and OOD has both a head
 and hyperparameters, so a conclusion surviving in both does not live in either one's.
 
@@ -46,7 +55,10 @@ This script does all the computing and writes small artifacts;
 Artifacts land in `results/mechanism_holdout/<dataset>/`:
 
     readouts.csv   one row per (class, model, seed): knn, rsa, cca, procrustes
-    nulls.csv      one row per class: the null / baseline line for each readout
+    nulls.csv      one row per class: the null / baseline line for each readout, each
+                   geometry's null SPREAD (`*_null_sd`, what makes a score
+                   dimensionless), and the two isolation controls `struct_leak` /
+                   `func_redund` with the class weight `trust` they combine into
     ood.csv        one row per (class, model, seed): the metric family for the task,
                    including the `naive (train mean)` and `receptor tuning` references
     panels.npz     the flagship class's actual-vs-three-models reconstruction
@@ -339,8 +351,76 @@ GEOMETRY = {"rsa": rsa, "cca": cca, "procrustes": procrustes}
 
 def permuted(fn, X, n, seed=0):
     """Row-permutation null: shuffle the embedding rows, the alignment dies."""
+    return permuted_stats(fn, X, n, seed)[0]
+
+
+def permuted_stats(fn, X, n, seed=0):
+    """(mean, sd) of the null. The sd is what makes a score dimensionless: a measure is
+    only as good as its own noise floor, and the three geometries have different ones."""
     rng = np.random.default_rng(seed)
-    return float(np.nanmean([fn(X[rng.permutation(len(X))]) for _ in range(n)]))
+    v = np.array([fn(X[rng.permutation(len(X))]) for _ in range(n)], float)
+    return float(np.nanmean(v)), float(np.nanstd(v, ddof=1)) if np.isfinite(v).sum() > 1 else 0.0
+
+
+# --------------------------------------------------------------------------- isolation
+
+def struct_leak(smi, ods, iks):
+    """Mean over class members of the best Tanimoto to a NON-member odorant (ECFP4).
+
+    How much of the held-out class survives in training as a near-analogue. 1.0 would mean
+    every member has a structural twin the graph did get to see, and the holdout tests
+    nothing. Returns NaN without rdkit rather than pretending the control ran.
+    """
+    try:
+        from rdkit import Chem, RDLogger
+        from rdkit.Chem import AllChem, DataStructs
+        RDLogger.DisableLog("rdApp.*")
+    except ImportError:
+        return float("nan")
+
+    def fp(ik):
+        m = Chem.MolFromSmiles(smi.get(ik, ""))
+        return AllChem.GetMorganFingerprintAsBitVect(m, 2, 2048) if m is not None else None
+
+    mem = [f for f in (fp(o) for o in ods if o in iks) if f is not None]
+    oth = [f for f in (fp(o) for o in ods if o not in iks) if f is not None]
+    if not mem or not oth:
+        return float("nan")
+    return float(np.mean([max(DataStructs.BulkTanimotoSimilarity(f, oth)) for f in mem]))
+
+
+def func_redund(R, recs, ods, order, iks, target):
+    """Correlation across receptors between the class target and general responsiveness.
+
+    The functional twin of struct_leak: if "responds to this class" is just "responds to
+    everything", the class carries no separate mechanism and a readout can be satisfied by
+    general tuning. Measured against `target` -- the very matrix the readouts score, already
+    residualised on the insect matrices -- so it never re-charges a leak the target removed.
+    Clipped at 0: an anticorrelated class is not MORE trustworthy.
+    """
+    o_i = {o: j for j, o in enumerate(ods)}
+    r_i = {r: i for i, r in enumerate(recs)}
+    keep = [j for j, o in enumerate(ods) if o not in iks]
+    if not keep or len(order) < 3:
+        return float("nan")
+    with np.errstate(invalid="ignore"):
+        a = np.nanmean(np.asarray(target, float).reshape(len(order), -1), axis=1)
+        b = np.nanmean(R[np.ix_([r_i[r] for r in order], keep)], axis=1)
+    ok = np.isfinite(a) & np.isfinite(b)
+    if ok.sum() < 3 or np.nanstd(a[ok]) < 1e-9 or np.nanstd(b[ok]) < 1e-9:
+        return float("nan")
+    return float(max(0.0, np.corrcoef(a[ok], b[ok])[0, 1]))
+
+
+def trust(sl, fr):
+    """One weight per class, in [0, 1]: how isolated the holdout actually was.
+
+    Multiplicative because the two leaks are independent routes to the same failure -- a
+    class needs BOTH a structural gap and a functional one to be a real test. A missing
+    control (NaN) drops out of the product rather than silently scoring 1.
+    """
+    parts = [1.0 - v for v in (sl, fr) if np.isfinite(v)]
+    return float(np.clip(np.prod(parts), 0.0, 1.0)) if parts else float("nan")
 
 
 # --------------------------------------------------------------------------- OOD boost
@@ -571,11 +651,16 @@ def run_dataset(ds, args):
         readouts.append(dict(cls=cname, model=MODEL_ESM, feat="-", seed="-",
                              knn=knn_of(spec["kind"], Xe, tg["knn_target"], k),
                              **{g: fn(Xe, M) for g, fn in GEOMETRY.items()}))
+        gnull = {g: permuted_stats(lambda Xs, fn=fn: fn(Xs, M), Xe, args.n_perm)
+                 for g, fn in GEOMETRY.items()}
+        sl = struct_leak(smi, ods, iks)
+        fr = func_redund(R, recs, ods, order, iks, tg["rsa_target"])
         nulls.append(dict(
             cls=cname, n_receptors=len(order), n_molecules=len(iks), geometry_k=gk,
             knn_baseline=knn_baseline(spec["kind"], p, R, recs, ods, tg, iks, k, args.n_perm),
-            **{f"{g}_null": permuted(lambda Xs, fn=fn: fn(Xs, M), Xe, args.n_perm)
-               for g, fn in GEOMETRY.items()}))
+            struct_leak=sl, func_redund=fr, trust=trust(sl, fr),
+            **{f"{g}_null": m for g, (m, _) in gnull.items()},
+            **{f"{g}_null_sd": sd for g, (_, sd) in gnull.items()}))
         if args.embeddings:
             # str_, not object: an object array would force allow_pickle=True on every read
             emb_store[f"order__{cname}"] = np.array(order, dtype=np.str_)

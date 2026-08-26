@@ -239,7 +239,10 @@ Writes `results/mechanism_holdout/<ds>/`; `notebooks/graph/mechanism_holdout/mec
 reads those artifacts and draws them (set `DATASET` in its first cell). The metrics of record
 are three geometric ones — RSA, CCA, Procrustes — none with a head or a hyperparameter; `tab:t6`
 reports RSA. A predictive-OOD boosting readout runs on the same masks as a differently-shaped
-check, and `--hladis` scores a competitor on those masks too. The run also dumps the receptor
+check, and `--hladis` scores a competitor on those masks too. The notebook closes on one number per
+representation: each class scored against its own null in units of that null's spread, then
+averaged with weights `trust = (1 - struct_leak)(1 - func_redund)` — how isolated the holdout
+actually was — printed beside the equal-weight mean. The run also dumps the receptor
 embeddings, so any further second-order metric costs no retraining. The two insect matrices are
 the stand; M2OR is illustrative.
 

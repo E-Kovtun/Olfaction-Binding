@@ -55,6 +55,9 @@ modeling/
     prot_floor_sweep.py             the protein-source table: real pLMs vs a
                                     classical amino-acid floor, plus onehot /
                                     onehot_only / mol_only controls
+    concat_diagnostic.py            why GNN + PCA(ESM) scores below the GNN alone: an alpha
+                                    sweep, an ESM-width sweep and a same-width random
+                                    control, read from an existing run's embeddings.npz
     c9_protein_repr_analysis.py     information-criteria battery (paper section 8)
     mechanism_holdout.py            ligand-class holdout: RSA + predictive OOD over three
                                     receptor representations, all three datasets. Writes the

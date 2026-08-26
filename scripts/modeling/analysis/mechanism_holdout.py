@@ -352,9 +352,12 @@ def procrustes(X, M, k=None):
     uniform scale), so it asks whether the two clouds have the same SHAPE, not merely
     the same neighbour ordering (RSA) or a shared linear subspace (CCA). Reported as
     1 - disparity so that, like the other two, larger is better and 0 is no alignment."""
-    from scipy.spatial import procrustes as _proc
     k = k or geometry_k(X, M)
-    A, B = _pca(X, k), _pca(M, k)
+    return _procrustes_pair(_pca(X, k), _pca(M, k))
+
+
+def _procrustes_pair(A, B):
+    from scipy.spatial import procrustes as _proc
     if min(A.shape) < 2 or np.allclose(A.std(), 0) or np.allclose(B.std(), 0):
         return np.nan
     try:
@@ -494,6 +497,67 @@ def trust(sl, fr):
     """
     parts = [1.0 - v for v in (sl, fr) if np.isfinite(v)]
     return float(np.clip(np.prod(parts), 0.0, 1.0)) if parts else float("nan")
+
+
+def geometry_nulls(X, M, n, seed=0):
+    """(mean, sd) of the permutation null for all three geometries, without recomputing
+    anything a permutation cannot change.
+
+    Permuting the rows of X permutes the DERIVED objects too, exactly:
+
+        emb_sim(X[p]) == emb_sim(X)[p][:, p]      a cosine matrix is row/col-permuted
+        _pca(X[p], k) == _pca(X, k)[p]            column-centring and the SVD scores are
+                                                  row-equivariant
+
+    So the similarity matrix, its ranks and the principal scores are built once and indexed
+    n times instead of rebuilt n times. Same numbers as calling the measures on shuffled
+    inputs; the naive path re-derived a 937x937 cosine matrix and a 937x1280 SVD for every
+    one of 100 permutations, per model, per class. Measured at M2OR's size (n=937, 100
+    permutations, all three measures): 338s naive, 5s here -- 113 minutes against 2 for a
+    whole dataset's model_nulls.csv.
+    """
+    from scipy.stats import rankdata
+    rng = np.random.default_rng(seed)
+    perms = [rng.permutation(len(X)) for _ in range(n)]
+    iu = np.triu_indices(len(X), 1)
+    out = {}
+
+    # --- RSA: rank both sides once; Spearman becomes Pearson over a permuted gather
+    Mc = M - M.mean(1, keepdims=True)
+    Mn = Mc / (np.linalg.norm(Mc, axis=1, keepdims=True) + 1e-9)
+    b = rankdata((Mn @ Mn.T)[iu])
+    S = emb_sim(X)
+    RS = np.zeros_like(S)
+    RS[iu] = rankdata(S[iu])
+    RS = RS + RS.T                       # symmetric; the diagonal never enters iu
+    b = b - b.mean()
+    bn = np.linalg.norm(b) + 1e-12
+    vals = []
+    for p in perms:
+        a = RS[np.ix_(p, p)][iu]
+        a = a - a.mean()
+        vals.append(float(a @ b / ((np.linalg.norm(a) + 1e-12) * bn)))
+    out["rsa"] = _mean_sd(vals)
+
+    # --- CCA / Procrustes: both sides reduced once, then only the row order moves
+    k = geometry_k(X, M)
+    A, B = _pca(X, k), _pca(M, k)
+    Qb, _ = np.linalg.qr(B)
+    cvals, pvals = [], []
+    for p in perms:
+        Ap = A[p]
+        Qa, _ = np.linalg.qr(Ap)
+        cvals.append(float(np.mean(np.clip(np.linalg.svd(Qa.T @ Qb, compute_uv=False), 0, 1))))
+        pvals.append(_procrustes_pair(Ap, B))
+    out["cca"] = _mean_sd(cvals)
+    out["procrustes"] = _mean_sd(pvals)
+    return out
+
+
+def _mean_sd(v):
+    v = np.asarray(v, float)
+    return (float(np.nanmean(v)),
+            float(np.nanstd(v, ddof=1)) if np.isfinite(v).sum() > 1 else 0.0)
 
 
 # --------------------------------------------------------------------------- OOD boost
@@ -724,8 +788,7 @@ def run_dataset(ds, args):
         readouts.append(dict(cls=cname, model=MODEL_ESM, feat="-", seed="-",
                              knn=knn_of(spec["kind"], Xe, tg["knn_target"], k),
                              **{g: fn(Xe, M) for g, fn in GEOMETRY.items()}))
-        gnull = {g: permuted_stats(lambda Xs, fn=fn: fn(Xs, M), Xe, args.n_perm)
-                 for g, fn in GEOMETRY.items()}
+        gnull = geometry_nulls(Xe, M, args.n_perm)
         sl = struct_leak(smi, ods, iks)
         fr = func_redund(R, recs, ods, order, iks, tg["rsa_target"])
         nulls.append(dict(
@@ -854,8 +917,7 @@ def backfill(ds, args):
             M = np.asarray(emb[f"target__{cname}"], np.float64)
             row["func_redund"] = func_redund(R, recs, ods, order, iks, M)
             Xe = np.asarray(emb[f"emb__{cname}__esm__0"], np.float64)
-            for g, fn in GEOMETRY.items():
-                m, sd = permuted_stats(lambda Xs, fn=fn: fn(Xs, M), Xe, args.n_perm)
+            for g, (m, sd) in geometry_nulls(Xe, M, args.n_perm).items():
                 row[f"{g}_null_sd"] = sd
                 # the stored mean is authoritative; this one only says the two agree
                 if abs(m - float(row.get(f"{g}_null", m))) > 4 * sd + 1e-9:
@@ -950,8 +1012,7 @@ def derive(ds, args):
             if X is None:
                 continue
             r = dict(cls=cname, model=model, n_dim=int(np.asarray(X).shape[1]))
-            for g, fn in GEOMETRY.items():
-                m, sd = permuted_stats(lambda Xs, fn=fn: fn(Xs, M), X, args.n_perm)
+            for g, (m, sd) in geometry_nulls(np.asarray(X, np.float64), M, args.n_perm).items():
                 r[f"{g}_null"], r[f"{g}_null_sd"] = m, sd
             mnulls.append(r)
         print(f"  {cname:16} PCA(ESM) kept {pdim} dims", flush=True)

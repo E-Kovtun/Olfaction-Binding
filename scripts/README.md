@@ -59,6 +59,8 @@ modeling/
     mechanism_holdout.py            ligand-class holdout: RSA + predictive OOD over three
                                     receptor representations, all three datasets. Writes the
                                     artifacts that notebooks/graph/mechanism_holdout/ draws.
+    merge_mechanism_shards.py       rejoins per-class shards of the above into one artifact
+                                    directory -- how that run spreads over several GPUs
 
 analysis/
   summarize_runs.py                 one row per (run, combo), mean +- 95% CI,

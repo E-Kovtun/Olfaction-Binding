@@ -27,9 +27,28 @@ geometry comes from binding alone).
 **All computing lives in `scripts/modeling/analysis/mechanism_holdout.py`.** The notebook reads
 its artifacts and draws; set `DATASET` in the first code cell to `m2or`, `cc` or `hc`.
 
+Whole run, one GPU:
+
 ```bash
 .venv/bin/python scripts/modeling/analysis/mechanism_holdout.py --dataset all
 ```
+
+M2OR dominates that wall clock, and its classes share nothing, so on several GPUs give each
+class its own process and rejoin them afterwards:
+
+```sh
+i=0
+for c in carboxylic_acid thiol aldehyde ester; do
+  CUDA_VISIBLE_DEVICES=$i .venv/bin/python scripts/modeling/analysis/mechanism_holdout.py --dataset m2or --classes $c --out results/mh_shards/$c > mh_$c.log 2>&1 &
+  i=$((i + 1))
+done; wait
+.venv/bin/python scripts/modeling/analysis/merge_mechanism_shards.py --dataset m2or results/mh_shards/*
+```
+
+`CUDA_VISIBLE_DEVICES` rather than `--device cuda:N`: it also pins whatever the boosting head
+and the extractor pick up on their own. The merged directory is indistinguishable from a serial
+run's, and the merger refuses to double-count a class that appears in two shards. `cc` and `hc`
+are small enough to stay serial on a spare GPU alongside.
 
 Three readouts, deliberately different in kind:
 

@@ -224,10 +224,12 @@ raw ESM (structure), GNN+ESM (both), GNN one-hot (function only).
 ```
 
 Writes `results/mechanism_holdout/<ds>/`; `notebooks/graph/mechanism_holdout/mechanism_holdout.ipynb`
-reads those artifacts and draws them (set `DATASET` in its first cell). Metric of record is
-RSA/Mantel — no head, no hyperparameters. A predictive-OOD boosting readout runs on the same
-masks as a second, differently-shaped check, and `--hladis` scores a competitor on those masks
-too. The two insect matrices are the stand; M2OR is illustrative.
+reads those artifacts and draws them (set `DATASET` in its first cell). The metrics of record
+are three geometric ones — RSA, CCA, Procrustes — none with a head or a hyperparameter; `tab:t6`
+reports RSA. A predictive-OOD boosting readout runs on the same masks as a differently-shaped
+check, and `--hladis` scores a competitor on those masks too. The run also dumps the receptor
+embeddings, so any further second-order metric costs no retraining. The two insect matrices are
+the stand; M2OR is illustrative.
 
 ### Appendix — quantile × criterion sweep
 

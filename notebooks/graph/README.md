@@ -33,9 +33,12 @@ its artifacts and draws; set `DATASET` in the first code cell to `m2or`, `cc` or
 
 Three readouts, deliberately different in kind:
 
-* **RSA / Mantel** -- the metric of record. Spearman between the off-diagonals of embedding
-  similarity and residualised held-out-class-profile similarity. No head, no hyperparameters,
-  predicts nothing. Feeds the paper's mechanism table.
+* **Three geometric measures** -- the metrics of record, of increasing strictness: **RSA**
+  (neighbour order), **CCA** (shared linear subspace), **Procrustes** (same shape). No head,
+  no hyperparameters, nothing predicted. RSA feeds the paper's mechanism table; the other two
+  say whether the conclusion depends on which notion of "aligned" one picks. CCA and
+  Procrustes reduce both sides to a small common rank, calibrated against the permutation
+  null (at rank 10 CCA's null swallows the signal entirely).
 * **Predictive OOD** -- the pipeline's own boosting head fitted on pairs outside the class and
   scored on the class, against `naive` and `receptor tuning` references. Agreement between the
   two is the point: a conclusion that survives both does not live in either one's moving parts.

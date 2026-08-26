@@ -11,14 +11,23 @@ Three receptor representations throughout:
     GNN one-hot   function only   -- the same graph fed one-hot receptor identity, so the
                                      geometry comes from binding alone
 
-Three readouts, deliberately different in kind:
+Readouts, deliberately different in kind:
 
     kNN     the original leave-one-out neighbour readout. DEPRECATED -- k, the coarse label
             and the smoothing are all moving parts. Computed and stored so the deprecated
             panel still renders; not a number to quote.
-    RSA     Mantel: Spearman between the off-diagonals of embedding similarity and held-out
-            class-profile similarity. No head, no hyperparameters, predicts nothing. THE
-            METRIC OF RECORD -- this is what `tab:t6` reports.
+    GEOMETRY -- three second-order measures on the same (embedding, class-profile) pair, of
+            increasing strictness. None has a head or predicts anything, which is why they
+            are the metrics of record; `tab:t6` reports RSA.
+              rsa         Mantel/Spearman over similarity off-diagonals -- neighbour ORDER;
+                          invariant to any monotone map of the similarities.
+              cca         mean canonical correlation -- is the profile a linear function of
+                          the embedding at all; invariant to any invertible linear map.
+              procrustes  1 - disparity after optimal rotation/scale -- same SHAPE; the
+                          strictest, invariant only to rigid motion.
+            A claim surviving all three does not depend on which notion of "aligned" one
+            prefers. CCA and Procrustes reduce both sides to a common small rank; see
+            GEOMETRY_K_CAP for why "small" is calibrated, not guessed.
     OOD     the pipeline's own boosting head (`orbind.baselines.train_boost`, the same
             400-tree XGBoost the paper's tables use) fitted on `[receptor || molecule]` for
             every pair whose odorant is OUTSIDE the class and scored on the class pairs.
@@ -36,14 +45,25 @@ This script does all the computing and writes small artifacts;
 
 Artifacts land in `results/mechanism_holdout/<dataset>/`:
 
-    readouts.csv   one row per (class, model, seed): knn, rsa
+    readouts.csv   one row per (class, model, seed): knn, rsa, cca, procrustes
     nulls.csv      one row per class: the null / baseline line for each readout
     ood.csv        one row per (class, model, seed): the metric family for the task,
                    including the `naive (train mean)` and `receptor tuning` references
     panels.npz     the flagship class's actual-vs-three-models reconstruction
     overview.npz   the response matrix with the class pulled into a block, for the heat map
     molecules.csv  inchikey, smiles and class membership, for the RDKit grids
+    embeddings.npz the receptor embeddings themselves, per (class, model, seed), plus each
+                   class's target matrix and receptor order -- float16. This is what makes a
+                   NEW second-order metric free later: no retraining, just read and score.
+                   Skip with --no-embeddings.
     meta.json      config, shapes, timing, what `knn` means for this dataset
+
+A note on the seeds: they vary ONLY the graph's weight initialisation (torch.manual_seed
+before _train_one). The class split is fixed by SMARTS and the receptor set is fixed by the
+data, so the per-seed CI is training-run variance, NOT sampling error -- raw ESM has no seed
+dependence at all and its geometric CI is zero by construction. The dominant uncertainty here
+is the receptor sample (24 for HC, 50 for CC), which seeds do not touch; embeddings.npz is
+there so a receptor bootstrap can be added post-hoc.
 """
 from __future__ import annotations
 
@@ -235,6 +255,82 @@ def rsa(X, M):
     B = Mn @ Mn.T
     iu = np.triu_indices(len(X), 1)
     return float(spearmanr(B[iu], emb_sim(X)[iu]).correlation)
+
+
+def _pca(A, k):
+    """Mean-centre and project onto the top-k principal directions."""
+    A = np.asarray(A, np.float64)
+    A = A - A.mean(0)
+    U, S, _ = np.linalg.svd(A, full_matrices=False)
+    return U[:, :k] * S[:k]
+
+
+# Rank both sides are reduced to before CCA / Procrustes. Small on purpose: CCA's
+# permutation null climbs with k and swallows the signal. Measured on CC/carboxylic_acid
+# (50 receptors, 60 permutations, GNN vs raw ESM vs null):
+#
+#     k  |  CCA gnn / esm / null   |  Proc gnn / esm / null
+#     2  |  0.510 / 0.166 / 0.165  |  0.209 / 0.050 / 0.024
+#     3  |  0.399 / 0.224 / 0.203  |  0.207 / 0.051 / 0.027
+#     5  |  0.399 / 0.363 / 0.266  |  0.208 / 0.095 / 0.034
+#     10 |  0.395 / 0.425 / 0.391  |  0.209 / 0.097 / 0.045
+#
+# At k=10 CCA is pure noise -- the null is 0.391 and the graph scores BELOW it. Procrustes
+# is insensitive to k (0.207-0.209 throughout) and keeps a flat null, so one small cap
+# serves both. HC has 24 receptors, where the inflation is worse still.
+GEOMETRY_K_CAP = 3
+
+
+def geometry_k(X, M, cap=None):
+    """Common rank for CCA / Procrustes.
+
+    Both compare two configurations of the SAME receptors, so both need the two sides
+    reduced to a shared, non-degenerate number of columns: ESM is 1280-d over 24-50
+    receptors. Bounded by the cap above and by n-1 / the class size."""
+    return int(max(2, min(cap or GEOMETRY_K_CAP, len(X) - 1, M.shape[1], X.shape[1])))
+
+
+def cca(X, M, k=None):
+    """Mean of the canonical correlations between the embedding and the class profile.
+
+    Computed exactly, via QR of each side and the SVD of their cross-product -- the
+    singular values ARE the canonical correlations. Unlike RSA this is invariant to any
+    invertible linear map of either side, so it asks a strictly weaker question: is the
+    class profile a linear function of the embedding at all, ignoring how distances are
+    arranged. A high CCA with a flat RSA means the information is present but not laid
+    out geometrically."""
+    k = k or geometry_k(X, M)
+    A, B = _pca(X, k), _pca(M, k)
+    Qa, _ = np.linalg.qr(A)
+    Qb, _ = np.linalg.qr(B)
+    s = np.linalg.svd(Qa.T @ Qb, compute_uv=False)
+    return float(np.mean(np.clip(s, 0.0, 1.0)))
+
+
+def procrustes(X, M, k=None):
+    """1 - Procrustes disparity after optimal rotation/scaling of the two configurations.
+
+    The strictest of the three: it allows only a rigid map (rotation, reflection,
+    uniform scale), so it asks whether the two clouds have the same SHAPE, not merely
+    the same neighbour ordering (RSA) or a shared linear subspace (CCA). Reported as
+    1 - disparity so that, like the other two, larger is better and 0 is no alignment."""
+    from scipy.spatial import procrustes as _proc
+    k = k or geometry_k(X, M)
+    A, B = _pca(X, k), _pca(M, k)
+    if min(A.shape) < 2 or np.allclose(A.std(), 0) or np.allclose(B.std(), 0):
+        return np.nan
+    try:
+        _, _, disparity = _proc(A, B)
+    except ValueError:
+        return np.nan
+    return float(1.0 - disparity)
+
+
+# The three geometry readouts, all second-order, all scored on the same (X, M) and all
+# nulled the same way. They are deliberately of increasing strictness: RSA (neighbour
+# ordering) -> CCA (shared linear subspace) -> Procrustes (same shape). A claim that
+# survives all three does not depend on which notion of "aligned" one happens to prefer.
+GEOMETRY = {"rsa": rsa, "cca": cca, "procrustes": procrustes}
 
 
 def permuted(fn, X, n, seed=0):
@@ -449,6 +545,7 @@ def run_dataset(ds, args):
     k = spec["k_nn"]
 
     readouts, nulls, ood, panels_saved = [], [], [], False
+    emb_store = {}          # everything a future second-order metric would need
     for cname, iks in classes.items():
         c0 = time.time()
         # the raw-ESM reference embedding also fixes the receptor universe for this class
@@ -465,13 +562,20 @@ def run_dataset(ds, args):
 
         Xe = np.stack([raw0[r] for r in order])
         tg["_X_esm"] = Xe
+        M = tg["rsa_target"]
+        gk = geometry_k(Xe, M)
         readouts.append(dict(cls=cname, model=MODEL_ESM, feat="-", seed="-",
                              knn=knn_of(spec["kind"], Xe, tg["knn_target"], k),
-                             rsa=rsa(Xe, tg["rsa_target"])))
+                             **{g: fn(Xe, M) for g, fn in GEOMETRY.items()}))
         nulls.append(dict(
-            cls=cname, n_receptors=len(order), n_molecules=len(iks),
+            cls=cname, n_receptors=len(order), n_molecules=len(iks), geometry_k=gk,
             knn_baseline=knn_baseline(spec["kind"], p, R, recs, ods, tg, iks, k, args.n_perm),
-            rsa_null=permuted(lambda Xs: rsa(Xs, tg["rsa_target"]), Xe, args.n_perm)))
+            **{f"{g}_null": permuted(lambda Xs, fn=fn: fn(Xs, M), Xe, args.n_perm)
+               for g, fn in GEOMETRY.items()}))
+        if args.embeddings:
+            emb_store[f"order__{cname}"] = np.array(order, dtype=object)
+            emb_store[f"target__{cname}"] = M.astype(np.float32)
+            emb_store[f"emb__{cname}__esm__0"] = Xe.astype(np.float16)
 
         if args.ood:
             nv, tn = ood_references(p, raw0, mol_emb, iks, spec["task"])
@@ -486,7 +590,9 @@ def run_dataset(ds, args):
                 X = np.stack([ref[r] for r in order])
                 readouts.append(dict(cls=cname, model=model, feat=feat, seed=seed,
                                      knn=knn_of(spec["kind"], X, tg["knn_target"], k),
-                                     rsa=rsa(X, tg["rsa_target"])))
+                                     **{g: fn(X, M) for g, fn in GEOMETRY.items()}))
+                if args.embeddings:
+                    emb_store[f"emb__{cname}__{feat}__{seed}"] = X.astype(np.float16)
                 if args.ood:
                     if feat == "esm":
                         # raw ESM vectors are identical every seed; only the head's seed
@@ -497,8 +603,10 @@ def run_dataset(ds, args):
                                     **ood_boost(p, ref, mol_emb, iks, seed, spec["task"])))
                 if seed == args.seeds[0]:
                     keep[feat] = ref
-                print(f"  {cname:16} {model:24} seed {seed}  "
-                      f"knn {readouts[-1]['knn']:+.3f}  rsa {readouts[-1]['rsa']:+.3f}", flush=True)
+                r_ = readouts[-1]
+                print(f"  {cname:16} {model:24} seed {seed}  knn {r_['knn']:+.3f}  "
+                      f"rsa {r_['rsa']:+.3f}  cca {r_['cca']:+.3f}  "
+                      f"proc {r_['procrustes']:+.3f}", flush=True)
 
         if args.hladis:
             for seed in args.seeds[:args.hladis_seeds]:
@@ -515,6 +623,8 @@ def run_dataset(ds, args):
             panels_saved = True
         print(f"  {cname:16} done in {time.time() - c0:.0f}s", flush=True)
 
+    if emb_store:
+        np.savez_compressed(out / "embeddings.npz", **emb_store)
     pd.DataFrame(readouts).to_csv(out / "readouts.csv", index=False)
     pd.DataFrame(nulls).to_csv(out / "nulls.csv", index=False)
     if ood:
@@ -528,6 +638,7 @@ def run_dataset(ds, args):
         n_receptors=len(recs), n_odorants=len(ods), n_pairs=int(len(p)),
         seeds=args.seeds, epochs=args.epochs, k_nn=k, n_perm=args.n_perm,
         knn_kind="auroc" if spec["kind"] == "sparse_binary" else "specificity",
+        geometry=list(GEOMETRY), geometry_k_cap=GEOMETRY_K_CAP, embeddings=bool(emb_store),
         metric_family="classification" if spec["task"] == "classification" else "regression",
         panel_class=(args.panel_class or (list(classes)[0] if classes else None)),
         ood=bool(args.ood), hladis=bool(args.hladis),
@@ -537,6 +648,7 @@ def run_dataset(ds, args):
 
 
 def main():
+    global GEOMETRY_K_CAP
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dataset", nargs="+", default=["all"],
@@ -546,6 +658,10 @@ def main():
     ap.add_argument("--seeds", type=int, nargs="+", default=[42, 43, 44, 45, 46])
     ap.add_argument("--epochs", type=int, default=900, help="graph epochs (titular protocol)")
     ap.add_argument("--n-perm", type=int, default=100, help="row permutations for the nulls")
+    ap.add_argument("--geometry-k", type=int, default=GEOMETRY_K_CAP,
+                    help=f"rank both sides are reduced to for CCA/Procrustes "
+                         f"(default {GEOMETRY_K_CAP}; raising it inflates CCA's null -- "
+                         f"see the table in the source)")
     ap.add_argument("--no-ood", dest="ood", action="store_false",
                     help="skip the predictive boosting readout (RSA/kNN only)")
     ap.add_argument("--hladis", action="store_true",
@@ -553,12 +669,17 @@ def main():
                          "model per (class, seed) instead of reusing an embedding")
     ap.add_argument("--hladis-seeds", type=int, default=1,
                     help="how many of --seeds to give Hladis (default 1; 5 is ~5x the cost)")
+    ap.add_argument("--no-embeddings", dest="embeddings", action="store_false",
+                    help="skip embeddings.npz. It is what makes a NEW second-order metric "
+                         "free later (no retraining) -- float16, a few MB on the insects, "
+                         "~100MB on M2OR's 900+ receptors")
     ap.add_argument("--panel-class", default=None,
                     help="class for the actual-vs-models panels (default: the first one)")
     ap.add_argument("--device", default="auto")
     ap.add_argument("--out", default="results/mechanism_holdout")
     args = ap.parse_args()
 
+    GEOMETRY_K_CAP = args.geometry_k
     todo = list(DATASETS) if "all" in args.dataset else args.dataset
     bad = [d for d in todo if d not in DATASETS]
     if bad:

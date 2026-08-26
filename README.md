@@ -219,28 +219,21 @@ Hold out every odorant of a chemical class, train the graph without it, then ask
 receptor embedding still says something true about that class. Three receptor representations:
 raw ESM (structure), GNN+ESM (both), GNN one-hot (function only).
 
-Whole run, one GPU:
-
-```bash
-.venv/bin/python scripts/modeling/analysis/mechanism_holdout.py --dataset all
-```
-
-M2OR dominates that wall clock, and its classes share nothing, so on several GPUs give each
-class its own process and rejoin them afterwards:
+Each dataset writes its own directory and shares nothing with the others, so the three run
+side by side, one per GPU -- no merge step, the artifacts land exactly where the serial run
+puts them:
 
 ```sh
 i=0
-for c in carboxylic_acid thiol aldehyde ester; do
-  CUDA_VISIBLE_DEVICES=$i .venv/bin/python scripts/modeling/analysis/mechanism_holdout.py --dataset m2or --classes $c --out results/mh_shards/$c > mh_$c.log 2>&1 &
+for d in m2or cc hc; do
+  CUDA_VISIBLE_DEVICES=$i .venv/bin/python scripts/modeling/analysis/mechanism_holdout.py --dataset $d > mh_$d.log 2>&1 &
   i=$((i + 1))
 done; wait
-.venv/bin/python scripts/modeling/analysis/merge_mechanism_shards.py --dataset m2or results/mh_shards/*
 ```
 
 `CUDA_VISIBLE_DEVICES` rather than `--device cuda:N`: it also pins whatever the boosting head
-and the extractor pick up on their own. The merged directory is indistinguishable from a serial
-run's, and the merger refuses to double-count a class that appears in two shards. `cc` and `hc`
-are small enough to stay serial on a spare GPU alongside.
+and the extractor pick up on their own. A fourth GPU has nothing to do here -- M2OR is the long
+pole and stays one process. Serially, on one GPU, it is the same command with `--dataset all`.
 
 Writes `results/mechanism_holdout/<ds>/`; `notebooks/graph/mechanism_holdout/mechanism_holdout.ipynb`
 reads those artifacts and draws them (set `DATASET` in its first cell). The metrics of record

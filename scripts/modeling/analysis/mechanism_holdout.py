@@ -58,9 +58,9 @@ Artifacts land in `results/mechanism_holdout/<dataset>/`:
                    Skip with --no-embeddings.
     meta.json      config, shapes, timing, what `knn` means for this dataset
 
-One process, one GPU. Nothing is shared between classes -- no checkpoints, no state --
-so the way onto N GPUs is one class per process (`--classes X --out <shard>`) followed by
-`merge_mechanism_shards.py`, which rebuilds the layout this script would have written.
+One process, one GPU, and the three datasets share nothing -- separate data, separate output
+directories. So the way onto several GPUs is one dataset per process
+(`--dataset cc`, pinned with CUDA_VISIBLE_DEVICES); there is nothing to merge afterwards.
 
 A note on the seeds: they vary ONLY the graph's weight initialisation (torch.manual_seed
 before _train_one). The class split is fixed by SMARTS and the receptor set is fixed by the

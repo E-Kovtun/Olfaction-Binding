@@ -235,6 +235,13 @@ done; wait
 and the extractor pick up on their own. A fourth GPU has nothing to do here -- M2OR is the long
 pole and stays one process. Serially, on one GPU, it is the same command with `--dataset all`.
 
+`--backfill` fills those columns into an existing run's `nulls.csv` (from its
+`embeddings.npz`, no training) if the artifacts predate them:
+
+```sh
+.venv/bin/python scripts/modeling/analysis/mechanism_holdout.py --dataset all --backfill
+```
+
 Writes `results/mechanism_holdout/<ds>/`; `notebooks/graph/mechanism_holdout/mechanism_holdout.ipynb`
 reads those artifacts and draws them (set `DATASET` in its first cell). The metrics of record
 are three geometric ones — RSA, CCA, Procrustes — none with a head or a hyperparameter; `tab:t6`

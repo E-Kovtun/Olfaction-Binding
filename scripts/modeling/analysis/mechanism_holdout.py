@@ -47,6 +47,9 @@ model, so weighting by them cannot favour a representation.
 Agreement between RSA and OOD is the point: RSA has no moving parts and OOD has both a head
 and hyperparameters, so a conclusion surviving in both does not live in either one's.
 
+A run made before those columns existed does not have to be repeated: `--backfill` adds them
+to an existing directory from its own `embeddings.npz`, with no training.
+
 This script does all the computing and writes small artifacts;
 `notebooks/graph/mechanism_holdout/mechanism_holdout.ipynb` only reads and draws them.
 
@@ -737,6 +740,66 @@ def run_dataset(ds, args):
     print(f"=== {ds.upper()} written to {out} in {time.time() - t0:.0f}s", flush=True)
 
 
+def backfill(ds, args):
+    """Add the isolation controls and the null spreads to an ALREADY-WRITTEN directory.
+
+    Nothing here needs a trained model: `struct_leak` is chemistry, `func_redund` is the
+    response matrix against the stored target, and the null spread is the same row
+    permutation applied to the stored raw-ESM embedding. This is the embeddings dump paying
+    for itself -- a run made before these columns existed does not have to be repeated.
+    """
+    spec = DATASETS[ds]
+    out = pathlib.Path(args.out) / ds
+    npath = out / "nulls.csv"
+    if not npath.exists():
+        print(f"=== {ds.upper()} skipped: no {npath}", flush=True)
+        return
+    null = pd.read_csv(npath)
+    emb = None
+    if (out / "embeddings.npz").exists():
+        # allow_pickle: runs written before the order array became str_ stored it as
+        # object. It is our own artifact, not foreign input.
+        emb = np.load(out / "embeddings.npz", allow_pickle=True)
+    else:
+        print(f"  {ds}: no embeddings.npz -- func_redund and the null spreads need it, "
+              f"only struct_leak can be filled", flush=True)
+
+    p, recs, ods, R, smi = load_dataset(ds)
+    names = args.classes or spec["classes"]
+    classes = class_members(ods, smi, names, spec["min_members"])
+    rows = []
+    for _, r in null.iterrows():
+        row = dict(r)
+        cname = row["cls"]
+        iks = classes.get(cname)
+        if iks is None:
+            print(f"  {cname:16} not a class of this dataset now -- left as is", flush=True)
+            rows.append(row)
+            continue
+        row["struct_leak"] = struct_leak(smi, ods, iks)
+        if emb is not None and f"order__{cname}" in emb.files:
+            order = [str(x) for x in emb[f"order__{cname}"]]
+            M = np.asarray(emb[f"target__{cname}"], np.float64)
+            row["func_redund"] = func_redund(R, recs, ods, order, iks, M)
+            Xe = np.asarray(emb[f"emb__{cname}__esm__0"], np.float64)
+            for g, fn in GEOMETRY.items():
+                m, sd = permuted_stats(lambda Xs, fn=fn: fn(Xs, M), Xe, args.n_perm)
+                row[f"{g}_null_sd"] = sd
+                # the stored mean is authoritative; this one only says the two agree
+                if abs(m - float(row.get(f"{g}_null", m))) > 4 * sd + 1e-9:
+                    print(f"  {cname:16} {g}: recomputed null {m:+.3f} disagrees with the "
+                          f"stored {row[f'{g}_null']:+.3f} -- different data?", flush=True)
+        row["trust"] = trust(row.get("struct_leak", np.nan), row.get("func_redund", np.nan))
+        print(f"  {cname:16} struct_leak {row['struct_leak']:.3f}  "
+              f"func_redund {row.get('func_redund', float('nan')):.3f}  "
+              f"trust {row['trust']:.3f}", flush=True)
+        rows.append(row)
+    pd.DataFrame(rows).to_csv(npath, index=False)
+    if emb is not None:
+        emb.close()
+    print(f"=== {ds.upper()} nulls.csv backfilled in place", flush=True)
+
+
 def main():
     global GEOMETRY_K_CAP
     ap = argparse.ArgumentParser(description=__doc__,
@@ -765,6 +828,10 @@ def main():
                          "~100MB on M2OR's 900+ receptors")
     ap.add_argument("--panel-class", default=None,
                     help="class for the actual-vs-models panels (default: the first one)")
+    ap.add_argument("--backfill", action="store_true",
+                    help="do not train: add struct_leak / func_redund / trust and the "
+                         "*_null_sd columns to an existing run's nulls.csv, using its "
+                         "embeddings.npz. For runs made before those columns existed")
     ap.add_argument("--device", default="auto")
     ap.add_argument("--out", default="results/mechanism_holdout")
     args = ap.parse_args()
@@ -775,7 +842,7 @@ def main():
     if bad:
         ap.error(f"unknown dataset(s) {bad}, have {list(DATASETS)}")
     for ds in todo:
-        run_dataset(ds, args)
+        (backfill if args.backfill else run_dataset)(ds, args)
 
 
 if __name__ == "__main__":

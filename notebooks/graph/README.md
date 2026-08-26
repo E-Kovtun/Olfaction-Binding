@@ -57,6 +57,13 @@ Three readouts, deliberately different in kind:
   `--hladis` scores a competitor on exactly the same masks.
 * **kNN** -- the original leave-one-out readout, kept as a deprecated panel. Do not quote it.
 
+`--backfill` fills those columns into an existing run's `nulls.csv` (from its
+`embeddings.npz`, no training) if the artifacts predate them:
+
+```sh
+.venv/bin/python scripts/modeling/analysis/mechanism_holdout.py --dataset all --backfill
+```
+
 Section 7 collapses the per-class numbers into **one per representation**. Dimensionless
 first -- each class scored against its own permutation null, in units of that null's spread,
 because the three geometries sit on different floors and a small class has a wider null.

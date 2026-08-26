@@ -4,12 +4,24 @@ Hold out every odorant of a chemical class C, train the signed graph on what rem
 ask what the resulting receptor geometry still knows about C. The graph never saw a single
 class-C example, so anything it gets right transferred.
 
-Three receptor representations throughout:
+Five receptor representations, grouped by what each is allowed to know:
 
-    raw ESM       structure only  -- sequence, sees no binding at all
-    GNN+ESM       both            -- our graph, ESM node features refined by binding
-    GNN one-hot   function only   -- the same graph fed one-hot receptor identity, so the
-                                     geometry comes from binding alone
+    raw ESM             structure only  -- sequence, sees no binding at all
+    GNN+ESM             both            -- our graph, ESM node features refined by binding
+    GNN one-hot         function only   -- the same graph fed one-hot receptor identity, so
+                                           the geometry comes from binding alone
+    GNN + PCA128(ESM)   both, stapled   -- the graph's embedding concatenated with the
+                                           principal scores of raw ESM, each block scaled to
+                                           equal weight. Answers what no single-source row
+                                           can: did refinement DROP something ESM had?
+    retained profile    function, raw   -- the receptor's own measured responses to the
+                                           odorants that stayed. No model in it at all, so
+                                           it is the floor: whatever the graph scores above
+                                           it is what refinement added, and whatever it does
+                                           not was already lying in the response table.
+
+The last two are DERIVED -- computed from the stored embeddings after the fact, with no
+training (`--derive`, automatic after a fresh run). The first three cost a graph each.
 
 Readouts, deliberately different in kind:
 
@@ -58,6 +70,9 @@ This script does all the computing and writes small artifacts;
 Artifacts land in `results/mechanism_holdout/<dataset>/`:
 
     readouts.csv   one row per (class, model, seed): knn, rsa, cca, procrustes
+    model_nulls.csv one row per (class, model): each geometry's null and its spread.
+                   Per model because the spread depends on the representation and the
+                   notebook's headline number divides by it
     nulls.csv      one row per class: the null / baseline line for each readout, each
                    geometry's null SPREAD (`*_null_sd`, what makes a score
                    dimensionless), and the two isolation controls `struct_leak` /
@@ -150,6 +165,10 @@ VARIANT = dict(q=0.0, criterion="coverage", k_mode="coverage_quantile")
 MODEL_ESM = "raw ESM"
 MODEL_GNN = "GNN+ESM full (q=0)"
 MODEL_ONEHOT = "GNN one-hot full (q=0)"
+MODEL_CONCAT = "GNN + PCA128(ESM)"
+MODEL_PROFILE = "retained profile"
+DERIVED = (MODEL_CONCAT, MODEL_PROFILE)
+PCA_DIM = 128
 
 
 # --------------------------------------------------------------------------- data
@@ -413,6 +432,57 @@ def func_redund(R, recs, ods, order, iks, target):
     if ok.sum() < 3 or np.nanstd(a[ok]) < 1e-9 or np.nanstd(b[ok]) < 1e-9:
         return float("nan")
     return float(max(0.0, np.corrcoef(a[ok], b[ok])[0, 1]))
+
+
+def pca_esm(Xe, dim=PCA_DIM):
+    """Principal scores of the raw ESM matrix, at most `dim` of them.
+
+    Fitted on this holdout's own training universe: the split removes ODORANTS, not
+    receptors, so every receptor here is a training receptor. It is fitted on sequence
+    alone and never sees a response, so it cannot carry the held-out class either way.
+    The rank is capped by n-1, which binds hard on the insects (24 and 50 receptors).
+    """
+    k = int(min(dim, len(Xe) - 1, np.asarray(Xe).shape[1]))
+    return _pca(Xe, k), k
+
+
+def block_concat(*blocks):
+    """Concatenate representations after putting each block on the same scale.
+
+    Without this the wider-variance block decides the geometry outright: ESM principal
+    scores carry their raw singular values while the graph's 256 dims are whatever training
+    left them at. Each block is centred and divided by its own mean row norm, so the
+    concatenation is a genuine 50/50 and not a disguised single source.
+    """
+    out = []
+    for B in blocks:
+        B = np.asarray(B, np.float64)
+        B = B - B.mean(0)
+        out.append(B / (np.sqrt((B ** 2).sum(1).mean()) + 1e-12))
+    return np.hstack(out)
+
+
+def retained_profile(R, recs, ods, order, iks):
+    """Function only, with no model in it at all: the receptor's OWN measured responses to
+    the odorants that stayed in training.
+
+    The point of the pair (this, GNN one-hot): both know function and nothing else, but this
+    one involves no learning, so it says how much of the transfer was already sitting in the
+    raw response table. On the sparse matrix an untested pair reads 0 -- the same thing the
+    graph sees, an absent edge, not an imputed one.
+
+    Rows are centred, and that matters: a receptor's mean over the retained odorants is
+    EXACTLY the quantity the insect target was residualised on, so leaving it in would make
+    the baseline's score turn on that convention instead of on function. Measured both ways
+    on HC/carboxylic_acid, centring raises the baseline (RSA +0.147 -> +0.272), so this is
+    the harder floor for our own method to clear, not the softer one.
+    """
+    r_i = {r: i for i, r in enumerate(recs)}
+    keep = [j for j, o in enumerate(ods) if o not in iks]
+    if not keep:
+        return None
+    X = np.nan_to_num(R[np.ix_([r_i[r] for r in order], keep)], nan=0.0)
+    return X - X.mean(1, keepdims=True)
 
 
 def trust(sl, fr):
@@ -738,6 +808,8 @@ def run_dataset(ds, args):
         variant=VARIANT, seconds=round(time.time() - t0, 1),
     ), indent=2), encoding="utf-8")
     print(f"=== {ds.upper()} written to {out} in {time.time() - t0:.0f}s", flush=True)
+    if args.auto_derive and emb_store:
+        derive(ds, args)
 
 
 def backfill(ds, args):
@@ -800,6 +872,105 @@ def backfill(ds, args):
     print(f"=== {ds.upper()} nulls.csv backfilled in place", flush=True)
 
 
+def derive(ds, args):
+    """Two more receptor representations, and per-model nulls, from the stored embeddings.
+
+    Neither needs a trained model, which is the whole point:
+
+        GNN + PCA128(ESM)   the graph's own embedding concatenated with the principal
+                            scores of raw ESM. Both sources at once, explicitly, instead of
+                            the graph's implicit mixing -- it answers "did refinement DROP
+                            something ESM had", which no single-source row can.
+        retained profile    the receptor's measured responses to the odorants that stayed.
+                            Function with no learning at all: the floor the graph has to
+                            clear before "the graph transferred a mechanism" means anything.
+
+    Also writes model_nulls.csv -- the permutation null per (class, MODEL). The class-level
+    null in nulls.csv is computed on raw ESM, which was fine for three representations of
+    similar width but not for a 1300-column response profile: the null's spread depends on
+    the representation, and section 7 divides by it.
+    """
+    spec = DATASETS[ds]
+    out = pathlib.Path(args.out) / ds
+    if not (out / "readouts.csv").exists():
+        print(f"=== {ds.upper()} skipped: no {out/'readouts.csv'}", flush=True)
+        return
+    if not (out / "embeddings.npz").exists():
+        print(f"=== {ds.upper()} skipped: no embeddings.npz -- the derived models are read "
+              f"from it (re-run without --no-embeddings)", flush=True)
+        return
+
+    res = pd.read_csv(out / "readouts.csv")
+    res = res[~res["model"].isin(DERIVED)]              # idempotent: drop a previous derive
+    with np.load(out / "embeddings.npz", allow_pickle=True) as z:
+        emb = {kk: z[kk] for kk in z.files}
+
+    p, recs, ods, R, smi = load_dataset(ds)
+    names = args.classes or spec["classes"]
+    classes = class_members(ods, smi, names, spec["min_members"])
+    k = spec["k_nn"]
+
+    rows, mnulls = [], []
+    for cname in [c for c in res["cls"].unique() if c in classes]:
+        iks = classes[cname]
+        order = [str(x) for x in emb[f"order__{cname}"]]
+        M = np.asarray(emb[f"target__{cname}"], np.float64)
+        tg = class_targets(spec["kind"], p, R, recs, ods, order, iks)
+        if list(tg["order"]) != list(order):
+            print(f"  {cname:16} receptor order moved since the run -- skipped", flush=True)
+            continue
+        Xe = np.asarray(emb[f"emb__{cname}__esm__0"], np.float64)
+        Pe, pdim = pca_esm(Xe)
+
+        new = {}
+        for kk in sorted(emb):
+            pre = f"emb__{cname}__esm__"
+            if kk.startswith(pre) and kk != f"{pre}0":
+                seed = kk[len(pre):]
+                new[(MODEL_CONCAT, seed)] = block_concat(np.asarray(emb[kk], np.float64), Pe)
+        prof = retained_profile(R, recs, ods, order, iks)
+        if prof is not None:
+            new[(MODEL_PROFILE, "-")] = prof
+
+        for (model, seed), X in new.items():
+            rows.append(dict(cls=cname, model=model, feat="derived", seed=seed,
+                             knn=knn_of(spec["kind"], X, tg["knn_target"], k),
+                             **{g: fn(X, M) for g, fn in GEOMETRY.items()}))
+            emb[f"emb__{cname}__{'concat' if model == MODEL_CONCAT else 'profile'}__{seed}"]                 = X.astype(np.float16)
+            print(f"  {cname:16} {model:24} seed {seed:>3}  "
+                  + "  ".join(f"{g[:4]} {rows[-1][g]:+.3f}" for g in GEOMETRY), flush=True)
+
+        # one null per (class, model): same permutation, each representation's own geometry
+        reps = {MODEL_ESM: Xe, MODEL_CONCAT: new.get((MODEL_CONCAT, str(args.seeds[0]))),
+                MODEL_PROFILE: new.get((MODEL_PROFILE, "-"))}
+        for feat, model in (("esm", MODEL_GNN), ("onehot", MODEL_ONEHOT)):
+            kk = f"emb__{cname}__{feat}__{args.seeds[0]}"
+            reps[model] = np.asarray(emb[kk], np.float64) if kk in emb else None
+        for model, X in reps.items():
+            if X is None:
+                continue
+            r = dict(cls=cname, model=model, n_dim=int(np.asarray(X).shape[1]))
+            for g, fn in GEOMETRY.items():
+                m, sd = permuted_stats(lambda Xs, fn=fn: fn(Xs, M), X, args.n_perm)
+                r[f"{g}_null"], r[f"{g}_null_sd"] = m, sd
+            mnulls.append(r)
+        print(f"  {cname:16} PCA(ESM) kept {pdim} dims", flush=True)
+
+    if not rows:
+        print(f"=== {ds.upper()} nothing derived", flush=True)
+        return
+    pd.concat([res, pd.DataFrame(rows)], ignore_index=True).to_csv(out / "readouts.csv",
+                                                                   index=False)
+    pd.DataFrame(mnulls).to_csv(out / "model_nulls.csv", index=False)
+    np.savez_compressed(out / "embeddings.npz", **emb)
+    mp = out / "meta.json"
+    m = json.loads(mp.read_text(encoding="utf-8"))
+    m["derived"] = list(DERIVED)
+    m["pca_dim"] = PCA_DIM
+    mp.write_text(json.dumps(m, indent=2), encoding="utf-8")
+    print(f"=== {ds.upper()} derived {len(rows)} rows, model_nulls.csv written", flush=True)
+
+
 def main():
     global GEOMETRY_K_CAP
     ap = argparse.ArgumentParser(description=__doc__,
@@ -828,6 +999,12 @@ def main():
                          "~100MB on M2OR's 900+ receptors")
     ap.add_argument("--panel-class", default=None,
                     help="class for the actual-vs-models panels (default: the first one)")
+    ap.add_argument("--derive", action="store_true",
+                    help="do not train: add the derived representations (GNN+PCA(ESM), "
+                         "retained profile) and per-model nulls to an existing run, from "
+                         "its embeddings.npz. Runs automatically after a fresh run")
+    ap.add_argument("--no-derive", dest="auto_derive", action="store_false",
+                    help="skip that automatic step after a fresh run")
     ap.add_argument("--backfill", action="store_true",
                     help="do not train: add struct_leak / func_redund / trust and the "
                          "*_null_sd columns to an existing run's nulls.csv, using its "
@@ -842,7 +1019,13 @@ def main():
     if bad:
         ap.error(f"unknown dataset(s) {bad}, have {list(DATASETS)}")
     for ds in todo:
-        (backfill if args.backfill else run_dataset)(ds, args)
+        if args.backfill or args.derive:
+            if args.backfill:
+                backfill(ds, args)
+            if args.derive:
+                derive(ds, args)
+        else:
+            run_dataset(ds, args)
 
 
 if __name__ == "__main__":

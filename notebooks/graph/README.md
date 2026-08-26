@@ -57,12 +57,19 @@ Three readouts, deliberately different in kind:
   `--hladis` scores a competitor on exactly the same masks.
 * **kNN** -- the original leave-one-out readout, kept as a deprecated panel. Do not quote it.
 
+`--derive` adds the two derived representations and the per-model nulls to an existing run
+(from its `embeddings.npz`, no training); it runs automatically after a fresh one.
 `--backfill` fills those columns into an existing run's `nulls.csv` (from its
 `embeddings.npz`, no training) if the artifacts predate them:
 
 ```sh
-.venv/bin/python scripts/modeling/analysis/mechanism_holdout.py --dataset all --backfill
+.venv/bin/python scripts/modeling/analysis/mechanism_holdout.py --dataset all --backfill --derive
 ```
+
+Five representations, and the notebook's `SHOW` list picks which of them the tables and
+figures use: `raw ESM` (structure), `GNN one-hot` and `retained profile` (function, learned
+and not learned), `GNN+ESM` and `GNN + PCA128(ESM)` (both, mixed during training and stapled
+together after it). The last two are derived from the stored embeddings without training.
 
 Section 7 collapses the per-class numbers into **one per representation**. Dimensionless
 first -- each class scored against its own permutation null, in units of that null's spread,

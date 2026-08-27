@@ -235,13 +235,14 @@ done; wait
 and the extractor pick up on their own. A fourth GPU has nothing to do here -- M2OR is the long
 pole and stays one process. Serially, on one GPU, it is the same command with `--dataset all`.
 
-`--derive` adds the two derived representations and the per-model nulls to an existing run
-(from its `embeddings.npz`, no training); it runs automatically after a fresh one.
-`--backfill` fills those columns into an existing run's `nulls.csv` (from its
-`embeddings.npz`, no training) if the artifacts predate them:
+Three post-hoc passes bring an older run up to date without retraining anything, all reading
+its own `embeddings.npz`: `--derive` adds the two derived representations and the per-model
+nulls (and runs automatically after a fresh run), `--backfill` adds the isolation controls
+and null spreads to `nulls.csv`, and `--rescore-ood` refits the boosting head for BOTH target
+series and rewrites `ood.csv`:
 
 ```sh
-.venv/bin/python scripts/modeling/analysis/mechanism_holdout.py --dataset all --backfill --derive
+.venv/bin/python scripts/modeling/analysis/mechanism_holdout.py --dataset all --backfill --derive --rescore-ood
 ```
 
 Writes `results/mechanism_holdout/<ds>/`; `notebooks/graph/mechanism_holdout/mechanism_holdout.ipynb`

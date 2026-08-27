@@ -54,19 +54,25 @@ Three readouts, deliberately different in kind:
 * **Predictive OOD** -- the pipeline's own boosting head fitted on pairs outside the class and
   scored on the class, against `naive` and `receptor tuning` references. Agreement between the
   two is the point: a conclusion that survives both does not live in either one's moving parts.
-  `--hladis` scores a competitor on exactly the same masks. Its axis is symlog -- log in both
-  directions around the metric's own chance level (0 for R2, 0.5 for AUROC, subtracted) -- and
+  `--hladis` scores a competitor on exactly the same masks. On cc/hc it runs against TWO
+  targets -- the continuous response and its binarisation at the graph's own edge threshold --
+  and the notebook's `OOD_METRIC` picks the series and the number together (`R2 | Pearson |
+  Spearman` vs `AUROC | AUPRC | MCC | F1 | precision | recall`); M2OR has only the binary one.
+  Its axis is symlog -- log in both
+  directions around each class's own chance level (what the constant `naive` predictor scores
+  there: the naive row for R2, 0.5 for AUROC, the prevalence for AUPRC) -- and
   the rightmost group, past a divider, is the same models aggregated over classes with the
   section-7 trust weights, plus a dimensionless table beneath it.
 * **kNN** -- the original leave-one-out readout, kept as a deprecated panel. Do not quote it.
 
-`--derive` adds the two derived representations and the per-model nulls to an existing run
-(from its `embeddings.npz`, no training); it runs automatically after a fresh one.
-`--backfill` fills those columns into an existing run's `nulls.csv` (from its
-`embeddings.npz`, no training) if the artifacts predate them:
+Three post-hoc passes bring an older run up to date without retraining anything, all reading
+its own `embeddings.npz`: `--derive` adds the two derived representations and the per-model
+nulls (and runs automatically after a fresh run), `--backfill` adds the isolation controls
+and null spreads to `nulls.csv`, and `--rescore-ood` refits the boosting head for BOTH target
+series and rewrites `ood.csv`:
 
 ```sh
-.venv/bin/python scripts/modeling/analysis/mechanism_holdout.py --dataset all --backfill --derive
+.venv/bin/python scripts/modeling/analysis/mechanism_holdout.py --dataset all --backfill --derive --rescore-ood
 ```
 
 Five representations, and the notebook's `SHOW` list picks which of them the tables and

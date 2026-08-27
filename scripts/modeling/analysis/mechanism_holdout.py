@@ -46,6 +46,12 @@ Readouts, deliberately different in kind:
             Prediction, in units another method can be scored in -- a CONTROLLED OOD, where
             the pipeline's cold-molecule split hides a random 20% of odorants and this hides
             a chemistry. Optionally the same masks for a competitor (`--hladis`).
+            On the insect matrices this runs TWICE: against the continuous z-scored
+            response (regression metrics) and against its binarisation at OOD_THRESHOLD --
+            the graph's own edge threshold, so "positive" means the same thing in both. Same
+            features, same masks, same head; only the target changes, which is why it costs
+            no training. ood.csv carries a `target` column and the notebook's metric flag
+            selects the series. M2OR's labels are already binary: one series.
 
 ISOLATION, and why classes are weighted. A holdout only tests mechanism transfer if it
 really removed the class. Two ways it does not: `struct_leak` -- the mean best Tanimoto from
@@ -77,7 +83,7 @@ Artifacts land in `results/mechanism_holdout/<dataset>/`:
                    geometry's null SPREAD (`*_null_sd`, what makes a score
                    dimensionless), and the two isolation controls `struct_leak` /
                    `func_redund` with the class weight `trust` they combine into
-    ood.csv        one row per (class, model, seed): the metric family for the task,
+    ood.csv        one row per (class, target, model, seed): the metric family for that
                    including the `naive (train mean)` and `receptor tuning` references
     panels.npz     the flagship class's actual-vs-three-models reconstruction
     overview.npz   the response matrix with the class pulled into a block, for the heat map
@@ -169,6 +175,13 @@ MODEL_CONCAT = "GNN + PCA128(ESM)"
 MODEL_PROFILE = "retained profile"
 DERIVED = (MODEL_CONCAT, MODEL_PROFILE)
 PCA_DIM = 128
+
+# The insect response is a z-score, and the graph already binarises it at exactly this
+# threshold to decide an edge's sign (`GnnSignedExtractor.edge_threshold`, default 0.0,
+# with edge_center="global" so `dev` IS y). Reusing that number rather than inventing one
+# keeps "positive" meaning the same thing in the graph and in the boosting head: responds
+# above the pool average.
+OOD_THRESHOLD = 0.0
 
 
 # --------------------------------------------------------------------------- data
@@ -598,6 +611,34 @@ def ood_boost(p, rec_vec, mol_emb, iks, seed, task):
     return m
 
 
+def ood_series(spec, p):
+    """The OOD target(s) a dataset supports, as (name, pairs, task).
+
+    On the insects the same pairs are scored twice: once against the continuous z-scored
+    response (regression metrics) and once against its binarisation at OOD_THRESHOLD
+    (classification metrics). Same features, same masks, same head, same split -- only the
+    question changes, from "how strongly does it respond" to "does it respond at all". That
+    is why this needs no change to training: a target is not a model.
+
+    M2OR's labels are already binary, so it has the one series, and the notebook's metric
+    flag therefore only bites on cc/hc.
+    """
+    if spec["kind"] == "sparse_binary":
+        return [("binary", p, "classification")]
+    pb = p.copy()
+    pb["label"] = (p["label"].to_numpy(np.float64) > OOD_THRESHOLD).astype(np.float32)
+    return [("continuous", p, "regression"), ("binary", pb, "classification")]
+
+
+def series_viable(pp, rec_vec, mol_emb, iks, task):
+    """A binarised class can land entirely on one side of the threshold; then there is no
+    classifier to fit and no AUROC to report. Say so instead of crashing the run."""
+    tr, te = ood_masks(pp, rec_vec, mol_emb, iks)
+    if task != "classification":
+        return int(tr.sum()) > 0 and int(te.sum()) > 0
+    return (pp[tr]["label"].nunique() > 1) and (pp[te]["label"].nunique() > 1)
+
+
 def ood_references(p, rec_vec, mol_emb, iks, task):
     """The two lines that decide how to read every OOD number.
 
@@ -803,10 +844,20 @@ def run_dataset(ds, args):
             emb_store[f"target__{cname}"] = M.astype(np.float32)
             emb_store[f"emb__{cname}__esm__0"] = Xe.astype(np.float16)
 
+        series = [t for t in ood_series(spec, p)
+                  if series_viable(t[1], raw0, mol_emb, iks, t[2])]
         if args.ood:
-            nv, tn = ood_references(p, raw0, mol_emb, iks, spec["task"])
-            ood.append(dict(cls=cname, model="naive (train mean)", seed="-", **nv))
-            ood.append(dict(cls=cname, model="receptor tuning", seed="-", **tn))
+            for tname, pp, task in series:
+                nv, tn = ood_references(pp, raw0, mol_emb, iks, task)
+                ood.append(dict(cls=cname, target=tname, model="naive (train mean)",
+                                seed="-", **nv))
+                ood.append(dict(cls=cname, target=tname, model="receptor tuning",
+                                seed="-", **tn))
+            dropped = [t[0] for t in ood_series(spec, p)
+                       if t[0] not in {x[0] for x in series}]
+            if dropped:
+                print(f"  {cname:16} no {dropped} OOD series: the class does not straddle "
+                      f"the threshold", flush=True)
 
         keep = {}
         for feat, model in [("esm", MODEL_GNN), ("onehot", MODEL_ONEHOT)]:
@@ -820,13 +871,15 @@ def run_dataset(ds, args):
                 if args.embeddings:
                     emb_store[f"emb__{cname}__{feat}__{seed}"] = X.astype(np.float16)
                 if args.ood:
-                    if feat == "esm":
-                        # raw ESM vectors are identical every seed; only the head's seed
-                        # moves, which is what makes its CI comparable to the graphs'
-                        ood.append(dict(cls=cname, model=MODEL_ESM, seed=seed,
-                                        **ood_boost(p, raw, mol_emb, iks, seed, spec["task"])))
-                    ood.append(dict(cls=cname, model=model, seed=seed,
-                                    **ood_boost(p, ref, mol_emb, iks, seed, spec["task"])))
+                    for tname, pp, task in series:
+                        if feat == "esm":
+                            # raw ESM vectors are identical every seed; only the head's seed
+                            # moves, which is what makes its CI comparable to the graphs'
+                            ood.append(dict(cls=cname, target=tname, model=MODEL_ESM,
+                                            seed=seed,
+                                            **ood_boost(pp, raw, mol_emb, iks, seed, task)))
+                        ood.append(dict(cls=cname, target=tname, model=model, seed=seed,
+                                        **ood_boost(pp, ref, mol_emb, iks, seed, task)))
                 if seed == args.seeds[0]:
                     keep[feat] = ref
                 r_ = readouts[-1]
@@ -837,7 +890,8 @@ def run_dataset(ds, args):
         if args.hladis:
             for seed in args.seeds[:args.hladis_seeds]:
                 m = ood_hladis(spec, ds, p, mol_emb, iks, seed, spec["hladis"])
-                ood.append(dict(cls=cname, model="Hladis cls+mol", seed=seed, **m))
+                ood.append(dict(cls=cname, target="binary" if spec["kind"] == "sparse_binary"
+                                else "continuous", model="Hladis cls+mol", seed=seed, **m))
                 print(f"  {cname:16} {'Hladis cls+mol':24} seed {seed}", flush=True)
 
         if cname == (args.panel_class or list(classes)[0]) and not panels_saved:
@@ -868,6 +922,7 @@ def run_dataset(ds, args):
         metric_family="classification" if spec["task"] == "classification" else "regression",
         panel_class=(args.panel_class or (list(classes)[0] if classes else None)),
         ood=bool(args.ood), hladis=bool(args.hladis),
+        ood_targets=[t[0] for t in ood_series(spec, p)], ood_threshold=OOD_THRESHOLD,
         variant=VARIANT, seconds=round(time.time() - t0, 1),
     ), indent=2), encoding="utf-8")
     print(f"=== {ds.upper()} written to {out} in {time.time() - t0:.0f}s", flush=True)
@@ -1032,6 +1087,78 @@ def derive(ds, args):
     print(f"=== {ds.upper()} derived {len(rows)} rows, model_nulls.csv written", flush=True)
 
 
+def rescore_ood(ds, args):
+    """Recompute ood.csv for an existing run -- both target series -- without retraining.
+
+    The boosting head eats a receptor vector and a molecule vector. Both are already on
+    disk (embeddings.npz and the molecule cache), so a second target costs a head fit, not
+    a graph. That is the whole reason the binarised series can be added to runs that
+    finished before it existed.
+
+    Overwrites ood.csv rather than appending: the continuous rows are recomputed from the
+    same stored embeddings, so the file stays internally consistent instead of mixing two
+    generations of it.
+    """
+    spec = DATASETS[ds]
+    out = pathlib.Path(args.out) / ds
+    if not (out / "embeddings.npz").exists():
+        print(f"=== {ds.upper()} skipped: no embeddings.npz -- rescoring reads the receptor "
+              f"vectors from it (re-run without --no-embeddings)", flush=True)
+        return
+    from orbind.dataset import load_npz_dict
+    with np.load(out / "embeddings.npz", allow_pickle=True) as z:
+        emb = {k: z[k] for k in z.files}
+    p, recs, ods, R, smi = load_dataset(ds)
+    mol_emb = load_npz_dict(str(DATA / spec["mol"]))
+    names = args.classes or spec["classes"]
+    classes = class_members(ods, smi, names, spec["min_members"])
+
+    rows = []
+    for cname in [k[len("target__"):] for k in emb if k.startswith("target__")]:
+        if cname not in classes:
+            print(f"  {cname:16} not a class of this dataset now -- skipped", flush=True)
+            continue
+        iks = classes[cname]
+        order = [str(x) for x in emb[f"order__{cname}"]]
+        raw = {r: v for r, v in zip(order, np.asarray(emb[f"emb__{cname}__esm__0"],
+                                                      np.float32))}
+        series = [t for t in ood_series(spec, p)
+                  if series_viable(t[1], raw, mol_emb, iks, t[2])]
+        if not series:
+            print(f"  {cname:16} no viable OOD series -- skipped", flush=True)
+            continue
+        for tname, pp, task in series:
+            nv, tn = ood_references(pp, raw, mol_emb, iks, task)
+            rows.append(dict(cls=cname, target=tname, model="naive (train mean)",
+                             seed="-", **nv))
+            rows.append(dict(cls=cname, target=tname, model="receptor tuning",
+                             seed="-", **tn))
+            for feat, model in (("esm", MODEL_GNN), ("onehot", MODEL_ONEHOT)):
+                for seed in args.seeds:
+                    kk = f"emb__{cname}__{feat}__{seed}"
+                    if kk not in emb:
+                        continue
+                    ref = {r: v for r, v in zip(order, np.asarray(emb[kk], np.float32))}
+                    if feat == "esm":
+                        rows.append(dict(cls=cname, target=tname, model=MODEL_ESM, seed=seed,
+                                         **ood_boost(pp, raw, mol_emb, iks, seed, task)))
+                    rows.append(dict(cls=cname, target=tname, model=model, seed=seed,
+                                     **ood_boost(pp, ref, mol_emb, iks, seed, task)))
+            print(f"  {cname:16} {tname:10} rescored", flush=True)
+
+    if not rows:
+        print(f"=== {ds.upper()} nothing rescored", flush=True)
+        return
+    pd.DataFrame(rows).to_csv(out / "ood.csv", index=False)
+    mp = out / "meta.json"
+    m = json.loads(mp.read_text(encoding="utf-8"))
+    m["ood"] = True
+    m["ood_targets"] = [t[0] for t in ood_series(spec, p)]
+    m["ood_threshold"] = OOD_THRESHOLD
+    mp.write_text(json.dumps(m, indent=2), encoding="utf-8")
+    print(f"=== {ds.upper()} ood.csv rewritten with {len(rows)} rows", flush=True)
+
+
 def main():
     global GEOMETRY_K_CAP
     ap = argparse.ArgumentParser(description=__doc__,
@@ -1066,6 +1193,10 @@ def main():
                          "its embeddings.npz. Runs automatically after a fresh run")
     ap.add_argument("--no-derive", dest="auto_derive", action="store_false",
                     help="skip that automatic step after a fresh run")
+    ap.add_argument("--rescore-ood", dest="rescore", action="store_true",
+                    help="do not train: refit the boosting head on an existing run for BOTH "
+                         "target series (continuous and binarised at the graph's own edge "
+                         "threshold) and rewrite ood.csv, from its embeddings.npz")
     ap.add_argument("--backfill", action="store_true",
                     help="do not train: add struct_leak / func_redund / trust and the "
                          "*_null_sd columns to an existing run's nulls.csv, using its "
@@ -1080,11 +1211,13 @@ def main():
     if bad:
         ap.error(f"unknown dataset(s) {bad}, have {list(DATASETS)}")
     for ds in todo:
-        if args.backfill or args.derive:
+        if args.backfill or args.derive or args.rescore:
             if args.backfill:
                 backfill(ds, args)
             if args.derive:
                 derive(ds, args)
+            if args.rescore:
+                rescore_ood(ds, args)
         else:
             run_dataset(ds, args)
 

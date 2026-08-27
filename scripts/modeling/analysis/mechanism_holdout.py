@@ -65,6 +65,14 @@ model, so weighting by them cannot favour a representation.
 Agreement between RSA and OOD is the point: RSA has no moving parts and OOD has both a head
 and hyperparameters, so a conclusion surviving in both does not live in either one's.
 
+WHICH GRAPH. The refinement's message-passing molecule selection is a run parameter, not a
+constant: `--variant q0cov` is full coverage with no quantile cut, `--variant q99greedy` is
+the titular q99 + greedy pair cover the M2OR pipeline actually runs. M2OR defaults to the
+latter -- scoring mechanism transfer on a graph no other M2OR number uses compares the wrong
+object -- and the insects to the former, where a quantile cut on top of an already-removed
+class is a second moving part. A non-legacy variant writes to `<dataset>__<variant>/`, so the
+two never overwrite each other and the notebook's `VARIANT` flag picks between them.
+
 A run made before those columns existed does not have to be repeated: `--backfill` adds them
 to an existing directory from its own `embeddings.npz`, with no training.
 
@@ -147,6 +155,8 @@ DATASETS = {
         mol="embeddings/molecules/gin_supervised_contextpred_all_m2or.npz",
         classes=["carboxylic_acid", "thiol", "aldehyde", "ester"],
         k_nn=10, min_members=5, hladis=(10000, 6000, 500),
+        # the graph every other M2OR number in the paper is built on
+        variant="q99greedy",
     ),
     "cc": dict(
         kind="complete_continuous", task="regression",
@@ -164,13 +174,39 @@ DATASETS = {
     ),
 }
 
-# The graph is the full-coverage signed graph. q99 was dropped for this analysis: with a
-# class removed, a quantile cut on top of that removal is a second moving part nobody wants
-# to defend. The pipeline elsewhere stays titular q99.
-VARIANT = dict(q=0.0, criterion="coverage", k_mode="coverage_quantile")
+# Which graph the refinement is: the message-passing molecule selection, verbatim from the
+# pipeline's own knobs (orbind/mol_selection.py).
+#
+#   q0cov      full-coverage signed graph, no quantile cut. The original choice here, and
+#              the defensible one on the insects: with a class already removed, a quantile
+#              cut on top of that removal is a second moving part.
+#   q99greedy  what the M2OR pipeline actually runs -- the titular q99 with greedy pair
+#              cover. On the sparse matrix the cut is not an extra knob so much as the
+#              setting every other M2OR number in the paper was produced under, so scoring
+#              mechanism transfer on a graph nobody else uses compares the wrong object.
+#
+# The two live side by side: a non-default variant writes to `<dataset>__<variant>/`, so
+# neither run overwrites the other and the notebook picks with a flag.
+VARIANTS = {
+    "q0cov": dict(q=0.0, criterion="coverage", k_mode="coverage_quantile"),
+    "q99greedy": dict(q=0.99, criterion="greedy_pair_cover", k_mode="coverage_quantile"),
+}
+LEGACY_VARIANT = "q0cov"          # the one whose directory keeps the bare dataset name
 MODEL_ESM = "raw ESM"
-MODEL_GNN = "GNN+ESM full (q=0)"
-MODEL_ONEHOT = "GNN one-hot full (q=0)"
+
+
+def model_names(variant):
+    """Graph model labels carry their own q, so a directory cannot be misread as another's.
+    At q=0 these are byte-identical to the strings every existing artifact already uses."""
+    tag = f"q={float(variant['q']):g}"
+    return f"GNN+ESM full ({tag})", f"GNN one-hot full ({tag})"
+
+
+def variant_dir(ds, vname):
+    return ds if vname == LEGACY_VARIANT else f"{ds}__{vname}"
+
+
+MODEL_GNN, MODEL_ONEHOT = model_names(VARIANTS[LEGACY_VARIANT])
 MODEL_CONCAT = "GNN + PCA128(ESM)"
 MODEL_PROFILE = "retained profile"
 DERIVED = (MODEL_CONCAT, MODEL_PROFILE)
@@ -229,7 +265,7 @@ def class_members(ods, smi, names, min_members):
 
 # --------------------------------------------------------------------------- the graph
 
-def train_refined(spec, p, seed, drop_iks, feat, epochs, device):
+def train_refined(spec, p, seed, drop_iks, feat, epochs, device, variant=None):
     """Signed graph over every pair whose ODORANT is not in `drop_iks`.
 
     Returns ({receptor: refined vector}, {receptor: raw node-feature vector}). `feat="onehot"`
@@ -242,7 +278,7 @@ def train_refined(spec, p, seed, drop_iks, feat, epochs, device):
     ext = GnnSignedExtractor(
         name="cls", protein_path=str(DATA / spec["prot"]), molecule_path=str(DATA / spec["mol"]),
         emit="prot", n_models=1, hidden=256, edge_threshold=0.0, task=spec["task"],
-        epochs=epochs, **VARIANT)
+        epochs=epochs, **(variant or VARIANTS[LEGACY_VARIANT]))
     if feat == "onehot":
         recs = sorted(ext._proteins)
         eye = np.eye(len(recs), dtype=np.float32)
@@ -788,6 +824,19 @@ def build_overview(kind, R, recs, ods, iks, seed=0):
 
 # --------------------------------------------------------------------------- driver
 
+def resolve(ds, args):
+    """(variant name, variant dict, output directory) for any mode.
+
+    The name defaults to the dataset's own -- q99greedy on M2OR, because that is the graph
+    every other M2OR number in the paper is built on -- and `--variant` overrides it. Only a
+    non-legacy variant takes a directory suffix, so nothing that already exists moves.
+    """
+    vname = args.variant or DATASETS[ds].get("variant", LEGACY_VARIANT)
+    if vname not in VARIANTS:
+        raise SystemExit(f"unknown variant {vname!r}, have {sorted(VARIANTS)}")
+    return vname, VARIANTS[vname], pathlib.Path(args.out) / variant_dir(ds, vname)
+
+
 def run_dataset(ds, args):
     import torch
     from orbind.dataset import load_npz_dict
@@ -795,12 +844,14 @@ def run_dataset(ds, args):
     device = torch.device(args.device if args.device != "auto"
                           else ("cuda" if torch.cuda.is_available() else "cpu"))
     t0 = time.time()
-    out = pathlib.Path(args.out) / ds
+    vname, variant, out = resolve(ds, args)
+    MODEL_GNN, MODEL_ONEHOT = model_names(variant)
     out.mkdir(parents=True, exist_ok=True)
 
     p, recs, ods, R, smi = load_dataset(ds)
     print(f"\n=== {ds.upper()} === {len(recs)} receptors x {len(ods)} odorants "
-          f"| {len(p)} pairs | device {device}", flush=True)
+          f"| {len(p)} pairs | device {device} | variant {vname} {variant} "
+          f"-> {out.name}", flush=True)
     names = args.classes or spec["classes"]
     classes = class_members(ods, smi, names, spec["min_members"])
     mol_emb = load_npz_dict(str(DATA / spec["mol"]))
@@ -811,7 +862,8 @@ def run_dataset(ds, args):
     for cname, iks in classes.items():
         c0 = time.time()
         # the raw-ESM reference embedding also fixes the receptor universe for this class
-        ref0, raw0 = train_refined(spec, p, args.seeds[0], iks, "esm", args.epochs, device)
+        ref0, raw0 = train_refined(spec, p, args.seeds[0], iks, "esm", args.epochs,
+                                   device, variant)
         order0 = [r for r in recs if r in ref0]
         tg = class_targets(spec["kind"], p, R, recs, ods, order0, iks)
         order = tg["order"]
@@ -863,7 +915,7 @@ def run_dataset(ds, args):
         for feat, model in [("esm", MODEL_GNN), ("onehot", MODEL_ONEHOT)]:
             for seed in args.seeds:
                 ref, raw = (ref0, raw0) if (feat == "esm" and seed == args.seeds[0]) else \
-                    train_refined(spec, p, seed, iks, feat, args.epochs, device)
+                    train_refined(spec, p, seed, iks, feat, args.epochs, device, variant)
                 X = np.stack([ref[r] for r in order])
                 readouts.append(dict(cls=cname, model=model, feat=feat, seed=seed,
                                      knn=knn_of(spec["kind"], X, tg["knn_target"], k),
@@ -923,7 +975,7 @@ def run_dataset(ds, args):
         panel_class=(args.panel_class or (list(classes)[0] if classes else None)),
         ood=bool(args.ood), hladis=bool(args.hladis),
         ood_targets=[t[0] for t in ood_series(spec, p)], ood_threshold=OOD_THRESHOLD,
-        variant=VARIANT, seconds=round(time.time() - t0, 1),
+        variant=variant, variant_name=vname, seconds=round(time.time() - t0, 1),
     ), indent=2), encoding="utf-8")
     print(f"=== {ds.upper()} written to {out} in {time.time() - t0:.0f}s", flush=True)
     if args.auto_derive and emb_store:
@@ -939,7 +991,8 @@ def backfill(ds, args):
     for itself -- a run made before these columns existed does not have to be repeated.
     """
     spec = DATASETS[ds]
-    out = pathlib.Path(args.out) / ds
+    vname, variant, out = resolve(ds, args)
+    MODEL_GNN, MODEL_ONEHOT = model_names(variant)
     npath = out / "nulls.csv"
     if not npath.exists():
         print(f"=== {ds.upper()} skipped: no {npath}", flush=True)
@@ -1008,7 +1061,8 @@ def derive(ds, args):
     the representation, and section 7 divides by it.
     """
     spec = DATASETS[ds]
-    out = pathlib.Path(args.out) / ds
+    vname, variant, out = resolve(ds, args)
+    MODEL_GNN, MODEL_ONEHOT = model_names(variant)
     if not (out / "readouts.csv").exists():
         print(f"=== {ds.upper()} skipped: no {out/'readouts.csv'}", flush=True)
         return
@@ -1100,7 +1154,8 @@ def rescore_ood(ds, args):
     generations of it.
     """
     spec = DATASETS[ds]
-    out = pathlib.Path(args.out) / ds
+    vname, variant, out = resolve(ds, args)
+    MODEL_GNN, MODEL_ONEHOT = model_names(variant)
     if not (out / "embeddings.npz").exists():
         print(f"=== {ds.upper()} skipped: no embeddings.npz -- rescoring reads the receptor "
               f"vectors from it (re-run without --no-embeddings)", flush=True)
@@ -1193,6 +1248,11 @@ def main():
                          "its embeddings.npz. Runs automatically after a fresh run")
     ap.add_argument("--no-derive", dest="auto_derive", action="store_false",
                     help="skip that automatic step after a fresh run")
+    ap.add_argument("--variant", default=None, choices=sorted(VARIANTS),
+                    help="which message-passing graph to refine on. Default is the "
+                         "dataset's own (q99greedy on M2OR, q0cov on the insects); a "
+                         "non-legacy variant writes to <dataset>__<variant>/ so runs of "
+                         "different variants never overwrite each other")
     ap.add_argument("--rescore-ood", dest="rescore", action="store_true",
                     help="do not train: refit the boosting head on an existing run for BOTH "
                          "target series (continuous and binarised at the graph's own edge "

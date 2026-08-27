@@ -231,6 +231,11 @@ for d in m2or cc hc; do
 done; wait
 ```
 
+Which refinement graph is a flag: `--variant q99greedy` (M2OR's default -- the q99 + greedy
+pair cover the rest of the M2OR paper uses) or `--variant q0cov` (the insects' default -- full
+coverage, no quantile cut stacked on the class removal). A non-legacy variant writes to
+`<dataset>__<variant>/`, so the two coexist and the notebook's `VARIANT` flag selects one.
+
 `CUDA_VISIBLE_DEVICES` rather than `--device cuda:N`: it also pins whatever the boosting head
 and the extractor pick up on their own. A fourth GPU has nothing to do here -- M2OR is the long
 pole and stays one process. Serially, on one GPU, it is the same command with `--dataset all`.

@@ -54,7 +54,10 @@ Three readouts, deliberately different in kind:
 * **Predictive OOD** -- the pipeline's own boosting head fitted on pairs outside the class and
   scored on the class, against `naive` and `receptor tuning` references. Agreement between the
   two is the point: a conclusion that survives both does not live in either one's moving parts.
-  `--hladis` scores a competitor on exactly the same masks.
+  `--hladis` scores a competitor on exactly the same masks. Its axis is symlog -- log in both
+  directions around the metric's own chance level (0 for R2, 0.5 for AUROC, subtracted) -- and
+  the rightmost group, past a divider, is the same models aggregated over classes with the
+  section-7 trust weights, plus a dimensionless table beneath it.
 * **kNN** -- the original leave-one-out readout, kept as a deprecated panel. Do not quote it.
 
 `--derive` adds the two derived representations and the per-model nulls to an existing run

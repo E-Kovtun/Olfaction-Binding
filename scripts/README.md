@@ -68,6 +68,9 @@ analysis/
                                     task-aware columns
   extend_runs_with_combo.py         prints the commands that add a cls+prot+mol row
                                     to an existing cls-only run, reusing checkpoints
+  mechanism_summary.py              reads a mechanism-holdout run: geometry in raw units
+                                    AND as z, the paired GNN+ESM vs one-hot comparison,
+                                    and the sparse-matrix assay-design check
 ```
 
 `setup_envs.sh` creates `.venv-controls` and `.venv-embeddings`.

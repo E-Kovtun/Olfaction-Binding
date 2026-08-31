@@ -16,6 +16,15 @@ notebooks/graph/
   alternatives/         display-only readers for the quantile x criterion sweeps
 ```
 
+## `mechanism_holdout/split_alternatives.ipynb` -- would a different split help?
+
+A self-contained probe, not part of the pipeline: cluster the odorant panel by Tanimoto and by
+GIN distance (HDBSCAN, plus agglomerative with k by silhouette), compare the clusters with the
+SMARTS functional groups, and score both kinds of group with the same `struct_leak` /
+`func_redund` controls the holdout uses. It answers whether a similarity split would be a
+different experiment and a better-isolated one, before anything is implemented. Computation and
+drawing live together here on purpose -- it is small.
+
 ## `mechanism_holdout/` -- one notebook, a dataset flag
 
 Hold out every odorant of a chemical class (SMARTS), train the signed graph without it, then

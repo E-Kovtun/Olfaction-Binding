@@ -80,10 +80,12 @@ series and rewrites `ood.csv`:
 .venv/bin/python scripts/modeling/analysis/mechanism_holdout.py --dataset all --backfill --derive --rescore-ood
 ```
 
-Five representations, and the notebook's `SHOW` list picks which of them the tables and
-figures use: `raw ESM` (structure), `GNN one-hot` and `retained profile` (function, learned
+Six representations on M2OR, five on the insects, and the notebook's `SHOW` list picks which
+of them the tables and figures use: `raw ESM` (structure), `GNN one-hot` and `retained profile` (function, learned
 and not learned), `GNN+ESM` and `GNN + PCA128(ESM)` (both, mixed during training and stapled
-together after it). The last two are derived from the stored embeddings without training.
+together after it), and `tested mask` (M2OR only -- the profile with the responses deleted,
+so it carries assay design and no binding; it is the control for reading the profile on a
+sparse matrix). The last three are derived after the fact, without training.
 
 Section 7 collapses the per-class numbers into **one per representation**. Dimensionless
 first -- each class scored against its own permutation null, in units of that null's spread,

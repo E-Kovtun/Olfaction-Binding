@@ -19,9 +19,16 @@ Five receptor representations, grouped by what each is allowed to know:
                                            it is the floor: whatever the graph scores above
                                            it is what refinement added, and whatever it does
                                            not was already lying in the response table.
+    tested mask         design only     -- the same thing with the responses thrown away:
+                                           1 where a pair was measured, 0 where it was not.
+                                           M2OR only. It is the control for `retained
+                                           profile` on a sparse matrix, where "untested = 0"
+                                           lets a representation encode which assay panel a
+                                           receptor was on rather than what it binds.
 
-The last two are DERIVED -- computed from the stored embeddings after the fact, with no
-training (`--derive`, automatic after a fresh run). The first three cost a graph each.
+The last three are DERIVED -- computed after the fact from the stored embeddings and the
+response table, with no training (`--derive`, automatic after a fresh run). The first three
+cost a graph each.
 
 Readouts, deliberately different in kind:
 
@@ -209,7 +216,8 @@ def variant_dir(ds, vname):
 MODEL_GNN, MODEL_ONEHOT = model_names(VARIANTS[LEGACY_VARIANT])
 MODEL_CONCAT = "GNN + PCA128(ESM)"
 MODEL_PROFILE = "retained profile"
-DERIVED = (MODEL_CONCAT, MODEL_PROFILE)
+MODEL_MASK = "tested mask"
+DERIVED = (MODEL_CONCAT, MODEL_PROFILE, MODEL_MASK)
 PCA_DIM = 128
 
 # The insect response is a z-score, and the graph already binarises it at exactly this
@@ -535,6 +543,29 @@ def retained_profile(R, recs, ods, order, iks):
         return None
     X = np.nan_to_num(R[np.ix_([r_i[r] for r in order], keep)], nan=0.0)
     return X - X.mean(1, keepdims=True)
+
+
+def tested_mask(R, recs, ods, order, iks):
+    """`retained profile` with the RESPONSES thrown away: 1 where a pair was measured at
+    all, 0 where it was not, same rows, same columns, same centring.
+
+    The control the sparse matrix needs. On M2OR `retained profile` reads NaN as 0, so it
+    encodes not only what a receptor binds but WHICH PANEL it was assayed on -- and whether a
+    receptor was tested on class C is itself a property of that panel, so the target carries
+    the same design structure. Two receptors screened against the same library then look
+    alike whatever they bind. This representation keeps only that design and none of the
+    binding: whatever alignment survives here was never about chemistry.
+
+    Undefined on a complete matrix, where the mask is constant by construction -- which is
+    the reason the insect stands exist.
+    """
+    r_i = {r: i for i, r in enumerate(recs)}
+    keep = [j for j, o in enumerate(ods) if o not in iks]
+    if not keep:
+        return None
+    X = np.isfinite(R[np.ix_([r_i[r] for r in order], keep)]).astype(np.float64)
+    X = X - X.mean(1, keepdims=True)
+    return None if X.std() < 1e-9 else X
 
 
 def trust(sl, fr):
@@ -1102,18 +1133,24 @@ def derive(ds, args):
         prof = retained_profile(R, recs, ods, order, iks)
         if prof is not None:
             new[(MODEL_PROFILE, "-")] = prof
+        if spec["kind"] == "sparse_binary":
+            msk = tested_mask(R, recs, ods, order, iks)
+            if msk is not None:
+                new[(MODEL_MASK, "-")] = msk
 
         for (model, seed), X in new.items():
             rows.append(dict(cls=cname, model=model, feat="derived", seed=seed,
                              knn=knn_of(spec["kind"], X, tg["knn_target"], k),
                              **{g: fn(X, M) for g, fn in GEOMETRY.items()}))
-            emb[f"emb__{cname}__{'concat' if model == MODEL_CONCAT else 'profile'}__{seed}"]                 = X.astype(np.float16)
+            slug = {MODEL_CONCAT: "concat", MODEL_PROFILE: "profile", MODEL_MASK: "mask"}
+            emb[f"emb__{cname}__{slug[model]}__{seed}"] = X.astype(np.float16)
             print(f"  {cname:16} {model:24} seed {seed:>3}  "
                   + "  ".join(f"{g[:4]} {rows[-1][g]:+.3f}" for g in GEOMETRY), flush=True)
 
         # one null per (class, model): same permutation, each representation's own geometry
         reps = {MODEL_ESM: Xe, MODEL_CONCAT: new.get((MODEL_CONCAT, str(args.seeds[0]))),
-                MODEL_PROFILE: new.get((MODEL_PROFILE, "-"))}
+                MODEL_PROFILE: new.get((MODEL_PROFILE, "-")),
+                MODEL_MASK: new.get((MODEL_MASK, "-"))}
         for feat, model in (("esm", MODEL_GNN), ("onehot", MODEL_ONEHOT)):
             kk = f"emb__{cname}__{feat}__{args.seeds[0]}"
             reps[model] = np.asarray(emb[kk], np.float64) if kk in emb else None

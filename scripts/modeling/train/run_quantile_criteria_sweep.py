@@ -9,7 +9,18 @@ The notebook no longer trains anything -- this script is the single producer.
 The feature is built exactly as the pipeline's `cls+mol` combo: `[ bagged
 graph-refined protein || raw molecule ]` (column order matches `--combos "12"`,
 source 1 = gnn cls, source 2 = mol), fitted with the fixed head `train_boost` at
-`seed=repeat` -- the same seed `orbind.ensemble.run_ensemble` uses for a combo.
+`seed=repeat`.
+
+CAUTION on that seed. It matches `run_ensemble` only under `--regime curated_full`,
+where `train_ensemble_boost.py` passes `seed=repeat` explicitly. Under `ofm` and
+`full_full` it does NOT: those branches call `run_ensemble` with no `seed=`, so the
+function keeps its own default of **42** and hands that same 42 to the extractor and
+to `fit_boost` on every fold -- only the split moves with the fold. Since `fit_boost`
+draws subsample/colsample from `random_state`, seeding by fold re-rolls the head and
+shifts R2 by up to ~0.045 on a single fold in either direction (measured on cc/hc
+our_inductive, where it moved the 5-fold mean by 0.015). Numbers from this script are
+internally consistent, but on those two regimes they are NOT directly comparable, fold
+by fold, with rows in results/ensemble_logs.
 
 Configurable: regime (inductive/transductive), molecule-embedding source (also the
 GNN's MP node features), quantiles, criteria, seeds, and GPU parallelism

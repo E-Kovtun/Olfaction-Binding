@@ -144,6 +144,24 @@ def _geometry(Z, P, n_perm):
     return out
 
 
+def _seed(args, fold):
+    """The seed handed to BOTH the graph and the boosting head.
+
+    Default 42 for every fold, which is not an aesthetic choice: under `--regime ofm`
+    (and full_full) `train_ensemble_boost.py` calls `run_ensemble` WITHOUT a `seed=`
+    argument, so it keeps that function's default of 42 and passes the same 42 to the
+    extractor and to `fit_boost` on every fold -- only the split changes with the
+    fold. Every cc/hc number in the tables was produced that way. `fit_boost` draws
+    subsample=0.8 / colsample_bytree=0.8 from `random_state`, so seeding by fold
+    instead re-rolls the head on each fold and moves R2 by up to 0.045 per fold in
+    either direction; that is exactly what made this sweep's first `boost_full` arm
+    read 0.501 against the table's 0.516 on CC and 0.453 against 0.468 on HC, with
+    identical features and an identical head. `--seed-per-fold` restores the other
+    convention, which is arguably the better experiment but is NOT the one the
+    reported numbers come from."""
+    return int(fold) if args.seed_per_fold else int(args.seed)
+
+
 def _row(arm, alpha, fold, **rest):
     return {"arm": arm, "alpha": np.nan if alpha is None else float(alpha),
             "fold": int(fold), "status": "ok", **rest}
@@ -159,7 +177,7 @@ def _baseline_rows(fold, P, args):
     rows = []
     pred = train_boost(np.concatenate([P["Xp_tr"], P["Xm_tr"]], 1), P["y_tr"],
                        np.concatenate([P["Xp_te"], P["Xm_te"]], 1),
-                       seed=int(fold), task="regression")
+                       seed=_seed(args, fold), task="regression")
     rows.append(_row("boost_full", None, fold, n_receptors=len(P["order"]),
                      **_score(P["y_te"], pred)))
     const = np.full(len(P["y_te"]), float(P["y_tr"].mean()), dtype=np.float32)
@@ -176,10 +194,11 @@ def _graph_row(arm, alpha, fold, ds, P, args):
         q=args.q, criterion=args.criterion, k_mode=args.k_mode,
         task="regression", n_models=args.n_models, epochs=args.epochs,
         emit="prot", alpha=alpha)
-    Zp_tr, Zp_va, Zp_te = ext.fit_transform(P["pairs"], P["tr"], P["va"], P["te"], int(fold))
+    seed = _seed(args, fold)
+    Zp_tr, Zp_va, Zp_te = ext.fit_transform(P["pairs"], P["tr"], P["va"], P["te"], seed)
     pred = train_boost(np.concatenate([Zp_tr, P["Xm_tr"]], 1), P["y_tr"],
                        np.concatenate([Zp_te, P["Xm_te"]], 1),
-                       seed=int(fold), task="regression")
+                       seed=seed, task="regression")
     # One receptor, one row: the per-pair features repeat the receptor vector, so
     # collapse back to the universe order the reference clouds are in. All three
     # splits are walked -- a receptor that appears only in val would otherwise be
@@ -250,6 +269,8 @@ def sweep(ds, regime, args):
     for f in args.folds:
         if not all(key(a, None, f) in done for a in ("boost_full", "naive")):
             jobs.append(("baselines", None, f))
+        if args.baselines_only:
+            continue
         if args.legacy and key("graph_legacy", None, f) not in done:
             jobs.append(("graph_legacy", None, f))
         for a in args.alphas:
@@ -348,6 +369,17 @@ def main():
     ap.add_argument("--epochs", type=int, default=900)
     ap.add_argument("--n-perm", type=int, default=200,
                     help="permutations per geometry null; 0 skips the nulls")
+    ap.add_argument("--baselines-only", action="store_true",
+                    help="only boost_full + naive (no graph, so seconds not hours) -- the "
+                         "cheap way to check this sweep reproduces the table of record "
+                         "before spending a GPU on the rest")
+    ap.add_argument("--seed", type=int, default=42,
+                    help="seed for the graph AND the boosting head on every fold -- the "
+                         "ensembler's own convention under --regime ofm, which is what the "
+                         "reported cc/hc numbers were produced with. See _seed()")
+    ap.add_argument("--seed-per-fold", action="store_true",
+                    help="seed by fold number instead; a different experiment, not "
+                         "comparable to the tables")
     ap.add_argument("--max-parallel", type=int, default=1)
     ap.add_argument("--gpus", type=int, nargs="+", default=None)
     ap.add_argument("--out", default=None)

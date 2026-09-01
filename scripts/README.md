@@ -58,7 +58,8 @@ modeling/
     structure_function_grid.py      a grid of graphs over (ESM rank k) x (kept MP edges
                                     phi): each cell a model, scored geometrically against
                                     an ESM cloud, a functional cloud and the class target.
-                                    Insects only; resumable, one trajectory at a time
+                                    Insects only; resumable, one trajectory at a time. Read by
+                                    notebooks/graph/mechanism_holdout/structure_function_grid.ipynb
     concat_diagnostic.py            why GNN + PCA(ESM) scores below the GNN alone: an alpha
                                     sweep, an ESM-width sweep and a same-width random
                                     control, read from an existing run's embeddings.npz

@@ -78,7 +78,8 @@ analysis/
                                     and the sparse-matrix assay-design check
   sf_grid_summary.py                the (k, phi) grid as text: coverage, the two arms as a
                                     manipulation check, the target surface, where each cell
-                                    landed, and whether a mix beats both pure sources
+                                    landed, and whether a mix beats both pure sources.
+                                    -c prints the same in ~21 dense lines, for pasting
 ```
 
 `setup_envs.sh` creates `.venv-controls` and `.venv-embeddings`.

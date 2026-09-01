@@ -3,9 +3,27 @@
 
     .venv/bin/python scripts/analysis/sf_grid_summary.py              # every dataset found
     .venv/bin/python scripts/analysis/sf_grid_summary.py hc --per-class
+    .venv/bin/python scripts/analysis/sf_grid_summary.py -c           # ~21 lines, for pasting
 
 Same numbers as notebooks/graph/mechanism_holdout/structure_function_grid.ipynb, as text.
 The notebook is for looking; this is for quoting.
+
+`-c` / `--compact` drops the prose and prints one row per (geometry, reference) with the
+values in the fixed cell order announced once by the `#cells` header, `.` for a cell that
+was never run:
+
+    #SFGRID1 ds= unit= cells= cls= seeds= ep= crit= q= nperm=
+    #cells    the cell order every row below is in, as k|phi ("all" = every component)
+    n         trainings behind each cell (classes x seeds)
+    <g>/esm   alignment with raw ESM         "how structural did this come out"
+    <g>/fun   alignment with the profile     "how functional did this come out"
+    <g>/tar   alignment with the class       the result
+    <g>/pos   fun - esm, one decimal         where the cell actually landed
+    V <g>     best cell, its n, and the two PURE sources (pureS = k=all,phi=0;
+              pureF = k=0,phi=1) plus lab00 = (k=0,phi=0), so a mix that beats both
+              can be read off directly
+    #edges    phi:pos+neg -- what the edge knob actually left behind
+    #gaps     cells never run, on the observed axes
 
 Five blocks per dataset:
 
@@ -126,6 +144,65 @@ def block(name):
     return f"\n  {name}\n  " + "-" * (len(name) + 2)
 
 
+def compact(ds, long, meta, col, unit, cells, args):
+    """The same numbers with the prose removed: ~15 lines per dataset, meant to be pasted.
+
+    One row per (geometry, reference), values in the fixed cell order of the `#cells` line,
+    `.` for a cell that was never run. Positional rather than labelled because the labels
+    are what makes the readable format long, and the header pins them once.
+    """
+    classes, seeds = sorted(set(long["cls"])), sorted(set(long["seed"]))
+    v = meta.get("variant", {}) if meta else {}
+    print(f"#SFGRID1 ds={ds} unit={unit} cells={len(cells)} cls={','.join(classes)} "
+          f"seeds={','.join(str(s) for s in seeds)} ep={meta.get('epochs', '?')} "
+          f"crit={v.get('criterion', '?')} q={v.get('q', '?')} nperm={meta.get('n_perm', '?')}")
+    print("#cells " + " ".join(f"{klab(k)}|{p:g}" for k, p in cells))
+
+    def line(tag, vals, nd=2):
+        print(f"{tag:<9}" + " ".join("." if not np.isfinite(x) else f"{x:+.{nd}f}"
+                                     for x in vals))
+
+    def series(part, g, r):
+        m = part[(part.geom == g) & (part.ref == r)].groupby(["k", "phi"])[col].mean()
+        return [m.get((k, p), np.nan) for k, p in cells]
+
+    for gname, part in ([(c, long[long.cls == c]) for c in classes]
+                        if args.per_class and len(classes) > 1 else [(None, long)]):
+        if gname:
+            print(f"#cls {gname}")
+        n = part[(part.geom == GEOMS[0]) & (part.ref == REFS[0])].groupby(["k", "phi"]).size()
+        print("n        " + " ".join(str(int(n.get(c, 0))) for c in cells))
+        for g in GEOMS:
+            for r in REFS:
+                line(f"{g[:4]}/{r[:3]}", series(part, g, r))
+            line(f"{g[:4]}/pos", [f - e for f, e in zip(series(part, g, "func"),
+                                                        series(part, g, "esm"))], nd=1)
+        for g in GEOMS:
+            q = (part[(part.geom == g) & (part.ref == "target")]
+                 .groupby(["k", "phi"])[col].agg(["mean", "count"]).reset_index()
+                 .sort_values("mean", ascending=False))
+            if q.empty:
+                continue
+            t = q.iloc[0]
+            got = {}
+            for c, nm in list(PURE.items()) + list(LABELS.items()):
+                hit = q[(q.k == c[0]) & (q.phi == c[1])]
+                got[nm.split(" (")[0]] = float(hit["mean"].iloc[0]) if not hit.empty else np.nan
+            f = {k: ("." if not np.isfinite(x) else f"{x:+.2f}") for k, x in got.items()}
+            print(f"V {g[:4]:<5} best={klab(t['k'])}|{t['phi']:g} {t['mean']:+.2f} "
+                  f"n={int(t['count'])} pureS={f['pure structure']} "
+                  f"pureF={f['pure function']} lab00={f['label factorisation']}")
+    if "n_pos" in long.columns:
+        e = long.drop_duplicates(subset=KEY).groupby("phi")[["n_pos", "n_neg"]].mean()
+        print("#edges " + " ".join(f"{p:g}:{int(r.n_pos)}+{int(r.n_neg)}"
+                                   for p, r in e.iterrows()))
+    gaps = [c for c in ((k, p) for k in kord(long["k"]) for p in sorted(set(long["phi"])))
+            if c not in set(cells)]
+    print(f"#gaps {len(gaps)}" + ("" if not gaps else " " + " ".join(
+        f"{klab(k)}|{p:g}" for k, p in gaps)))
+    print("#end")
+
+
 def summarise(ds, d, args):
     long, meta = load(d)
     if args.classes:
@@ -138,6 +215,8 @@ def summarise(ds, d, args):
         col, unit = "value", "raw (no nulls found)"
     ks, phis = kord(long["k"]), sorted(set(long["phi"]))
     cells = sorted({(k, p) for k, p in zip(long["k"], long["phi"])}, key=lambda c: (c[0] < 0, c))
+    if args.compact:
+        return compact(ds, long, meta, col, unit.split()[0], cells, args)
 
     print("=" * 78)
     print(f"=== {ds.upper()}   {len(cells)} cells   unit: {unit}")
@@ -237,6 +316,8 @@ def main():
     ap.add_argument("--classes", nargs="+", default=None)
     ap.add_argument("--per-class", action="store_true",
                     help="a verdict per held-out class as well as pooled")
+    ap.add_argument("-c", "--compact", action="store_true",
+                    help="dense positional format, ~15 lines per dataset, for pasting")
     ap.add_argument("--raw", action="store_true", help="the geometries' own units, not z")
     args = ap.parse_args()
 

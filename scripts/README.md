@@ -55,6 +55,13 @@ modeling/
     prot_floor_sweep.py             the protein-source table: real pLMs vs a
                                     classical amino-acid floor, plus onehot /
                                     onehot_only / mol_only controls
+    run_alpha_gate_sweep.py         V8: sweeps the alpha gate on cc/hc x
+                                    {transductive, inductive}. Each cell reports the
+                                    cls+mol boost metrics AND the receptor cloud's
+                                    geometry against ESM and against the response
+                                    profile, next to boost_full / naive / the pre-v8
+                                    graph on the same folds. (Listed here though it
+                                    lives in modeling/train/.)
     structure_function_grid.py      a grid of graphs over (ESM rank k) x (kept MP edges
                                     phi): each cell a model, scored geometrically against
                                     an ESM cloud, a functional cloud and the class target.
@@ -76,6 +83,9 @@ analysis/
   mechanism_summary.py              reads a mechanism-holdout run: geometry in raw units
                                     AND as z, the paired GNN+ESM vs one-hot comparison,
                                     and the sparse-matrix assay-design check
+  alpha_gate_summary.py             the v8 alpha sweep: prediction vs both references
+                                    (paired by fold), the geometry dial as z, and a
+                                    verdict. -c for a dense paste
   sf_grid_summary.py                the (k, phi) grid as text: coverage, the two arms as a
                                     manipulation check, the target surface, where each cell
                                     landed, and whether a mix beats both pure sources.

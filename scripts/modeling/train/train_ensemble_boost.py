@@ -180,7 +180,9 @@ _FACTORY_SPEC = {
     # graph-based (pulls torch_geometric):
     # "name=type[:protein_path:molecule_path[:n_models[:emit[:q[:criterion[:edge_threshold[:k_mode]]]]]]]".
     # emit: "prot" (default, v5 probe shape) or "both". gnn_signed_dgi adds a
-    # DeepGraphInfomax auxiliary loss (shared scope, lambda=0.5).
+    # DeepGraphInfomax auxiliary loss (shared scope, lambda=0.5). Field 12 is the
+    # v8 alpha gate (blank = off): 12 colons is a lot to type by hand, which is why
+    # scripts/modeling/train/run_alpha_gate_sweep.py exists.
     "gnn_signed": ("orbind.gnn_extractor", "GnnSignedExtractor"),
     "gnn_signed_dgi": ("orbind.gnn_extractor", "GnnSignedDgiExtractor"),
     # TWO-STAGE signed GNN: stage 1 fine-tunes LoRA-ChemBERTa the LORAX way and
@@ -302,6 +304,11 @@ def parse_source_arg(raw: str):
         # field 11: dummy_compression (freeze input projections to a train-fit PCA).
         if len(parts) > 11 and parts[11]:
             kwargs["dummy_compression"] = parts[11] not in ("0", "false", "False")
+        # field 12: v8 alpha gate. Empty = the historical graph (no gate at all).
+        # z_prot = (1-alpha)*frozen PCA(ESM) + alpha*graph; 0 = pure structure,
+        # 1 = the graph alone. See GnnSignedExtractor.alpha.
+        if len(parts) > 12 and parts[12]:
+            kwargs["alpha"] = float(parts[12])
         return name, _factory(type_)(name=name, **kwargs)
 
     if type_ in _GNNLORA_TYPES:

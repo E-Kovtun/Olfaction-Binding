@@ -17,6 +17,26 @@ molecules as message-passing participants (measured by train-edge count);
 supervision (the decoder's BCE loss and the features handed back to the
 boosting stage) still covers every row regardless of this filter.
 
+v8, the alpha gate (opt-in, `alpha=None` by default and then nothing below
+applies). The receptor readout becomes a FIXED convex mix of a frozen
+structural branch and the trained graph:
+
+    z_prot = (1 - alpha) * frozen_SVD(ESM, train basis) + alpha * graph(...)
+
+Why it was added. Without it the only path from ESM to the receptor embedding
+runs through trainable weights, and at the titular 900 epochs the binding loss
+empties it: the refined receptor cloud was measured sitting AT its permutation
+null against ESM on CC (z = +0.4) while scoring z = +11 against the response
+profile -- in every cell of a two-axis ablation over ESM rank and kept MP
+edges. Both of those axes could only REMOVE information; neither could pull
+back toward structure, because no term in the objective ever pulled that way,
+and the structural end was reachable only by not training at all. A frozen
+branch is a path the optimizer cannot drain, which turns "structure vs
+function" from two ablations into one dial with two known ends: alpha=0 is
+ESM's own geometry (exactly, on the train span -- see `_structural_anchor` on
+why the projection is uncentered) and alpha=1 is the historical model up to a
+global scale. Set once before training and used unchanged at inference.
+
 Leakage handling: uses the same n_models bagging pattern as
 attention_extractor.py, not this project's own GNN pipeline's
 --disjoint-probe-train split. Every one of `n_models` independently-seeded
@@ -214,6 +234,45 @@ def _freeze_pca(linear: nn.Linear, comp: np.ndarray, mean: np.ndarray):
     linear.bias.requires_grad_(False)
 
 
+def _rms(x: "torch.Tensor") -> "torch.Tensor":
+    """Divide by the root-mean-square over every entry -- one scalar for the whole
+    block, so the arrangement of the rows (which is all any geometry readout looks
+    at) is untouched and only the overall scale is fixed. Row-wise normalisation
+    would have thrown magnitude away, which the decoder does use."""
+    return x / x.pow(2).mean().sqrt().clamp_min(1e-8)
+
+
+def _structural_anchor(x_prot, train_rows, hidden: int):
+    """The v8 gate's FROZEN structural branch: raw ESM rotated into a train-fit basis.
+
+    Fit on TRAIN receptors only and applied to every receptor in the universe, so a
+    cold-receptor split projects test rows through a train basis and nothing leaks.
+
+    UNCENTERED (a truncated SVD of X_train, not sklearn's mean-subtracting PCA), and
+    that is not a detail. Every geometry readout we report -- RSA above all -- scores
+    the COSINES between receptors, and cosines are not invariant to a shift of the
+    origin: centring preserves distances while changing every angle, so a centred
+    anchor would sit at RSA ~0.9 against the very cloud it is a copy of. Projecting
+    onto the train span instead makes the branch an exact isometry there. With
+    k >= n_train every train receptor keeps its norm and every pair its inner
+    product, so `alpha=0` reproduces ESM's geometry exactly rather than nearly.
+
+    Rank is min(hidden, n_train, dim), zero-padded out to `hidden`. On these panels
+    that binds at n_train (CC 50, HC 24, both far below hidden=256), which is
+    precisely the regime where the map is lossless.
+
+    Returns (tensor [n_prot, hidden], rank actually used)."""
+    X = np.asarray(x_prot.detach().cpu().numpy(), dtype=np.float64)
+    tr = np.unique(np.asarray(list(train_rows), dtype=int))
+    k = int(min(hidden, len(tr), X.shape[1]))
+    if k < 2:
+        raise ValueError(f"structural anchor needs >= 2 train receptors, got {len(tr)}")
+    _, _, Vt = np.linalg.svd(X[tr], full_matrices=False)
+    S = np.zeros((X.shape[0], hidden), dtype=np.float32)
+    S[:, :k] = (X @ Vt[:k].T).astype(np.float32)
+    return torch.as_tensor(S), k
+
+
 class _WSAGE(MessagePassing):
     """Weighted bipartite conv used ONLY in the experimental magnitude-weighted
     edge mode (`edge_weight_mode="magnitude"`). Same shape as the SAGEConv it
@@ -255,9 +314,15 @@ class _SignedSage(nn.Module):
     LEAK = 0.1
 
     def __init__(self, mol_dim: int, prot_dim: int, hidden: int, dropout: float,
-                 weighted: bool = False, pca_mol=None, pca_prot=None):
+                 weighted: bool = False, pca_mol=None, pca_prot=None,
+                 alpha=None, s_prot=None):
         super().__init__()
         self.weighted = weighted
+        # v8 hard gate. `alpha=None` is the historical model, untouched: no branch,
+        # no normalisation, every pre-v8 number reproduces byte-for-byte.
+        self.alpha = None if alpha is None else float(alpha)
+        self.register_buffer("s_prot", None if s_prot is None else _rms(s_prot),
+                             persistent=False)   # frozen; never in a state_dict
         # weighted mode swaps SAGEConv for the edge-weight-aware _WSAGE; the
         # default (weighted=False) keeps PyG's SAGEConv byte-for-byte.
         def mk():
@@ -290,7 +355,15 @@ class _SignedSage(nn.Module):
         x = {k: F.leaky_relu(x_p[k] - x_n.get(k, torch.zeros_like(x_p[k])), self.LEAK) for k in x_p}
         x_p = self.conv2(x, pos_eidx, **kp)
         x_n = self.conv2_neg(x, neg_eidx, **kn)
-        return {k: x_p[k] - x_n.get(k, torch.zeros_like(x_p[k])) for k in x_p}
+        z = {k: x_p[k] - x_n.get(k, torch.zeros_like(x_p[k])) for k in x_p}
+        if self.alpha is not None and self.s_prot is not None and PROT in z:
+            # The receptor readout is a FIXED convex mix of a frozen structural
+            # branch and the trained graph. alpha is set before training and used
+            # unchanged at inference -- it is a property of the model, not a
+            # post-hoc dial. Gradient cannot reach s_prot, which is the whole
+            # point: 900 epochs of binding loss can no longer erase ESM.
+            z[PROT] = (1.0 - self.alpha) * self.s_prot + self.alpha * _rms(z[PROT])
+        return z
 
     def decode(self, z, mol_idx, prot_idx):
         return self.dec(torch.cat([z[MOL][mol_idx], z[PROT][prot_idx]], dim=-1)).squeeze(-1)
@@ -445,6 +518,16 @@ def _run_models(ext, pairs: pd.DataFrame, train_idx, val_idx, test_idx, seed: in
               f"{len(tr_prots)} train prots -> hidden {ext.hidden} "
               f"(frozen input projections)", flush=True)
 
+    ext._s_prot = None
+    if getattr(ext, "alpha", None) is not None:
+        tr_prots = pd.unique(pairs.iloc[train_idx]["receptor"])
+        ext._s_prot, k_pca = _structural_anchor(
+            x_prot, [prot_to_i[r] for r in tr_prots if r in prot_to_i], ext.hidden)
+        ext._k_pca = k_pca
+        print(f"  {ext.name}: alpha gate {ext.alpha:g} -- structural branch = PCA{k_pca} "
+              f"of ESM fit on {len(tr_prots)} train receptors, frozen "
+              f"(alpha=0 -> pure ESM geometry, alpha=1 -> the graph alone)", flush=True)
+
     train_df = pairs.iloc[train_idx]
     mol_idx_train = train_df["inchikey"].map(mol_to_i).to_numpy().copy()
     prot_idx_train = train_df["receptor"].map(prot_to_i).to_numpy().copy()
@@ -576,6 +659,16 @@ class GnnSignedExtractor:
     # prot_dim->hidden) with a fixed PCA fit on train node features. Drops ~426k
     # learned weights; message passing + decoder still train on top.
     dummy_compression: bool = False
+    # v8 HARD GATE (default None = the historical graph, bit-identical).
+    #   z_prot = (1 - alpha) * frozen_PCA(ESM) + alpha * graph_output
+    # Both branches RMS-normalised so alpha is a real exchange rate rather than a
+    # contest between two arbitrary scales. Fixed at construction, used unchanged
+    # at inference. Rationale: with alpha=None the ONLY path from ESM to the
+    # receptor embedding is trainable, and 900 epochs of binding loss empty it --
+    # measured, the refined receptor cloud sits at the permutation null against
+    # ESM. The frozen branch is a path the optimizer cannot drain, which is what
+    # turns "structure vs function" from two ablations into one dial.
+    alpha: float | None = None
     pooling: str = "signed_sage"
     dgi_weight: float = 0.0            # >0 enables the DeepGraphInfomax auxiliary loss
     dgi_scope: str = "shared"          # "shared" (mol+prot) or "prot"
@@ -591,6 +684,8 @@ class GnnSignedExtractor:
         if self.k_mode not in mol_selection.K_MODES:
             raise ValueError(f"k_mode must be one of {mol_selection.K_MODES}, "
                              f"got {self.k_mode!r}")
+        if self.alpha is not None and not (0.0 <= float(self.alpha) <= 1.0):
+            raise ValueError(f"alpha must be in [0, 1] or None, got {self.alpha!r}")
         if self.dgi_scope not in ("shared", "prot"):
             raise ValueError(f"dgi_scope must be 'shared' or 'prot', got {self.dgi_scope!r}")
         if self.edge_center not in ("global", "per_receptor"):
@@ -601,6 +696,8 @@ class GnnSignedExtractor:
         self._molecules = D.load_npz_dict(self.molecule_path)
         self._pca_mol = None
         self._pca_prot = None
+        self._s_prot = None          # built per split in _run_models (train-fit)
+        self._k_pca = 0
         per_model = 2 * self.hidden if self.emit == "both" else self.hidden
         self.dim_out = self.n_models * per_model
         self.path = f"{self.protein_path} + {self.molecule_path}"
@@ -610,7 +707,8 @@ class GnnSignedExtractor:
         prot_dim = next(iter(self._proteins.values())).shape[-1]
         return _SignedSage(mol_dim, prot_dim, self.hidden, self.dropout,
                            weighted=(self.edge_weight_mode != "none"),
-                           pca_mol=self._pca_mol, pca_prot=self._pca_prot)
+                           pca_mol=self._pca_mol, pca_prot=self._pca_prot,
+                           alpha=self.alpha, s_prot=self._s_prot)
 
     def _hp(self, seed):
         return dict(lr=self.lr, weight_decay=self.weight_decay, clip_grad=self.clip_grad,

@@ -79,6 +79,20 @@ def test_every_graph_field_lands_where_the_docstring_says(workdir):
     assert ex.k_mode == "fraction"
 
 
+def test_alpha_is_field_12_and_off_by_default():
+    """The v8 gate must stay invisible unless asked for: every pre-v8 command has
+    to build the historical model, so `alpha` defaults to None, not to 1.0."""
+    assert parse_source_arg("cls=gnn_signed")[1].alpha is None
+    _, ex = parse_source_arg("cls=gnn_signed::::::::::::0.25")
+    assert ex.alpha == 0.25
+    assert (ex.q, ex.criterion, ex.n_models) == (0.99, "greedy_pair_cover", 1)
+
+
+def test_alpha_outside_the_unit_interval_is_refused():
+    with pytest.raises(ValueError):
+        parse_source_arg("cls=gnn_signed::::::::::::1.5")
+
+
 def test_the_name_is_the_extractors_name():
     _, ex = parse_source_arg("refined=gnn_signed")
     assert ex.name == "refined"

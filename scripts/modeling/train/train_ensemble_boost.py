@@ -309,6 +309,10 @@ def parse_source_arg(raw: str):
         # 1 = the graph alone. See GnnSignedExtractor.alpha.
         if len(parts) > 12 and parts[12]:
             kwargs["alpha"] = float(parts[12])
+        # field 13: one-hot receptor node features (blank = the embedding file). With
+        # the gate on this is what makes alpha an honest fraction of structure.
+        if len(parts) > 13 and parts[13]:
+            kwargs["onehot_nodes"] = parts[13] not in ("0", "false", "False")
         return name, _factory(type_)(name=name, **kwargs)
 
     if type_ in _GNNLORA_TYPES:

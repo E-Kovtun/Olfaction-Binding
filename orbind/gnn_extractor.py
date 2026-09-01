@@ -522,6 +522,20 @@ def _run_models(ext, pairs: pd.DataFrame, train_idx, val_idx, test_idx, seed: in
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     all_idx = np.concatenate([train_idx, val_idx, test_idx])
+    if getattr(ext, "onehot_nodes", False) and ext._anchor_proteins is None:
+        # Swap the receptor NODE features for an identity over exactly the receptors
+        # the embedding file covers -- same universe, same edges, only the structural
+        # prior removed (the construction `mechanism_holdout.train_refined` uses for
+        # its `feat="onehot"` arm). The real vectors are kept aside because the alpha
+        # gate's frozen branch is built from THEM, not from the node features: with
+        # both swapped the branch would be an SVD of an identity matrix, which carries
+        # no structure at all and would silently turn the axis into nonsense.
+        ext._anchor_proteins = ext._proteins
+        recs = sorted(ext._anchor_proteins)
+        eye = np.eye(len(recs), dtype=np.float32)
+        ext._proteins = {r: eye[i] for i, r in enumerate(recs)}
+        print(f"  {ext.name}: node features = one-hot over {len(recs)} receptors; "
+              f"ESM enters only through the gate's frozen branch", flush=True)
     mol_to_i, prot_to_i, x_mol, x_prot = _build_universe(pairs, all_idx, ext._proteins, ext._molecules)
 
     if getattr(ext, "dummy_compression", False):
@@ -535,12 +549,16 @@ def _run_models(ext, pairs: pd.DataFrame, train_idx, val_idx, test_idx, seed: in
 
     ext._s_prot = None
     if getattr(ext, "alpha", None) is not None:
+        src = ext._anchor_proteins or ext._proteins      # ESM, even when nodes are one-hot
+        order = sorted(prot_to_i, key=prot_to_i.get)
+        x_anchor = torch.tensor(np.stack([src[r] for r in order]), dtype=torch.float32)
         tr_prots = pd.unique(pairs.iloc[train_idx]["receptor"])
         ext._s_prot, k_pca = _structural_anchor(
-            x_prot, [prot_to_i[r] for r in tr_prots if r in prot_to_i], ext.hidden)
+            x_anchor, [prot_to_i[r] for r in tr_prots if r in prot_to_i], ext.hidden)
         ext._k_pca = k_pca
-        print(f"  {ext.name}: alpha gate {ext.alpha:g} -- structural branch = PCA{k_pca} "
-              f"of ESM fit on {len(tr_prots)} train receptors, frozen "
+        print(f"  {ext.name}: alpha gate {ext.alpha:g} -- structural branch = SVD{k_pca} of "
+              f"{'ESM (nodes are one-hot)' if ext._anchor_proteins else 'ESM'} fit on "
+              f"{len(tr_prots)} train receptors, frozen "
               f"(alpha=0 -> pure ESM geometry, alpha=1 -> the graph alone)", flush=True)
 
     train_df = pairs.iloc[train_idx]
@@ -684,6 +702,14 @@ class GnnSignedExtractor:
     # ESM. The frozen branch is a path the optimizer cannot drain, which is what
     # turns "structure vs function" from two ablations into one dial.
     alpha: float | None = None
+    # Receptor NODE features: the embedding file (default) or a one-hot identity.
+    # With the gate on, one-hot nodes are what make alpha an honest fraction of
+    # structure: otherwise ESM reaches the receptor vector by TWO routes -- the
+    # frozen branch at weight (1 - alpha) AND the node features the graph is trained
+    # on -- so the alpha=1 end is "a graph that has already seen ESM", not "no ESM".
+    # With one-hot nodes the only route is the branch, and alpha=1 contains no
+    # structural information whatsoever.
+    onehot_nodes: bool = False
     pooling: str = "signed_sage"
     dgi_weight: float = 0.0            # >0 enables the DeepGraphInfomax auxiliary loss
     dgi_scope: str = "shared"          # "shared" (mol+prot) or "prot"
@@ -713,6 +739,7 @@ class GnnSignedExtractor:
         self._pca_prot = None
         self._s_prot = None          # built per split in _run_models (train-fit)
         self._k_pca = 0
+        self._anchor_proteins = None  # the real vectors, when nodes were swapped
         per_model = 2 * self.hidden if self.emit == "both" else self.hidden
         self.dim_out = self.n_models * per_model
         self.path = f"{self.protein_path} + {self.molecule_path}"

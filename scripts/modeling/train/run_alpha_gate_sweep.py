@@ -193,7 +193,7 @@ def _graph_row(arm, alpha, fold, ds, P, args):
         molecule_path=args.mol_embeddings.format(ds=ds),
         q=args.q, criterion=args.criterion, k_mode=args.k_mode,
         task="regression", n_models=args.n_models, epochs=args.epochs,
-        emit="prot", alpha=alpha)
+        emit="prot", alpha=alpha, onehot_nodes=(args.nodes == "onehot"))
     seed = _seed(args, fold)
     Zp_tr, Zp_va, Zp_te = ext.fit_transform(P["pairs"], P["tr"], P["va"], P["te"], seed)
     pred = train_boost(np.concatenate([Zp_tr, P["Xm_tr"]], 1), P["y_tr"],
@@ -251,8 +251,9 @@ def _worker(job_q, res_q, ds, regime, args):
 
 
 def sweep(ds, regime, args):
+    tag = "" if args.nodes == "esm" else f"_{args.nodes}"
     out = pathlib.Path(args.out or (_root / "results/graph/v8_alpha_gate")) / \
-        f"metrics_{ds}_{FAMILY[regime]}.csv"
+        f"metrics_{ds}_{FAMILY[regime]}{tag}.csv"
     out.parent.mkdir(parents=True, exist_ok=True)
 
     rows, done = [], set()
@@ -369,6 +370,12 @@ def main():
     ap.add_argument("--epochs", type=int, default=900)
     ap.add_argument("--n-perm", type=int, default=200,
                     help="permutations per geometry null; 0 skips the nulls")
+    ap.add_argument("--nodes", choices=["esm", "onehot"], default="esm",
+                    help="receptor NODE features. `onehot` removes ESM from the graph "
+                         "entirely, so with the gate on it reaches the receptor vector "
+                         "ONLY through the frozen branch at weight (1-alpha) -- the "
+                         "decomposition in which alpha is an honest fraction of "
+                         "structure. Writes its own metrics_*_onehot.csv")
     ap.add_argument("--baselines-only", action="store_true",
                     help="only boost_full + naive (no graph, so seconds not hours) -- the "
                          "cheap way to check this sweep reproduces the table of record "

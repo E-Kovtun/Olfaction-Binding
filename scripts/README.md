@@ -60,8 +60,10 @@ modeling/
                                     cls+mol boost metrics AND the receptor cloud's
                                     geometry against ESM and against the response
                                     profile, next to boost_full / naive / the pre-v8
-                                    graph on the same folds. (Listed here though it
-                                    lives in modeling/train/.)
+                                    graph on the same folds. --nodes onehot removes ESM
+                                    from the graph so alpha is an honest fraction of
+                                    structure. (Listed here though it lives in
+                                    modeling/train/.)
     structure_function_grid.py      a grid of graphs over (ESM rank k) x (kept MP edges
                                     phi): each cell a model, scored geometrically against
                                     an ESM cloud, a functional cloud and the class target.

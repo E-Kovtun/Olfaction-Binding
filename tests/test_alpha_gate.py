@@ -141,3 +141,40 @@ def test_the_dial_survives_an_esm_like_common_mean(graph):
     assert hi - lo > 0.4, f"no travel to speak of: {rsa}"
     pos = (rsa[0.5] - lo) / (hi - lo)
     assert 0.2 < pos < 0.8, f"alpha=0.5 sits at {pos:.2f} of the range, not mid: {rsa}"
+
+
+def test_onehot_nodes_keep_the_anchor_on_esm(tmp_path, monkeypatch):
+    """The trap this guards: the frozen branch is built from `x_prot`, so swapping the
+    node features for one-hots naively would make it an SVD of an IDENTITY matrix --
+    carrying no structure at all, while every log line still said "ESM". The branch
+    has to read the real vectors, which is why `_run_models` stashes them in
+    `_anchor_proteins` before the swap.
+
+    At alpha=0 the emitted receptor features ARE the branch, so if it really is ESM
+    the geometry comes back exactly; if it were the one-hots it would be flat.
+    """
+    import pandas as pd
+    from orbind.gnn_extractor import GnnSignedExtractor
+    monkeypatch.chdir(tmp_path)
+    rng = np.random.default_rng(0)
+    recs, mols = [f"R{i}" for i in range(6)], [f"M{i}" for i in range(8)]
+    esm = {r: rng.normal(size=20).astype(np.float32) for r in recs}
+    np.savez(tmp_path / "p.npz", **esm)
+    np.savez(tmp_path / "m.npz", **{m: rng.normal(size=10).astype(np.float32) for m in mols})
+    pairs = pd.DataFrame([{"receptor": r, "inchikey": m, "label": float(rng.normal())}
+                          for r in recs for m in mols])
+    idx = np.arange(len(pairs))
+    ext = GnnSignedExtractor(
+        name="cls", protein_path=str(tmp_path / "p.npz"), molecule_path=str(tmp_path / "m.npz"),
+        hidden=16, epochs=2, task="regression", q=0.0, criterion="coverage",
+        n_models=1, emit="prot", alpha=0.0, onehot_nodes=True)
+    Ztr, _, _ = ext.fit_transform(pairs, idx[:40], idx[40:44], idx[44:], seed=0)
+
+    assert ext._proteins[recs[0]].shape == (6,)          # nodes really were swapped
+    assert ext._anchor_proteins[recs[0]].shape == (20,)  # and ESM really was kept
+    seen = {}
+    for r, v in zip(pairs["receptor"].to_numpy()[idx[:40]], Ztr):
+        seen.setdefault(r, v)
+    order = list(seen)
+    Z = np.stack([seen[r] for r in order])
+    assert GEOMETRY["rsa"](Z, np.stack([esm[r] for r in order])) > 0.95

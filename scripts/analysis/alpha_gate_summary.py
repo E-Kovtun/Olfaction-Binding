@@ -37,7 +37,11 @@ _root = pathlib.Path(__file__).resolve()
 while not (_root / "pyproject.toml").exists():
     _root = _root.parent
 
-METRICS = ["R2", "RMSE", "MAE", "Pearson", "Spearman"]
+# Both task families; whichever columns a file actually carries are the ones printed,
+# so a regression sweep and a classification one can sit in the same directory.
+METRIC_SETS = {"regression": ["R2", "RMSE", "MAE", "Pearson", "Spearman"],
+               "classification": ["AUROC", "AUPRC", "MCC", "F1"]}
+METRICS = METRIC_SETS["regression"]
 GEOMS = ["rsa", "cca", "procrustes"]
 GL = {"rsa": "RSA", "cca": "CCA", "procrustes": "Proc"}
 REFS = ["esm", "fun"]
@@ -196,7 +200,11 @@ def main():
                     help="drop runs matching these, same syntax. Handy for the archived "
                          "series: -x '*__foldseed' '*__rmsnorm*'")
     ap.add_argument("--root", default="results/graph/v8_alpha_gate")
-    ap.add_argument("--metric", default="R2", choices=METRICS)
+    ap.add_argument("--metric", default=None,
+                    choices=METRIC_SETS["regression"] + METRIC_SETS["classification"],
+                    help="metric the deltas and the best-alpha verdict are read on. "
+                         "Default: R2 for a regression sweep, AUROC for a classification "
+                         "one -- and a metric the file does not carry falls back to that")
     ap.add_argument("-c", "--compact", action="store_true")
     args = ap.parse_args()
 
@@ -219,6 +227,14 @@ def main():
                          + (f"; present: {sorted(names.values())}" if names else ""))
     for p in found:
         df = pd.read_csv(p)
+        # pick the task family this file was written with, and the metric to rank by
+        global METRICS
+        have = [k for k, cols in METRIC_SETS.items()
+                if any(c in df.columns and df[c].notna().any() for c in cols)]
+        METRICS = METRIC_SETS[have[0]] if have else METRIC_SETS["regression"]
+        args = argparse.Namespace(**vars(args))
+        if args.metric not in METRICS:
+            args.metric = METRICS[0]
         if "status" in df.columns:
             df = df[~df["status"].astype(str).str.startswith("failed") | True]
         (compact if args.compact else readable)(p.stem.replace("metrics_", ""), df, args)

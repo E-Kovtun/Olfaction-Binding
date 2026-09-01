@@ -55,6 +55,10 @@ modeling/
     prot_floor_sweep.py             the protein-source table: real pLMs vs a
                                     classical amino-acid floor, plus onehot /
                                     onehot_only / mol_only controls
+    structure_function_grid.py      a grid of graphs over (ESM rank k) x (kept MP edges
+                                    phi): each cell a model, scored geometrically against
+                                    an ESM cloud, a functional cloud and the class target.
+                                    Insects only; resumable, one trajectory at a time
     concat_diagnostic.py            why GNN + PCA(ESM) scores below the GNN alone: an alpha
                                     sweep, an ESM-width sweep and a same-width random
                                     control, read from an existing run's embeddings.npz

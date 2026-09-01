@@ -104,9 +104,40 @@ def test_intermediate_alpha_lies_between_the_two_geometries(graph):
                            .encode(x_mol, x_prot, pe, ne)[PROT].detach().numpy(),
                            x_prot.numpy())
            for a in (1.0, 0.75, 0.5, 0.25, 0.0)]
-    # the endpoints are guaranteed by construction; in between we only ask that the
-    # dial travels one way -- a mixture of two clouds need not be exactly monotone
-    assert rsa[-1] == max(rsa) and rsa[0] == min(rsa), f"endpoints wrong: {rsa}"
+    # alpha=0 is the top by construction. The other end is a cloud UNRELATED to ESM,
+    # so alpha=1 and alpha=0.75 both sit at ~0 and their order there is noise -- the
+    # claim worth pinning is the trend and the travel, not a strict argmin.
+    assert rsa[-1] == max(rsa), f"alpha=0 is not the most ESM-like: {rsa}"
+    assert rsa[0] <= min(rsa) + 0.05, f"alpha=1 is not at the bottom: {rsa}"
     assert rsa[-1] - rsa[0] > 0.5
     from scipy.stats import spearmanr
     assert spearmanr(rsa, [1.0, 0.75, 0.5, 0.25, 0.0]).statistic < -0.89
+
+
+def test_the_dial_survives_an_esm_like_common_mean(graph):
+    """The regression test for the bug the first sweep found.
+
+    Mean-pooled ESM is ~94% common mean (measured: 5.6% of its energy is
+    between-receptor on CC, 7.2% on HC), while the graph's output is essentially
+    mean-free. Normalising the two branches by TOTAL energy therefore gave the
+    structural branch ~6% of the geometry it was nominally weighted for, the
+    crossover fell at alpha ~ 0.05, and every alpha from 0.25 up came out
+    geometrically identical -- a step, not a dial. Normalising by the centred
+    spread is what fixes it, so this builds a receptor block with ESM's own
+    lopsidedness and demands that alpha=0.5 land in the MIDDLE."""
+    x_mol, _, pe, ne = graph
+    rng = np.random.default_rng(5)
+    dc = rng.normal(size=(1, 20)) * 4.0                    # the shared mean
+    x_prot = torch.tensor(dc + rng.normal(size=(6, 20)) * 0.25, dtype=torch.float32)
+    share = float((x_prot - x_prot.mean(0)).pow(2).mean().sqrt()
+                  / x_prot.pow(2).mean().sqrt())
+    assert share < 0.12, f"fixture is not ESM-like enough: {share:.3f}"
+    s, _ = _structural_anchor(x_prot, range(6), 16)
+    rsa = {a: GEOMETRY["rsa"](build(x_prot, alpha=a, s=s)
+                              .encode(x_mol, x_prot, pe, ne)[PROT].detach().numpy(),
+                              x_prot.numpy())
+           for a in (0.0, 0.5, 1.0)}
+    lo, hi = rsa[1.0], rsa[0.0]
+    assert hi - lo > 0.4, f"no travel to speak of: {rsa}"
+    pos = (rsa[0.5] - lo) / (hi - lo)
+    assert 0.2 < pos < 0.8, f"alpha=0.5 sits at {pos:.2f} of the range, not mid: {rsa}"

@@ -235,11 +235,26 @@ def _freeze_pca(linear: nn.Linear, comp: np.ndarray, mean: np.ndarray):
 
 
 def _rms(x: "torch.Tensor") -> "torch.Tensor":
-    """Divide by the root-mean-square over every entry -- one scalar for the whole
-    block, so the arrangement of the rows (which is all any geometry readout looks
-    at) is untouched and only the overall scale is fixed. Row-wise normalisation
-    would have thrown magnitude away, which the decoder does use."""
-    return x / x.pow(2).mean().sqrt().clamp_min(1e-8)
+    """Scale a node block by the RMS of its BETWEEN-NODE variation.
+
+    One scalar for the whole block, so the arrangement of the rows -- all any
+    geometry readout looks at -- is untouched and only the overall scale is fixed.
+    The block itself is NOT centred: `_structural_anchor` needs its raw offset to
+    keep ESM's cosines (see there), and the decoder uses magnitude.
+
+    The divisor is the centred RMS rather than the plain one, and that distinction
+    turned out to be the whole ballgame. Mean-pooled ESM is ~94% common mean: on CC
+    the between-receptor share of its energy is 5.6%, on HC 7.2%, against ~99% for
+    the graph's (essentially mean-free) output. Equalising TOTAL energy therefore
+    handed the structural branch only ~6% of the geometry-carrying signal at the
+    same nominal weight, and the crossover landed at alpha ~ 0.05 instead of 0.5 --
+    measured: alpha = 0.25 through 1.0 were geometrically indistinguishable, and the
+    dial was a step at zero. Dividing by the spread makes alpha an exchange rate
+    between the two clouds' actual variation, which is what it was supposed to be.
+    Both endpoints survive unchanged: at 0 and at 1 this is a positive scalar on a
+    single branch, and no geometry here sees a scalar."""
+    spread = (x - x.mean(0, keepdim=True)).pow(2).mean().sqrt()
+    return x / spread.clamp_min(1e-8)
 
 
 def _structural_anchor(x_prot, train_rows, hidden: int):

@@ -27,6 +27,7 @@ for that fold, and a model below it lost to predicting a constant.
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import pathlib
 
 import numpy as np
@@ -188,7 +189,12 @@ def compact(tag, df, args):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("runs", nargs="*", help="file stems, e.g. hc_rand (default: all found)")
+    ap.add_argument("runs", nargs="*",
+                    help="which runs to print (default: all). A stem (hc_rand), a glob "
+                         "(*_onehot) or any substring of one (onehot) all work")
+    ap.add_argument("-x", "--exclude", nargs="+", default=None,
+                    help="drop runs matching these, same syntax. Handy for the archived "
+                         "series: -x '*__foldseed' '*__rmsnorm*'")
     ap.add_argument("--root", default="results/graph/v8_alpha_gate")
     ap.add_argument("--metric", default="R2", choices=METRICS)
     ap.add_argument("-c", "--compact", action="store_true")
@@ -198,11 +204,19 @@ def main():
     if not root.is_absolute() and not root.exists():
         root = _root / root
     found = sorted(root.glob("metrics_*.csv")) if root.exists() else []
+    names = {p: p.stem.replace("metrics_", "").lower() for p in found}
+
+    def hit(name, pat):
+        pat = pat.lower()
+        return name == pat or fnmatch.fnmatch(name, pat) or pat in name
+
     if args.runs:
-        want = {r.lower() for r in args.runs}
-        found = [p for p in found if p.stem.replace("metrics_", "").lower() in want]
+        found = [p for p in found if any(hit(names[p], r) for r in args.runs)]
+    if args.exclude:
+        found = [p for p in found if not any(hit(names[p], x) for x in args.exclude)]
     if not found:
-        raise SystemExit(f"no metrics_*.csv under {root}")
+        raise SystemExit(f"nothing matched under {root}"
+                         + (f"; present: {sorted(names.values())}" if names else ""))
     for p in found:
         df = pd.read_csv(p)
         if "status" in df.columns:

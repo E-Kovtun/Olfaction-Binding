@@ -48,13 +48,26 @@ variant defaults per dataset -- q99/greedy on m2or, where coverage is heavy-tail
 the quantile picks a hub core, q0/coverage on the insects, whose complete matrix leaves
 the quantile nothing to cut -- and on m2or it is part of the filename, so both coexist.
 
-    python scripts/modeling/train/run_alpha_gate_sweep.py --dataset hc cc \\
-        --regime transductive inductive --max-parallel 4 --gpus 0 1 2 3
-    python scripts/modeling/train/run_alpha_gate_sweep.py --dataset m2or \\
-        --variant q99greedy --nodes onehot --max-parallel 4 --gpus 0 1 2 3
+REPEATS ARE FOLDS x SEEDS. A fold changes WHICH ROWS are held out; a seed changes the
+model's own draw -- graph init, the bag, and the head's subsample/colsample. Five folds
+at one seed bound the first and say nothing about the second, and the second was
+measured at +/-0.007 (graph, GPU scatter) to ~0.02 (head lottery), which is the size of
+the effects being claimed. So an error bar meant for print needs both axes. Seed 42 is
+the ensembler's own default and the seed every reported number stands on; extra seeds
+extend that row rather than replacing it.
 
-Resumable: a finished (arm, alpha, fold) is skipped, the CSV is rewritten after every
-cell, and the parent process is its sole writer.
+    # the headline table: no gate, both node kinds, 5 seeds x 5 folds
+    python scripts/modeling/train/run_alpha_gate_sweep.py --dataset cc hc m2or \\
+        --mol-source chemberta --seeds 42 43 44 45 46 --no-gate \\
+        --max-parallel 4 --gpus 0 1 2 3
+    # the dial: one seed, dense alpha, one-hot nodes (where alpha is honest)
+    python scripts/modeling/train/run_alpha_gate_sweep.py --dataset cc hc m2or \\
+        --mol-source chemberta --nodes onehot --no-legacy \\
+        --alphas 0 0.05 0.1 0.15 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 1.0
+
+Resumable: a finished (arm, alpha, fold, seed) is skipped, the CSV is rewritten after
+every cell, and the parent process is its sole writer. A CSV written before seeds
+existed is read as seed 42, so an old series is extended, not recomputed.
 """
 from __future__ import annotations
 
@@ -106,31 +119,39 @@ VARIANTS = {"q99greedy": dict(q=0.99, criterion="greedy_pair_cover",
 DEFAULT_VARIANT = {"cc": "q0cov", "hc": "q0cov", "m2or": "q99greedy"}
 GEOMS = ["rsa", "cca", "procrustes"]
 REFS = ["esm", "fun"]
-KEY = ["arm", "alpha", "fold"]
-DEFAULTS = {"prot": "data/embeddings/proteins/esm1b_650m_mean_{ds}.npz",
-            "mol": "data/embeddings/molecules/gin_supervised_contextpred_{ds}.npz"}
-# M2OR's files carry no dataset suffix, and its molecule source is the GIN the paper
-# uses for every M2OR number.
-DEFAULTS_M2OR = {"prot": "data/embeddings/proteins/esm1b_650m_mean.npz",
-                 "mol": "data/embeddings/molecules/gin_supervised_contextpred_all_m2or.npz"}
+# The molecule source is BOTH the boost's molecular half and the graph's molecule node
+# features, so switching it moves every arm at once -- which is the point: the paper
+# reports GNN-vs-boost on more than one source. ChemBERTa is the primary one; GIN stays
+# because the earlier series was run on it. Only `gin` is untagged in the filename, and
+# only because the files already on disk were written before this flag existed; every
+# row also carries a `mol_source` column, so nothing has to be inferred from a name.
+MOL_SOURCES = {"chemberta": {None: "data/embeddings/molecules/chemberta_77m_{ds}.npz"},
+               "gin": {None: "data/embeddings/molecules/gin_supervised_contextpred_{ds}.npz",
+                       "m2or": "data/embeddings/molecules/"
+                               "gin_supervised_contextpred_all_m2or.npz"}}
+# M2OR's protein file carries no dataset suffix; cc/hc have one each.
+PROT_SOURCE = {None: "data/embeddings/proteins/esm1b_650m_mean_{ds}.npz",
+               "m2or": "data/embeddings/proteins/esm1b_650m_mean.npz"}
+UNTAGGED_MOL = "gin"
 
 
 def paths(ds, args):
-    if args.prot_embeddings or args.mol_embeddings:
-        d = dict(DEFAULTS_M2OR if ds == "m2or" else DEFAULTS)
-        if args.prot_embeddings:
-            d["prot"] = args.prot_embeddings
-        if args.mol_embeddings:
-            d["mol"] = args.mol_embeddings
-    else:
-        d = DEFAULTS_M2OR if ds == "m2or" else DEFAULTS
-    return d["prot"].format(ds=ds), d["mol"].format(ds=ds)
+    src = MOL_SOURCES[args.mol_source]
+    mp = args.mol_embeddings or src.get(ds, src[None])
+    pp = args.prot_embeddings or PROT_SOURCE.get(ds, PROT_SOURCE[None])
+    return pp.format(ds=ds), mp.format(ds=ds)
 
 
 def repeats(ds, regime, args):
+    """Which repeats to run. `--folds` names them literally and therefore cannot be
+    mixed across datasets -- m2or/inductive's repeats are the cold-molecule SEEDS
+    42-46, so `--folds 1 2 3` would ask it for splits that do not exist. `--n-repeats`
+    is the portable way to say "a cheaper slice": it takes the first N of whatever this
+    (dataset, regime) actually uses."""
     if args.folds:
         return list(args.folds)
-    return REPEATS[ds].get(regime, [1, 2, 3, 4, 5])
+    reps = REPEATS[ds].get(regime, [1, 2, 3, 4, 5])
+    return reps[:args.n_repeats] if args.n_repeats else reps
 
 
 def _fmt(sec):
@@ -212,27 +233,9 @@ def _geometry(Z, P, n_perm):
     return out
 
 
-def _seed(args, fold):
-    """The seed handed to BOTH the graph and the boosting head.
-
-    Default 42 for every fold, which is not an aesthetic choice: under `--regime ofm`
-    (and full_full) `train_ensemble_boost.py` calls `run_ensemble` WITHOUT a `seed=`
-    argument, so it keeps that function's default of 42 and passes the same 42 to the
-    extractor and to `fit_boost` on every fold -- only the split changes with the
-    fold. Every cc/hc number in the tables was produced that way. `fit_boost` draws
-    subsample=0.8 / colsample_bytree=0.8 from `random_state`, so seeding by fold
-    instead re-rolls the head on each fold and moves R2 by up to 0.045 per fold in
-    either direction; that is exactly what made this sweep's first `boost_full` arm
-    read 0.501 against the table's 0.516 on CC and 0.453 against 0.468 on HC, with
-    identical features and an identical head. `--seed-per-fold` restores the other
-    convention, which is arguably the better experiment but is NOT the one the
-    reported numbers come from."""
-    return int(fold) if args.seed_per_fold else int(args.seed)
-
-
-def _row(arm, alpha, fold, **rest):
+def _row(arm, alpha, fold, seed, **rest):
     return {"arm": arm, "alpha": np.nan if alpha is None else float(alpha),
-            "fold": int(fold), "status": "ok", **rest}
+            "fold": int(fold), "seed": int(seed), "status": "ok", **rest}
 
 
 def _score(y_te, pred, task):
@@ -240,27 +243,37 @@ def _score(y_te, pred, task):
     return {k: float(m[k]) for k in TASK_METRICS[task]}
 
 
-def _baseline_rows(fold, P, args):
+def _baseline_rows(fold, seed, P, args):
     """The two references the graph is judged against, on this fold's own rows.
 
     `naive` is the constant train mean: under regression that is upstream's own naive
     baseline and the only thing that makes an R2 near zero readable; under
     classification the same constant is the class prevalence, i.e. AUROC 0.5 and the
-    AUPRC floor."""
+    AUPRC floor. `naive` ignores the seed -- a constant has no randomness -- but is
+    still written per seed so every arm has the same row count.
+
+    On the seed itself: 42 is the default because under `--regime ofm` (and full_full)
+    `train_ensemble_boost.py` calls `run_ensemble` WITHOUT a `seed=`, so it keeps that
+    function's own default of 42 and hands the same 42 to the extractor and to
+    `fit_boost` on every fold -- only the split moves. Every cc/hc number in the
+    tables was produced that way, and `fit_boost` draws subsample=0.8/colsample=0.8
+    from `random_state`, so a different seed shifts R2 by up to 0.045 on one fold.
+    That is what made this sweep's first `boost_full` read 0.501 against the table's
+    0.516. Extra seeds therefore ADD to the seed-42 row, they do not replace it."""
     task = TASK[args._ds]
     rows = []
     pred = train_boost(np.concatenate([P["Xp_tr"], P["Xm_tr"]], 1), P["y_tr"],
                        np.concatenate([P["Xp_te"], P["Xm_te"]], 1),
-                       seed=_seed(args, fold), task=task)
-    rows.append(_row("boost_full", None, fold, n_receptors=len(P["order"]),
-                     **_score(P["y_te"], pred, task)))
+                       seed=seed, task=task)
+    rows.append(_row("boost_full", None, fold, seed, n_receptors=len(P["order"]),
+                     mol_source=args.mol_source, **_score(P["y_te"], pred, task)))
     const = np.full(len(P["y_te"]), float(P["y_tr"].mean()), dtype=np.float32)
-    rows.append(_row("naive", None, fold, n_receptors=len(P["order"]),
-                     **_score(P["y_te"], const, task)))
+    rows.append(_row("naive", None, fold, seed, n_receptors=len(P["order"]),
+                     mol_source=args.mol_source, **_score(P["y_te"], const, task)))
     return rows
 
 
-def _graph_row(arm, alpha, fold, ds, P, args):
+def _graph_row(arm, alpha, fold, seed, ds, P, args):
     """One trained graph -> the cls+mol boost feature -> metrics + geometry."""
     task = TASK[ds]
     pp, mp = paths(ds, args)
@@ -268,7 +281,6 @@ def _graph_row(arm, alpha, fold, ds, P, args):
         name="cls", protein_path=pp, molecule_path=mp, **VARIANTS[args._variant],
         task=task, n_models=args.n_models, epochs=args.epochs,
         emit="prot", alpha=alpha, onehot_nodes=(args.nodes == "onehot"))
-    seed = _seed(args, fold)
     Zp_tr, Zp_va, Zp_te = ext.fit_transform(P["pairs"], P["tr"], P["va"], P["te"], seed)
     pred = train_boost(np.concatenate([Zp_tr, P["Xm_tr"]], 1), P["y_tr"],
                        np.concatenate([Zp_te, P["Xm_te"]], 1),
@@ -285,26 +297,31 @@ def _graph_row(arm, alpha, fold, ds, P, args):
     missing = [r for r in P["order"] if r not in seen]
     Z = np.stack([seen[r] for r in P["order"] if r in seen]).astype(np.float64)
     geo = {} if missing else _geometry(Z, P, args.n_perm)
-    return _row(arm, alpha, fold, n_receptors=len(P["order"]),
+    return _row(arm, alpha, fold, seed, n_receptors=len(P["order"]),
                 k_pca=int(getattr(ext, "_k_pca", 0)), variant=args._variant,
+                mol_source=args.mol_source, nodes=args.nodes,
                 **_score(P["y_te"], pred, task), **geo)
 
 
-def _failed(arm, alpha, fold, err):
-    r = _row(arm, alpha, fold, **{k: float("nan") for k in TASK_METRICS["regression"]},
+def _failed(job, err):
+    arm, alpha, fold, seed = job
+    r = _row(arm, alpha, fold, seed,
+             **{k: float("nan") for k in TASK_METRICS["regression"]},
              **{k: float("nan") for k in TASK_METRICS["classification"]})
     r["status"] = f"failed: {err}"
     return r
 
 
 def _run_job(job, ds, regime, args, cache, data):
-    arm, alpha, fold = job
+    arm, alpha, fold, seed = job
+    # The fold prep is seed-independent (splits, embeddings, the response matrix), so
+    # it is cached by fold alone and shared by every seed a worker happens to draw.
     if fold not in cache:
         cache[fold] = _fold_prep(ds, regime, fold, args, data)
     P = cache[fold]
     if arm == "baselines":
-        return _baseline_rows(fold, P, args)
-    return [_graph_row(arm, alpha, fold, ds, P, args)]
+        return _baseline_rows(fold, seed, P, args)
+    return [_graph_row(arm, alpha, fold, seed, ds, P, args)]
 
 
 def _worker(job_q, res_q, ds, regime, args):
@@ -320,50 +337,85 @@ def _worker(job_q, res_q, ds, regime, args):
                 for row in _run_job(job, ds, regime, args, cache, data):
                     res_q.put(("row", row))
             except Exception as e:                  # noqa: BLE001 -- one cell must not kill the sweep
-                res_q.put(("row", _failed(job[0], job[1], job[2], e)))
+                res_q.put(("row", _failed(job, e)))
     finally:
         res_q.put(("worker_done", None))
+
+
+def key(arm, alpha, fold, seed):
+    """The resume identity of one cell. Everything that changes what is computed and
+    is NOT already fixed by the filename has to be in here, or a second invocation
+    reads a finished file and silently reports the first one's numbers."""
+    return (arm, "" if alpha is None else round(float(alpha), 6), int(fold), int(seed))
+
+
+def out_path(ds, regime, args):
+    """What goes in the FILENAME and what goes in a COLUMN. Filename: only the axes a
+    reader must be able to pick a series by without opening it -- the edge variant
+    (m2or only, where both are live), the node features, and the molecule source. GIN
+    is untagged so the files written before that flag existed stay addressable.
+    Column: everything else, the seed included, so one file accumulates the whole seed
+    grid and stays resumable across separate invocations."""
+    variant = args.variant or DEFAULT_VARIANT[ds]
+    tag = "" if args.nodes == "esm" else f"_{args.nodes}"
+    if args.mol_source != UNTAGGED_MOL:
+        tag = f"_{args.mol_source}{tag}"
+    if ds == "m2or":
+        tag = f"_{variant}{tag}"
+    return pathlib.Path(args.out or (_root / "results/graph/v8_alpha_gate")) / \
+        f"metrics_{ds}_{FAMILY[ds][regime]}{tag}.csv"
+
+
+def load_done(out, force=False):
+    """(rows already on disk, their keys). A file written before seeds existed holds
+    exactly one seed, 42 -- the ensembler's default, which is what those rows were
+    produced at. Reading them as 42 is what lets an old series be EXTENDED with more
+    seeds instead of recomputed, or worse, skipped as if the new seeds were done."""
+    if not out.exists() or force:
+        return [], set()
+    prev = pd.read_csv(out)
+    if "seed" not in prev.columns:
+        prev["seed"] = 42
+    prev = prev.assign(seed=prev["seed"].fillna(42).astype(int))
+    return (prev.to_dict("records"),
+            {key(r["arm"], None if pd.isna(r["alpha"]) else r["alpha"],
+                 r["fold"], r["seed"]) for _, r in prev.iterrows()})
+
+
+def plan(reps, args, done):
+    """The cells still to run, seed-major so a partial sweep is a whole seed rather
+    than a ragged slice of every one."""
+    jobs = []
+    for s in args.seeds:
+        for f in reps:
+            if not all(key(a, None, f, s) in done for a in ("boost_full", "naive")):
+                jobs.append(("baselines", None, f, s))
+            if args.baselines_only:
+                continue
+            if args.legacy and key("graph_legacy", None, f, s) not in done:
+                jobs.append(("graph_legacy", None, f, s))
+            for a in (args.alphas if args.gate else []):
+                if key("gate", a, f, s) not in done:
+                    jobs.append(("gate", float(a), f, s))
+    return jobs
 
 
 def sweep(ds, regime, args):
     args._ds, args._variant = ds, (args.variant or DEFAULT_VARIANT[ds])
     reps = repeats(ds, regime, args)
-    # The variant is in the filename only where more than one is in play. The insects
-    # were only ever run at their own q0cov, and renaming those files now would orphan
-    # the series already on disk; every row carries a `variant` column regardless.
-    tag = "" if args.nodes == "esm" else f"_{args.nodes}"
-    if ds == "m2or":
-        tag = f"_{args._variant}{tag}"
-    out = pathlib.Path(args.out or (_root / "results/graph/v8_alpha_gate")) / \
-        f"metrics_{ds}_{FAMILY[ds][regime]}{tag}.csv"
+    out = out_path(ds, regime, args)
     out.parent.mkdir(parents=True, exist_ok=True)
+    rows, done = load_done(out, args.force)
+    jobs = plan(reps, args, done)
 
-    rows, done = [], set()
-    if out.exists() and not args.force:
-        prev = pd.read_csv(out)
-        rows = prev.to_dict("records")
-        done = {(r["arm"], "" if pd.isna(r["alpha"]) else round(float(r["alpha"]), 6),
-                 int(r["fold"])) for _, r in prev.iterrows()}
-
-    def key(arm, alpha, fold):
-        return (arm, "" if alpha is None else round(float(alpha), 6), int(fold))
-
-    jobs = []
-    for f in reps:
-        if not all(key(a, None, f) in done for a in ("boost_full", "naive")):
-            jobs.append(("baselines", None, f))
-        if args.baselines_only:
-            continue
-        if args.legacy and key("graph_legacy", None, f) not in done:
-            jobs.append(("graph_legacy", None, f))
-        for a in args.alphas:
-            if key("gate", a, f) not in done:
-                jobs.append(("gate", float(a), f))
-
+    pp, mp = paths(ds, args)
     print(f"\n=== {ds.upper()} / {regime} ({FAMILY[ds][regime]}) ===\n"
-          f"    repeats {reps}  alphas {args.alphas}  legacy {args.legacy}\n"
+          f"    repeats {reps}  seeds {args.seeds}  alphas {args.alphas}  "
+          f"legacy {args.legacy}\n"
           f"    task {TASK[ds]}  nodes {args.nodes}  variant {args._variant} "
           f"{VARIANTS[args._variant]}\n"
+          f"    mol {args.mol_source}: {mp.rsplit('/', 1)[-1]}   "
+          f"prot: {pp.rsplit('/', 1)[-1]}\n"
           f"    {len(jobs)} jobs ({len(done)} cells already done)  ->  {out}", flush=True)
     if not jobs:
         return out
@@ -372,7 +424,8 @@ def sweep(ds, regime, args):
     t0, state = time.time(), {"n": 0}
 
     def record(row):
-        k = key(row["arm"], None if pd.isna(row["alpha"]) else row["alpha"], row["fold"])
+        k = key(row["arm"], None if pd.isna(row["alpha"]) else row["alpha"],
+                row["fold"], row["seed"])
         if k in done:
             return
         rows.append(row); done.add(k)
@@ -391,7 +444,8 @@ def sweep(ds, regime, args):
                 + "".join(f"  {g}/{r}={row.get(f'{g}_{r}_z', float('nan')):+.1f}"
                           for r in REFS for g in ("rsa",)))
         a = "" if pd.isna(row["alpha"]) else f"a={row['alpha']:.2f}"
-        print(f"  fold {row['fold']} {row['arm']:<12} {a:<7} {body}  {tag}", flush=True)
+        print(f"  s{row['seed']} fold {row['fold']} {row['arm']:<12} {a:<7} {body}  {tag}",
+              flush=True)
 
     if args.max_parallel <= 1:
         data, cache = _prepare(ds, args), {}
@@ -400,7 +454,7 @@ def sweep(ds, regime, args):
                 for row in _run_job(job, ds, regime, args, cache, data):
                     record(row)
             except Exception as e:                  # noqa: BLE001
-                record(_failed(job[0], job[1], job[2], e))
+                record(_failed(job, e))
     else:
         import multiprocessing as mp
         ctx = mp.get_context("spawn")
@@ -450,14 +504,30 @@ def main():
     ap.add_argument("--folds", type=int, nargs="+", default=None,
                     help="repeats to run. Default: folds 1-5, except m2or/inductive "
                          "whose repeats are the cold-molecule seeds 42-46")
+    ap.add_argument("--n-repeats", type=int, default=None,
+                    help="run only the first N repeats of whatever this (dataset, "
+                         "regime) uses -- folds 1..N on most, cold-molecule seeds "
+                         "42..42+N-1 on m2or/inductive. Prefer this over --folds when "
+                         "several datasets are in one invocation")
     ap.add_argument("--pool-fold", type=int, default=1,
                     help="m2or only: which LORaX fold reconstructs the pool")
     ap.add_argument("--no-legacy", dest="legacy", action="store_false",
                     help="skip the pre-v8 graph arm (alpha=None)")
+    ap.add_argument("--no-gate", dest="gate", action="store_false",
+                    help="skip every gate arm, leaving baselines + legacy. The cheap "
+                         "shape for the headline table, where the only graph rows "
+                         "wanted are the pre-v8 model and (with --nodes onehot) a "
+                         "single alpha")
+    ap.add_argument("--mol-source", choices=list(MOL_SOURCES), default="chemberta",
+                    help="molecule embeddings -- the boost's molecular half AND the "
+                         "graph's molecule node features. chemberta is the primary "
+                         "source; gin is kept because the earlier series ran on it and "
+                         "the paper reports both. Only gin is untagged in the filename")
     ap.add_argument("--prot-embeddings", default=None,
                     help="override; {ds} is filled in per dataset")
     ap.add_argument("--mol-embeddings", default=None,
-                    help="override; also the graph's MP node features")
+                    help="override; also the graph's MP node features. Overrides "
+                         "--mol-source for the PATH but not for the filename tag")
     ap.add_argument("--n-models", type=int, default=1)
     ap.add_argument("--epochs", type=int, default=900)
     ap.add_argument("--n-perm", type=int, default=200,
@@ -472,13 +542,15 @@ def main():
                     help="only boost_full + naive (no graph, so seconds not hours) -- the "
                          "cheap way to check this sweep reproduces the table of record "
                          "before spending a GPU on the rest")
-    ap.add_argument("--seed", type=int, default=42,
-                    help="seed for the graph AND the boosting head on every fold -- the "
-                         "ensembler's own convention under --regime ofm, which is what the "
-                         "reported cc/hc numbers were produced with. See _seed()")
-    ap.add_argument("--seed-per-fold", action="store_true",
-                    help="seed by fold number instead; a different experiment, not "
-                         "comparable to the tables")
+    ap.add_argument("--seeds", type=int, nargs="+", default=[42],
+                    help="seeds for the graph AND the boosting head. Each is run on "
+                         "every fold, so the repeats become folds x seeds: folds vary "
+                         "WHICH ROWS are held out, seeds vary the model's own draw "
+                         "(graph init, bagging, the head's subsample/colsample), and "
+                         "only the two together bound the error bar. 42 is the "
+                         "ensembler's own default and the seed every reported number "
+                         "was produced at, so keep it in the list -- extra seeds add "
+                         "to that row rather than replacing it")
     ap.add_argument("--max-parallel", type=int, default=1)
     ap.add_argument("--gpus", type=int, nargs="+", default=None)
     ap.add_argument("--out", default=None)
@@ -496,7 +568,9 @@ def main():
     print("\nwrote:")
     for w in written:
         print(f"  {w}")
-    print("\nread with:\n  python scripts/analysis/alpha_gate_summary.py -c")
+    print("\nread with:\n"
+          "  python scripts/analysis/alpha_gate_summary.py -c      # one run in detail\n"
+          "  python scripts/analysis/headline_table.py             # all runs, one table")
 
 
 if __name__ == "__main__":

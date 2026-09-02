@@ -7,11 +7,12 @@ Read them; do not extend them.
 
 | file | what it was | what replaced it, and why |
 |---|---|---|
-| `alpha_gate_summary.py` | per-run reader of one v8 alpha sweep: prediction, geometry and a verdict for a single CSV | `scripts/analysis/headline_table.py` (the numbers, across every run at once) and `scripts/analysis/alpha_curves.py` (the geometry as a curve in alpha). One run at a time stopped being the unit of reading once the grid became one command. |
+| `alpha_gate_summary.py` | per-run reader of one v8 alpha sweep: prediction, geometry and a verdict for a single CSV | `scripts/analysis/headline_table.py` (the numbers, across every run at once) and `scripts/analysis/alpha_grid.py` (the geometry as a curve in alpha). One run at a time stopped being the unit of reading once the grid became one command. |
 | `structure_function_grid.py` | the (k, phi) grid: two ablation axes over the graph's message passing | the alpha gate. Both of those axes only ever REMOVED information, so neither could pull the receptor cloud back toward ESM -- the structural end was reachable only by not training. A frozen branch the optimizer cannot drain is what turned the pair of ablations into one dial with two known ends. |
 | `sf_grid_summary.py` | CLI reader for that grid | — |
+| `alpha_curves.py` | melted one alpha sweep into `curves_long.csv` for the first curve notebook, and audited the dial from the console | `scripts/analysis/alpha_grid.py`, which the notebook imports directly instead of reading a melted CSV -- so a knob changes a figure rather than requiring a rerun -- and whose `__main__` keeps the console audit (`python scripts/analysis/alpha_grid.py --root ...`). |
 
-The companion notebook is `notebooks/legacy/structure_function_grid.ipynb`.
+The companion notebooks are archived under [`notebooks/legacy/`](../../notebooks/legacy/README.md).
 
 Results produced by these live under `results/graph/` in whatever directory the run
 wrote to; the pre-separation v8 sweeps (ESM node features, both edge variants, the
@@ -21,4 +22,10 @@ fully separated grid replaced them. To read that archive with the current tools:
 ```sh
 python scripts/analysis/headline_table.py \
     --root results/graph/v8_alpha_gate_reference --nodes esm --all-variants --all-seeds
+python scripts/analysis/alpha_grid.py \
+    --root results/graph/v8_alpha_gate_reference --nodes esm
 ```
+
+Read those as a DIFFERENT experiment, not as more folds of the current one: with ESM
+node features the protein embedding still reaches the receptor vector through message
+passing at alpha=1, so that dial has no upper end.

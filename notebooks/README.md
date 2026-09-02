@@ -30,8 +30,10 @@ notebooks/
                            receptor carry a MECHANISM to a chemistry it never saw?
                            RSA/Mantel is the metric of record; a predictive-OOD
                            boosting readout runs on the same masks.
-    refinement_geometry/   {M2OR, CC, HC} -- what refinement moves in the receptor
-                           geometry; the companion to the same study.
+    alpha_gate/            the alpha dial: geometry (how far the receptor cloud
+                           sits from each of the two extremes, three measures) and
+                           performance, over five splits, with a knob for the
+                           molecular source.
     alternatives/          display-only readers for the quantile x criterion sweeps
 ```
 

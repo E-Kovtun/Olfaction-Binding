@@ -14,7 +14,6 @@ What stayed live, and why:
   `scripts/modeling/analysis/mechanism_holdout.py`. The three per-dataset notebooks it replaced
   are archived here under `graph/mechanism_holdout/`: they carried the compute inline, which is
   exactly what moved to the script.
-* `notebooks/graph/refinement_geometry/{M2OR,CC,HC}` -- the geometry companion.
 * `notebooks/graph/alternatives/protein_based_graph{,_carey}` -- display-only readers
   for the quantile x criterion sweeps (appendix).
 * `notebooks/datasets/carey_hallem_carlson_overview` -- the dataset description

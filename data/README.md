@@ -52,7 +52,7 @@ what lets the same file serve datasets that name their entities differently.
 | `molecules/molecule_smiles.csv` | `01_build_table.py` | molecule embedding scripts |
 | `molecules/molecule_smiles_{cc,hc}.csv` | `07_prepare_ofm_molecules.py` | SMILES→InChIKey bridge for the insect datasets (`orbind/regimes_ofm.py`) |
 | `molecules/lorax_smiles_to_inchikey.csv` | `07_prepare_ofm_molecules.py` | reconciles LORAX's SMILES with our InChIKey keying |
-| `bw_*_curated.csv` | `02_bw_numbering.py` | Ballesteros–Weinstein residue numbering; `bw_ref_used_curated.csv` labels receptors by OR family in `notebooks/graph/refinement_geometry/` |
+| `bw_*_curated.csv` | `02_bw_numbering.py` | Ballesteros–Weinstein residue numbering; `bw_ref_used_curated.csv` labels receptors by OR family in `notebooks/legacy/refinement_geometry/` |
 
 The curation filters (human only, no mutants, mono-molecular, binary response,
 no orphan receptors) live in `orbind/filters.py`; `01_build_table.py` applies them.

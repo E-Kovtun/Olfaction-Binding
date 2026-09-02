@@ -768,7 +768,8 @@ def main():
         print(f"  {w}")
     print("\nread with:\n"
           "  python scripts/analysis/headline_table.py    # the numbers, every run\n"
-          "  python scripts/analysis/alpha_curves.py      # the dial, for the notebook")
+          "  python scripts/analysis/alpha_grid.py        # the dial: geometry + prediction\n"
+          "  notebooks/graph/alpha_gate/alpha_gate.ipynb   # the same, as figures")
 
 
 if __name__ == "__main__":

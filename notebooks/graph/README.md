@@ -10,11 +10,57 @@ ledger) is archived under [`../../legacy/`](../../legacy/README.md).
 
 ```
 notebooks/graph/
+  alpha_gate/           the alpha dial: where the receptor cloud sits between
+                        structure and function, and what that costs in prediction
   mechanism_holdout/    ligand-class holdout: does the refined receptor transfer a
                         MECHANISM to a chemistry it never trained on?
-  refinement_geometry/  what refinement does to the receptor geometry
   alternatives/         display-only readers for the quantile x criterion sweeps
 ```
+
+## `alpha_gate/alpha_gate.ipynb` -- the dial, both halves
+
+The v8 grid in one notebook. Its subject is
+
+    z_prot = (1 - alpha) * frozen_SVD(ESM) + alpha * signed_graph(...)
+
+with **one-hot receptor nodes throughout**, so the protein embedding reaches the model
+nowhere but through the frozen branch at weight (1 - alpha). That is what makes alpha an
+honest fraction of structure rather than a mixing weight between two things that both
+contain ESM, and it is why the earlier ESM-node series cannot be read as more folds of
+this one -- with ESM nodes the dial has no upper end.
+
+Two blocks, and the notebook is deliberately nothing else:
+
+* **Geometry** -- how far the receptor cloud sits from each of the two extremes at every
+  alpha: alignment to raw ESM and to the train response profile, under RSA, CCA and
+  Procrustes, all oriented so larger is closer. The dial working *means* the ESM curve
+  falls and the profile curve rises, so that is checked as a number (`audit`) before any
+  plot is read. Then the crossover -- the alpha at which the cloud is equally far along
+  both dials -- per series and per measure.
+* **Performance** -- the head's own score along the same axis, against `boost`
+  (XGBoost on raw ESM || molecule) and `naive` (the constant train mean); then the same
+  numbers **differenced cell by cell** against boost, which is the panel that carries the
+  interval that is actually about the gap. Both arms ran on the same split with the same
+  draw, so an unpaired comparison would throw that away.
+
+Knobs at the top: molecular source (`None` keeps both as separate series), node kind,
+dataset, regime, model seed, CI level, geometry scale (raw or z against the permutation
+null), and which metrics the battery grid shows. **Error bars are over the splits** --
+five per series, Student-t, because at n=5 the 1.96 approximation is 29% too narrow.
+
+**All computation lives in `scripts/analysis/alpha_grid.py`**, which the notebook
+imports; the same module run as a script prints both blocks as text, for an ssh session
+with no browser:
+
+```sh
+python scripts/analysis/alpha_grid.py --mol-source chemberta
+python scripts/analysis/headline_table.py        # the scoreboard of record
+```
+
+The grid itself comes from `scripts/modeling/train/run_alpha_gate_sweep.py`. The
+notebook is safe to open **mid-run**: a series that has only reached its baselines keeps
+its panel and says "not run yet", and `coverage` flags a ragged dial, where some alphas
+rest on fewer splits than others and the wiggles are partly the run schedule.
 
 ## `mechanism_holdout/split_alternatives.ipynb` -- would a different split help?
 
@@ -108,10 +154,6 @@ depends on the weighting is visible as one. Both leaks come from the artifacts.
 cross-correlation and non-random assay design make it unreadable there. The two complete insect
 matrices (CC 50x110, HC 24x110) are.
 
-## `refinement_geometry/` -- `{M2OR, CC, HC}`
-
-The geometry companion to the same study: what moves when the receptor vector is refined.
-
 ## `alternatives/`
 
 `protein_based_graph.ipynb` (M2OR) and `protein_based_graph_carey.ipynb` (Carey/Hallem)
@@ -127,4 +169,10 @@ mean anything on Carey/Hallem -- see `orbind/mol_selection.resolve_K`.
 
 The (k, phi) surface, superseded by the alpha gate: both of its axes only removed
 information, so neither could pull the receptor cloud back toward ESM. Kept as
-reference. Its successor is `mechanism_holdout/alpha_gate_curves.ipynb`.
+reference. Its successor is `alpha_gate/alpha_gate.ipynb`.
+
+`refinement_geometry/{M2OR,CC,HC}` and the first curve notebook,
+`alpha_gate_curves.ipynb`, were retired to [`../legacy/`](../legacy/README.md) at the
+same time: the first retrained the historical model inside the notebook to photograph
+its cloud, which is now one axis of the alpha grid rather than a picture per dataset;
+the second read a melted CSV from a script that no longer exists.

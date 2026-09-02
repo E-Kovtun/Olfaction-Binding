@@ -130,11 +130,11 @@ def load(root, args):
     if not frames:
         raise SystemExit(f"no metrics_*.csv under {root}")
     df = pd.concat(frames, ignore_index=True)
-    df["variant_tag"] = df["variant_tag"].fillna("").astype(str)
+    df.loc[:, "variant_tag"] = df["variant_tag"].fillna("").astype(str)
     # A blank variant means "written before the column existed", which is always the
     # dataset's own default -- not a second, nameless variant.
-    df["variant_tag"] = [v or CANONICAL_VARIANT.get(d, "")
-                         for d, v in zip(df.dataset, df.variant_tag)]
+    df.loc[:, "variant_tag"] = [v or CANONICAL_VARIANT.get(d, "")
+                                for d, v in zip(df.dataset, df.variant_tag)]
     if args.dataset:
         df = df[df.dataset.isin(args.dataset)]
     if args.mol_source:
@@ -168,15 +168,27 @@ def cells(df, arm, alpha, nodes=None):
     return q.set_index(["fold", "seed"])
 
 
+def _t(n, level=0.95):
+    """The two-sided critical value at n-1 degrees of freedom.
+
+    NOT 1.96. That approximation was written when a row pooled 25 cells; under the
+    fully separated grid a row rests on the dataset's five splits at a fixed model
+    seed, where t is 2.776 and the normal interval is 29% too narrow. An error bar
+    that narrow turns "indistinguishable" into "significant" on exactly the 0.01-scale
+    differences this table exists to adjudicate."""
+    from scipy.stats import t as _tdist
+    return float(_tdist.ppf(0.5 + level / 2, max(n - 1, 1)))
+
+
 def ci95(v):
-    """mean, half-width of the 95% interval, n. Normal approximation -- with 25 cells
-    the t correction is under 5% of the width and this is a scoreboard, not a test."""
+    """mean, half-width of the 95% interval, n. Student-t -- see `_t`."""
     v = pd.to_numeric(v, errors="coerce").dropna()
     if v.empty:
         return np.nan, np.nan, 0
     if len(v) == 1:
         return float(v.iloc[0]), np.nan, 1
-    return float(v.mean()), float(1.96 * v.std(ddof=1) / np.sqrt(len(v))), len(v)
+    return (float(v.mean()),
+            float(_t(len(v)) * v.std(ddof=1) / np.sqrt(len(v))), len(v))
 
 
 def paired(a, b, metric):
@@ -188,7 +200,7 @@ def paired(a, b, metric):
          - pd.to_numeric(b.loc[common, metric], errors="coerce")).dropna()
     if d.empty:
         return np.nan, np.nan, 0, 0
-    hw = 1.96 * d.std(ddof=1) / np.sqrt(len(d)) if len(d) > 1 else np.nan
+    hw = _t(len(d)) * d.std(ddof=1) / np.sqrt(len(d)) if len(d) > 1 else np.nan
     return float(d.mean()), hw, int((d > 0).sum()), int(len(d))
 
 

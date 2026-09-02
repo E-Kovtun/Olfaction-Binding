@@ -86,10 +86,13 @@ while not (_root / "pyproject.toml").exists():
 sys.path.insert(0, str(_root))
 
 from orbind.baselines import train_boost                          # noqa: E402
-from orbind.dataset import METRICS as METRIC_FNS, load_npz_dict    # noqa: E402
+from orbind.dataset import (                                       # noqa: E402
+    METRICS as METRIC_FNS, METRICS_FULL, load_npz_dict)
 from orbind.gnn_extractor import GnnSignedExtractor                # noqa: E402
 from orbind.regimes import full_full_pairs, load_split           # noqa: E402
 from orbind.regimes_ofm import ofm_indices, ofm_pairs              # noqa: E402
+from orbind.gpu_dashboard import (                                 # noqa: E402
+    Dashboard, plan_placement, visible_gpus)
 from scripts.modeling.analysis.mechanism_holdout import (          # noqa: E402
     GEOMETRY, geometry_nulls)
 
@@ -210,6 +213,10 @@ def _fold_prep(ds, regime, fold, args, data):
     R = np.nan_to_num(R, nan=float(np.nanmean(R)) if np.isfinite(R).any() else 0.0)
     return {"pairs": pairs, "tr": tr, "va": va, "te": te,
             "y_tr": lab[tr], "y_te": lab[te],
+            # group ids for the within-receptor / within-molecule scores, and the
+            # TRAIN response for the binarisation cuts -- which must never be fit
+            # on test rows, or the label definition itself sees the held-out data
+            "rec_te": rc[te], "mol_te": ik[te], "rec_tr": rc[tr],
             "Xm_tr": _mat(mol, ik[tr]), "Xm_te": _mat(mol, ik[te]),
             "Xp_tr": _mat(prot, rc[tr]), "Xp_te": _mat(prot, rc[te]),
             "order": order, "prank": rank,
@@ -238,9 +245,43 @@ def _row(arm, alpha, fold, seed, **rest):
             "fold": int(fold), "seed": int(seed), "status": "ok", **rest}
 
 
-def _score(y_te, pred, task):
-    m = METRIC_FNS[task](y_te, pred)
-    return {k: float(m[k]) for k in TASK_METRICS[task]}
+def _score(P, pred, task, full=True):
+    """Every metric the task admits, not just the headline four or five.
+
+    On the continuous insect panels that means the pooled regression scores plus
+    the binary battery after binarising the response at `rec0` -- above each
+    receptor's own TRAIN centre, the same convention the graph's edge signs use.
+    Twelve columns instead of five. On m2or it adds precision and recall, which
+    were always computed and then dropped on the way into the row.
+
+    Which of them a table reads is a decision for the reader; recomputing any of
+    them is a decision for a GPU, so they are all written now. `TASK_METRICS`
+    stays the short list the progress line shows."""
+    if not full:
+        return {k: float(v) for k, v in METRIC_FNS[task](P["y_te"], pred).items()}
+    if task == "regression":
+        m = METRICS_FULL[task](P["y_te"], pred, rec_te=P["rec_te"], mol_te=P["mol_te"],
+                               y_tr=P["y_tr"], rec_tr=P["rec_tr"])
+    else:
+        m = METRICS_FULL[task](P["y_te"], pred, rec_te=P["rec_te"], mol_te=P["mol_te"])
+    return {k: float(v) for k, v in m.items()}
+
+
+def _dump(args, ds, regime, arm, alpha, fold, seed, **arrays):
+    """One npz per cell, keyed by everything that changes what is in it.
+
+    The key matters more than it looks. The extractor's own checkpointing writes
+    `gnn_{name}_model{m}.pt`, and `name` is "cls" in every cell of this grid --
+    one directory would have the first cell's weights silently reused by the
+    other 719. Keying on (arm, alpha, fold, seed) under the run's own stem makes
+    that class of mistake impossible here."""
+    if not arrays:
+        return
+    a = "None" if alpha is None else f"{float(alpha):g}"
+    d = (out_path(ds, regime, args).parent / "dumps"
+         / out_path(ds, regime, args).stem.replace("metrics_", ""))
+    d.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(d / f"{arm}_a{a}_f{fold}_s{seed}.npz", **arrays)
 
 
 def _baseline_rows(fold, seed, P, args):
@@ -266,10 +307,17 @@ def _baseline_rows(fold, seed, P, args):
                        np.concatenate([P["Xp_te"], P["Xm_te"]], 1),
                        seed=seed, task=task)
     rows.append(_row("boost_full", None, fold, seed, n_receptors=len(P["order"]),
-                     mol_source=args.mol_source, **_score(P["y_te"], pred, task)))
+                     mol_source=args.mol_source, **_score(P, pred, task)))
     const = np.full(len(P["y_te"]), float(P["y_tr"].mean()), dtype=np.float32)
     rows.append(_row("naive", None, fold, seed, n_receptors=len(P["order"]),
-                     mol_source=args.mol_source, **_score(P["y_te"], const, task)))
+                     mol_source=args.mol_source, **_score(P, const, task)))
+    # boost has no receptor cloud, but its per-pair predictions are half of every
+    # stratified comparison against the graph, so they are dumped alongside
+    if args.dump_predictions:
+        _dump(args, args._ds, args._regime, "boost_full", None, fold, seed,
+              pred=np.asarray(pred, np.float32), y_true=np.asarray(P["y_te"], np.float32),
+              receptor=np.asarray(P["rec_te"], dtype=object).astype("U"),
+              inchikey=np.asarray(P["mol_te"], dtype=object).astype("U"))
     return rows
 
 
@@ -297,10 +345,23 @@ def _graph_row(arm, alpha, fold, seed, ds, P, args):
     missing = [r for r in P["order"] if r not in seen]
     Z = np.stack([seen[r] for r in P["order"] if r in seen]).astype(np.float64)
     geo = {} if missing else _geometry(Z, P, args.n_perm)
+    dump = {}
+    if args.dump_embeddings and not missing:
+        # the receptor cloud the geometry was measured on, in universe order. 1.3 MB
+        # on m2or, 50 KB on the insects -- against ~6 MB for the weights, and this is
+        # what every downstream geometry question actually consumes
+        dump |= dict(z_prot=Z.astype(np.float32),
+                     receptors=np.asarray(P["order"], dtype=object).astype("U"))
+    if args.dump_predictions:
+        dump |= dict(pred=np.asarray(pred, np.float32),
+                     y_true=np.asarray(P["y_te"], np.float32),
+                     receptor=np.asarray(P["rec_te"], dtype=object).astype("U"),
+                     inchikey=np.asarray(P["mol_te"], dtype=object).astype("U"))
+    _dump(args, ds, args._regime, arm, alpha, fold, seed, **dump)
     return _row(arm, alpha, fold, seed, n_receptors=len(P["order"]),
                 k_pca=int(getattr(ext, "_k_pca", 0)), variant=args._variant,
                 mol_source=args.mol_source, nodes=args.nodes,
-                **_score(P["y_te"], pred, task), **geo)
+                **_score(P, pred, task), **geo)
 
 
 def _failed(job, err):
@@ -324,22 +385,34 @@ def _run_job(job, ds, regime, args, cache, data):
     return [_graph_row(arm, alpha, fold, seed, ds, P, args)]
 
 
-def _worker(job_q, res_q, ds, regime, args):
+def _worker(job_q, res_q, ds, regime, args, wid=0, log_dir=None):
     """Persistent GPU-pinned worker; `worker_done` from `finally` so a crash cannot
-    leave the parent blocked forever waiting for a row that will never come."""
+    leave the parent blocked forever waiting for a row that will never come.
+
+    The extractor prints several lines per cell -- edge counts, the gate's rank, the
+    node swap. With a dozen workers on one terminal that is the wall of log the
+    dashboard exists to replace, so it is redirected to one file per worker: still
+    there for a post-mortem, no longer between the reader and the numbers."""
+    if log_dir is not None:
+        log_dir = pathlib.Path(log_dir)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        sys.stdout = open(log_dir / f"worker{wid}.log", "a", buffering=1,
+                          encoding="utf-8")
+        sys.stderr = sys.stdout
     try:
         data, cache = _prepare(ds, args), {}
         while True:
             job = job_q.get()
             if job is None:
                 break
+            res_q.put(("start", (wid, job)))
             try:
                 for row in _run_job(job, ds, regime, args, cache, data):
-                    res_q.put(("row", row))
+                    res_q.put(("row", (wid, row)))
             except Exception as e:                  # noqa: BLE001 -- one cell must not kill the sweep
-                res_q.put(("row", _failed(job, e)))
+                res_q.put(("row", (wid, _failed(job, e))))
     finally:
-        res_q.put(("worker_done", None))
+        res_q.put(("worker_done", wid))
 
 
 def key(arm, alpha, fold, seed):
@@ -400,8 +473,21 @@ def plan(reps, args, done):
     return jobs
 
 
-def sweep(ds, regime, args):
+def workers_wanted(args, gpus):
+    """How many trainings run at once.
+
+    `--per-gpu` is the flag to reach for: a single graph training leaves most of a
+    modern card idle, both in memory and in occupancy, so the useful question is how
+    many fit on one card rather than how many cards there are. `--max-parallel` still
+    works and still means a total, for the runs already written against it."""
+    if args.per_gpu:
+        return max(1, args.per_gpu * max(len(gpus), 1))
+    return max(1, args.max_parallel)
+
+
+def sweep(ds, regime, args, dash=None):
     args._ds, args._variant = ds, (args.variant or DEFAULT_VARIANT[ds])
+    args._regime = regime
     reps = repeats(ds, regime, args)
     out = out_path(ds, regime, args)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -422,6 +508,9 @@ def sweep(ds, regime, args):
 
     heavy = sum(1 for j in jobs if j[0] != "baselines")
     t0, state = time.time(), {"n": 0}
+    if dash is not None:
+        dash.set_stage(f"{ds}/{regime} {args.mol_source}/{args.nodes} -- "
+                       f"{heavy} cells, {len(done)} already on disk")
 
     def record(row):
         k = key(row["arm"], None if pd.isna(row["alpha"]) else row["alpha"],
@@ -439,15 +528,24 @@ def sweep(ds, regime, args):
             tag = (f"[{state['n']}/{heavy} {_fmt(el)} "
                    f"ETA {_fmt(el / state['n'] * (heavy - state['n']))}]")
         shown = ("R2", "Spearman") if TASK[ds] == "regression" else ("AUROC", "AUPRC")
-        body = (row["status"] if str(row["status"]).startswith("failed")
+        failed = str(row["status"]).startswith("failed")
+        body = (row["status"] if failed
                 else " ".join(f"{m}={row[m]:+.3f}" for m in shown)
                 + "".join(f"  {g}/{r}={row.get(f'{g}_{r}_z', float('nan')):+.1f}"
                           for r in REFS for g in ("rsa",)))
         a = "" if pd.isna(row["alpha"]) else f"a={row['alpha']:.2f}"
-        print(f"  s{row['seed']} fold {row['fold']} {row['arm']:<12} {a:<7} {body}  {tag}",
-              flush=True)
+        label = f"s{row['seed']} f{row['fold']} {row['arm']}{(' ' + a) if a else ''}"
+        if dash is None:
+            print(f"  {label:<32} {body}  {tag}", flush=True)
+        elif failed:
+            dash.note(f"{ds}/{regime} {label}: {row['status'][:70]}")
+        else:
+            dash.last = f"{label}  {body}"
+            dash.render()
+        if dash is not None and row["arm"] not in ("boost_full", "naive"):
+            dash.done += 1              # owned here, so the serial path counts too
 
-    if args.max_parallel <= 1:
+    if workers_wanted(args, args.gpus or visible_gpus() or [0]) <= 1:
         data, cache = _prepare(ds, args), {}
         for job in jobs:
             try:
@@ -459,25 +557,64 @@ def sweep(ds, regime, args):
         import multiprocessing as mp
         ctx = mp.get_context("spawn")
         job_q, res_q = ctx.Queue(), ctx.Queue()
-        gpus = args.gpus or [0]
-        n = min(args.max_parallel, len(jobs))
+        gpus = args.gpus or visible_gpus() or [0]
+        n = min(workers_wanted(args, gpus), len(jobs))
         for j in jobs:
             job_q.put(j)
         for _ in range(n):
             job_q.put(None)
+        placement = plan_placement(gpus, n)
+        log_dir = out.parent / "logs" if dash is not None else None
         procs = []
         for i in range(n):
-            os.environ["CUDA_VISIBLE_DEVICES"] = str(gpus[i % len(gpus)])
-            p = ctx.Process(target=_worker, args=(job_q, res_q, ds, regime, args))
+            # CUDA_VISIBLE_DEVICES is read by the child at import; the parent must set
+            # it before start() and must never touch CUDA itself
+            os.environ["CUDA_VISIBLE_DEVICES"] = str(placement[i])
+            p = ctx.Process(target=_worker,
+                            args=(job_q, res_q, ds, regime, args, i, log_dir))
             p.start(); procs.append(p)
-            print(f"    worker {i} -> GPU {gpus[i % len(gpus)]}", flush=True)
-        alive = n
-        while alive:
-            kind, payload = res_q.get()
-            if kind == "worker_done":
-                alive -= 1
+            if dash is not None:
+                dash.bind(i, placement[i])
             else:
-                record(payload)
+                print(f"    worker {i} -> GPU {placement[i]}", flush=True)
+        import queue as _queue
+        alive, seen_done = n, set()
+        while alive:
+            try:
+                kind, payload = res_q.get(timeout=30)
+            except _queue.Empty:
+                # `finally` in the worker covers an exception; it does NOT cover a
+                # process killed outright. Raising --per-gpu makes that a live
+                # possibility, and a blocking get() would hang the sweep on it.
+                dead = [i for i, pr in enumerate(procs)
+                        if not pr.is_alive() and i not in seen_done]
+                for i in dead:
+                    seen_done.add(i)
+                    alive -= 1
+                    if dash is not None:
+                        dash.running.pop(i, None)
+                        dash.note(f"worker {i} died without finishing "
+                                  f"(exit {procs[i].exitcode}) -- its cells stay "
+                                  f"unwritten and a rerun will pick them up")
+                    else:
+                        print(f"  !! worker {i} died (exit {procs[i].exitcode})",
+                              flush=True)
+                continue
+            if kind == "worker_done":
+                seen_done.add(payload)
+                alive -= 1
+            elif kind == "start":
+                wid, job = payload
+                arm, alpha, fold, seed = job
+                lab = ("base" if arm == "baselines" else
+                       (f"a{alpha:.2f}" if alpha is not None else "legacy"))
+                if dash is not None:
+                    dash.start_job(wid, f"{lab} f{fold}")
+            else:
+                wid, row = payload
+                if dash is not None:
+                    dash.running.pop(wid, None)   # the counter lives in record()
+                record(row)
         for p in procs:
             p.join()
     return out
@@ -518,16 +655,30 @@ def main():
                          "shape for the headline table, where the only graph rows "
                          "wanted are the pre-v8 model and (with --nodes onehot) a "
                          "single alpha")
-    ap.add_argument("--mol-source", choices=list(MOL_SOURCES), default="chemberta",
+    ap.add_argument("--mol-source", nargs="+", dest="mol_sources",
+                    choices=list(MOL_SOURCES), default=["chemberta"],
                     help="molecule embeddings -- the boost's molecular half AND the "
                          "graph's molecule node features. chemberta is the primary "
                          "source; gin is kept because the earlier series ran on it and "
-                         "the paper reports both. Only gin is untagged in the filename")
+                         "the paper reports both. Only gin is untagged in the filename. "
+                         "Several may be given: each gets its own files, so one "
+                         "invocation covers the whole grid")
     ap.add_argument("--prot-embeddings", default=None,
                     help="override; {ds} is filled in per dataset")
     ap.add_argument("--mol-embeddings", default=None,
                     help="override; also the graph's MP node features. Overrides "
                          "--mol-source for the PATH but not for the filename tag")
+    ap.add_argument("--no-dump-embeddings", dest="dump_embeddings",
+                    action="store_false",
+                    help="skip the receptor cloud dump. It is ~1.3 MB per m2or cell "
+                         "and 50 KB per insect one -- ~320 MB for the whole grid -- "
+                         "and it is what every geometry question asked later needs, "
+                         "so the default is to keep it")
+    ap.add_argument("--no-dump-predictions", dest="dump_predictions",
+                    action="store_false",
+                    help="skip the per-pair prediction dump. ~50 MB for the grid, and "
+                         "without it no analysis can be stratified by receptor or by "
+                         "odorant after the fact -- only a rerun can")
     ap.add_argument("--n-models", type=int, default=1)
     ap.add_argument("--epochs", type=int, default=900)
     ap.add_argument("--n-perm", type=int, default=200,
@@ -551,26 +702,73 @@ def main():
                          "ensembler's own default and the seed every reported number "
                          "was produced at, so keep it in the list -- extra seeds add "
                          "to that row rather than replacing it")
-    ap.add_argument("--max-parallel", type=int, default=1)
-    ap.add_argument("--gpus", type=int, nargs="+", default=None)
+    ap.add_argument("--max-parallel", type=int, default=1,
+                    help="total concurrent trainings. Ignored when --per-gpu is given")
+    ap.add_argument("--per-gpu", type=int, default=None,
+                    help="concurrent trainings PER GPU -- the knob to tune. One graph "
+                         "training leaves most of a modern card idle, so raise this "
+                         "while watching the memory and util rows of the dashboard "
+                         "until either stops improving")
+    ap.add_argument("--no-dashboard", action="store_true",
+                    help="print one line per finished cell instead of the live block, "
+                         "and let the workers' own output through")
+    ap.add_argument("--gpus", type=int, nargs="+", default=None,
+                    help="GPU indices to use. Default: every card nvidia-smi reports. "
+                         "Workers are dealt out in proportion to the memory FREE on "
+                         "each, so a card someone else is using gets fewer")
     ap.add_argument("--out", default=None)
     ap.add_argument("--force", action="store_true", help="recompute cells already in the CSV")
     args = ap.parse_args()
 
+    args.mol_source = args.mol_sources[0]        # so paths()/out_path() have one
     if args.variant and any(d != "m2or" for d in args.dataset):
         print("NOTE: --variant is being applied to an insect dataset too; its canonical "
               "graph is q0cov and the filename will NOT record the variant there.",
               flush=True)
+    # The molecule source is an outer loop rather than a flag on one run: it changes
+    # both the boost's molecular half and the graph's molecule nodes, so each value is
+    # its own set of files -- and looping here is what lets the whole grid be one
+    # resumable command instead of a shell loop that forgets where it stopped.
+    todo = [(mol, ds, regime) for mol in args.mol_sources
+            for ds in args.dataset for regime in args.regime]
+
+    # Count the whole grid before starting anything, so the progress bar and the ETA
+    # are about the RUN and not about whichever file happens to be open. Cheap: it
+    # only reads the CSVs already on disk.
+    total = 0
+    for mol, ds, regime in todo:
+        args.mol_source = mol
+        args._variant = args.variant or DEFAULT_VARIANT[ds]
+        _, done = load_done(out_path(ds, regime, args), args.force)
+        total += sum(1 for j in plan(repeats(ds, regime, args), args, done)
+                     if j[0] != "baselines")
+
+    gpus = args.gpus or visible_gpus() or [0]
+    n_workers = workers_wanted(args, gpus)
+    dash = None
+    if not args.no_dashboard and total:
+        dash = Dashboard(total, gpus if gpus != [0] or visible_gpus() else [],
+                         title=f"v8 alpha grid -- {total} cells, {n_workers} workers "
+                               f"over {len(gpus)} gpu(s)")
+    print(f"\n{total} cells to run, {n_workers} concurrent "
+          f"({'--per-gpu ' + str(args.per_gpu) if args.per_gpu else '--max-parallel ' + str(args.max_parallel)})"
+          f" on gpu(s) {gpus}", flush=True)
+
     written = []
-    for ds in args.dataset:
-        for regime in args.regime:
-            written.append(sweep(ds, regime, args))
+    for i, (mol, ds, regime) in enumerate(todo, 1):
+        args.mol_source = mol
+        out = sweep(ds, regime, args, dash=dash)
+        written.append(out)
+        if dash is not None:
+            dash.note(f"[{i}/{len(todo)}] finished {out.name}")
+    if dash is not None:
+        dash.close()
     print("\nwrote:")
     for w in written:
         print(f"  {w}")
     print("\nread with:\n"
-          "  python scripts/analysis/alpha_gate_summary.py -c      # one run in detail\n"
-          "  python scripts/analysis/headline_table.py             # all runs, one table")
+          "  python scripts/analysis/headline_table.py    # the numbers, every run\n"
+          "  python scripts/analysis/alpha_curves.py      # the dial, for the notebook")
 
 
 if __name__ == "__main__":

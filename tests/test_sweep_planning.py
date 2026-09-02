@@ -208,96 +208,98 @@ def _fake_run(path, arms, folds=(1, 2), seeds=(42, 43), task="regression", **ext
             for s in seeds:
                 rows.append({"arm": arm, "alpha": alpha, "fold": f, "seed": s,
                              "status": "ok", met: val + 0.01 * f + 0.001 * (s - 42),
-                             **extra})
+                             "nodes": "onehot", **extra})
     pd.DataFrame(rows).to_csv(path, index=False)
+
+
+def _grid(path, boost=0.50, a0=0.50, a1=0.58, **kw):
+    """One file in the v8 grid shape: baselines plus the gate at both ends."""
+    _fake_run(path, [("boost_full", np.nan, boost), ("naive", np.nan, 0.0),
+                     ("gate", 0.0, a0), ("gate", 1.0, a1),
+                     ("graph_legacy", np.nan, a1)], **kw)
 
 
 def _run_table(table, root, **kw):
     """The table as `main` would build it. `all_seeds` defaults to True here so a test
     can use two seeds without tripping the seed-42 view; the default view has its own
     test below."""
-    base = dict(dataset=None, regime=None, mol_source=None, metric=None,
+    base = dict(dataset=None, regime=None, mol_source=None, metric=None, nodes=None,
                 all_metrics=False, compact=False, csv=None, seed=42, all_seeds=True,
-                variant=None, all_variants=True)
+                variant=None, all_variants=True, at_alpha=None, legacy=False)
     args = argparse.Namespace(root=str(root), **(base | kw))
     df = table.load(root, args)
     return table.build(df, args), df, args
 
 
-def test_table_picks_the_three_models_from_the_two_node_runs(table, tmp_path):
-    _fake_run(tmp_path / "metrics_cc_rand_chemberta.csv",
-              [("boost_full", np.nan, 0.50), ("naive", np.nan, 0.0),
-               ("graph_legacy", np.nan, 0.60)])
-    _fake_run(tmp_path / "metrics_cc_rand_chemberta_onehot.csv",
-              [("boost_full", np.nan, 0.50), ("naive", np.nan, 0.0),
-               ("gate", 1.0, 0.58)])
+# --------------------------------------------------------------------------- reader
+
+def test_the_columns_are_the_two_ends_of_the_dial(table, tmp_path):
+    """Under the separated design one file holds every column: receptor nodes are
+    one-hot throughout, so ESM enters only through the frozen branch and alpha is the
+    protein-embedding axis. alpha=0 is structure alone, alpha=1 function alone."""
+    _grid(tmp_path / "metrics_cc_rand_chemberta_onehot.csv",
+          boost=0.50, a0=0.50, a1=0.58)
     tab, df, args = _run_table(table, tmp_path)
-    assert set(tab.model) == {"boost", "GNN old", "GNN new"}
+    assert list(tab.model) == ["boost", "alpha=0", "alpha=1"]
     got = {r.model: (r.mean, r.n, r.folds, r.seeds) for r in tab.itertuples()}
-    for model, base in (("boost", 0.50), ("GNN old", 0.60), ("GNN new", 0.58)):
+    for model, base in (("boost", 0.50), ("alpha=0", 0.50), ("alpha=1", 0.58)):
         mean, n, folds, seeds = got[model]
-        # the fixture's cell value is base + 0.01*fold + 0.001*(seed-42)
         assert mean == pytest.approx(base + 0.015 + 0.0005)
         assert (n, folds, seeds) == (4, 2, 2)
-    # paired against boost on the cells they share, not a difference of two means
-    d = {r.model: r.delta for r in tab.itertuples()}
-    assert d["GNN old"] == pytest.approx(0.10)
-    assert d["GNN new"] == pytest.approx(0.08)
-    assert {r.won for r in tab.itertuples() if r.model == "GNN old"} == {4}
-    assert not table.checks(df, tab)
+    assert {r.model: r.delta for r in tab.itertuples()}["alpha=1"] == pytest.approx(0.08)
+    assert not table.checks(df, tab, args)
 
 
-def test_table_falls_back_to_legacy_for_the_onehot_graph_and_says_so(table, tmp_path):
-    _fake_run(tmp_path / "metrics_cc_rand_chemberta.csv",
-              [("boost_full", np.nan, 0.50), ("graph_legacy", np.nan, 0.60)])
+def test_at_alpha_and_legacy_add_columns_in_the_right_places(table, tmp_path):
+    """An intermediate alpha belongs BETWEEN the ends; legacy is not a point on the
+    dial at all -- it is the pre-gate model -- so it goes last."""
     _fake_run(tmp_path / "metrics_cc_rand_chemberta_onehot.csv",
-              [("boost_full", np.nan, 0.50), ("graph_legacy", np.nan, 0.58)])
-    tab, df, _ = _run_table(table, tmp_path)
-    new = tab[tab.model == "GNN new"].iloc[0]
-    assert new.n == 4 and new.fallback == "legacy"
-    assert any("SUBST" in m for m in table.checks(df, tab))
+              [("boost_full", np.nan, 0.50), ("gate", 0.0, 0.50), ("gate", 0.5, 0.55),
+               ("gate", 1.0, 0.58), ("graph_legacy", np.nan, 0.575)])
+    tab, _, _ = _run_table(table, tmp_path, at_alpha=[0.5], legacy=True)
+    assert list(tab.model) == ["boost", "alpha=0", "alpha=0.5", "alpha=1", "legacy"]
+    tab2, _, _ = _run_table(table, tmp_path, at_alpha=[0.0, 1.0])
+    assert list(tab2.model) == ["boost", "alpha=0", "alpha=1"], "an end was duplicated"
 
 
-def test_table_flags_a_single_seed_and_a_missing_arm(table, tmp_path):
-    _fake_run(tmp_path / "metrics_hc_our_inductive_chemberta.csv",
-              [("boost_full", np.nan, 0.4), ("graph_legacy", np.nan, 0.45)],
-              seeds=(42,))
+def test_the_anchor_check_fires_when_alpha_zero_leaves_boost(table, tmp_path):
+    """The invariant that replaces the old cross-node boost check, and a sharper one:
+    at alpha=0 the receptor vector is a frozen rank-k rotation of the same ESM the
+    baseline reads raw, so the two see one body of information through two readers. A
+    wide gap means the anchor is not what it claims -- wrong rank, a centred
+    projection, or one-hot vectors having reached it by mistake."""
+    _grid(tmp_path / "metrics_cc_rand_chemberta_onehot.csv", boost=0.50, a0=0.50)
+    tab, df, args = _run_table(table, tmp_path)
+    assert not any("ANCHOR" in m for m in table.checks(df, tab, args))
+    _grid(tmp_path / "metrics_hc_rand_chemberta_onehot.csv", boost=0.50, a0=0.28)
     tab, df, args = _run_table(table, tmp_path)
     msgs = table.checks(df, tab, args)
-    assert any("1 SEED" in m for m in msgs)
-    assert any("ABSENT" in m and "GNN new" in m for m in msgs)
-    assert tab[tab.model == "GNN new"].iloc[0].n == 0
+    assert any("ANCHOR" in m and "hc" in m for m in msgs)
+    assert not any("ANCHOR" in m and "cc" in m for m in msgs)
 
 
-def test_table_catches_a_boost_that_disagrees_across_node_runs(table, tmp_path):
-    """boost never sees the node features, so its two copies are the same computation.
-    If they differ, the two files are not the pair the table assumes they are -- a
-    different molecule source, a different pool fold, a stale file."""
-    _fake_run(tmp_path / "metrics_cc_rand_chemberta.csv",
-              [("boost_full", np.nan, 0.50), ("graph_legacy", np.nan, 0.60)])
-    _fake_run(tmp_path / "metrics_cc_rand_chemberta_onehot.csv",
-              [("boost_full", np.nan, 0.53), ("gate", 1.0, 0.58)])
-    tab, df, _ = _run_table(table, tmp_path)
-    assert any("MISMATCH" in m for m in table.checks(df, tab))
+def test_table_flags_a_missing_arm(table, tmp_path):
+    _fake_run(tmp_path / "metrics_hc_our_inductive_chemberta_onehot.csv",
+              [("boost_full", np.nan, 0.4), ("gate", 0.0, 0.4)], seeds=(42,))
+    tab, df, args = _run_table(table, tmp_path)
+    assert any("ABSENT" in m and "alpha=1" in m for m in table.checks(df, tab, args))
+    assert tab[tab.model == "alpha=1"].iloc[0].n == 0
 
 
 def test_table_separates_sources_regimes_and_variants(table, tmp_path):
-    for name in ("metrics_cc_rand_chemberta.csv", "metrics_cc_rand.csv",
-                 "metrics_cc_our_inductive_chemberta.csv"):
-        _fake_run(tmp_path / name, [("boost_full", np.nan, 0.5),
-                                    ("graph_legacy", np.nan, 0.6)])
-    for name in ("metrics_m2or_transductive_q99greedy_chemberta.csv",
-                 "metrics_m2or_transductive_q0cov_chemberta.csv"):
-        _fake_run(tmp_path / name, [("boost_full", np.nan, 0.8),
-                                    ("graph_legacy", np.nan, 0.85)], task="classification")
-    tab, df, _ = _run_table(table, tmp_path)
+    for name in ("metrics_cc_rand_chemberta_onehot.csv", "metrics_cc_rand_onehot.csv",
+                 "metrics_cc_our_inductive_chemberta_onehot.csv"):
+        _grid(tmp_path / name)
+    for name in ("metrics_m2or_transductive_q99greedy_chemberta_onehot.csv",
+                 "metrics_m2or_transductive_q0cov_chemberta_onehot.csv"):
+        _grid(tmp_path / name, boost=0.8, a0=0.8, a1=0.85, task="classification")
+    tab, _, _ = _run_table(table, tmp_path)
     keys = {(r.dataset, r.regime, r.mol_source, r.variant_tag) for r in tab.itertuples()}
     assert ("cc", "transductive", "chemberta", "q0cov") in keys
     assert ("cc", "transductive", "gin", "q0cov") in keys
     assert ("cc", "inductive", "chemberta", "q0cov") in keys
     assert ("m2or", "transductive", "chemberta", "q99greedy") in keys
     assert ("m2or", "transductive", "chemberta", "q0cov") in keys
-    # the metric of record follows the task family, per group
     assert set(tab[tab.dataset == "m2or"].metric) == {"AUROC"}
     assert set(tab[tab.dataset == "cc"].metric) == {"R2"}
 
@@ -312,16 +314,14 @@ def test_the_default_view_is_seed_42_and_the_canonical_edge_variant(table, tmp_p
     Variant: m2or has two live edge variants and only q99greedy is of record. q0cov is
     hidden rather than deleted -- it is the evidence that what breaks m2or transductive
     is the edge set, not the protein embedding."""
-    _fake_run(tmp_path / "metrics_cc_rand_chemberta.csv",
-              [("boost_full", np.nan, 0.50), ("graph_legacy", np.nan, 0.60)],
-              seeds=(42, 43, 44))
+    _grid(tmp_path / "metrics_cc_rand_chemberta_onehot.csv", seeds=(42, 43, 44))
     for v, val in (("q99greedy", 0.85), ("q0cov", 0.70)):
-        _fake_run(tmp_path / f"metrics_m2or_transductive_{v}_chemberta.csv",
-                  [("boost_full", np.nan, 0.80), ("graph_legacy", np.nan, val)],
-                  task="classification", seeds=(42, 43, 44), folds=(1, 2))
+        _grid(tmp_path / f"metrics_m2or_transductive_{v}_chemberta_onehot.csv",
+              boost=0.80, a0=0.80, a1=val, task="classification",
+              seeds=(42, 43, 44), folds=(1, 2))
     tab, _, _ = _run_table(table, tmp_path, all_seeds=False, all_variants=False)
     assert set(tab.seeds) <= {0, 1}, "the default view must rest on one seed"
-    assert set(tab[tab.dataset == "cc"].n) == {0, 2}          # 2 folds x 1 seed
+    assert set(tab[tab.dataset == "cc"].n) == {2}             # 2 folds x 1 seed
     assert set(tab.variant_tag) == {"q0cov", "q99greedy"}     # cc's own, and m2or's
     assert (tab[tab.dataset == "m2or"].variant_tag == "q99greedy").all()
     # and both are recoverable
@@ -333,23 +333,21 @@ def test_the_default_view_is_seed_42_and_the_canonical_edge_variant(table, tmp_p
 def test_a_blank_variant_is_the_datasets_own_default_not_a_second_one(table, tmp_path):
     """The insect files written before the `variant` column existed carry a blank, and
     a blank read literally splits one dataset into two rows for the same edge set."""
-    _fake_run(tmp_path / "metrics_cc_rand.csv",                       # old, no variant
-              [("boost_full", np.nan, 0.50), ("graph_legacy", np.nan, 0.60)], seeds=(42,))
-    _fake_run(tmp_path / "metrics_cc_rand_chemberta.csv",             # new, records it
-              [("boost_full", np.nan, 0.51), ("graph_legacy", np.nan, 0.61)],
-              seeds=(42,), variant="q0cov")
+    _grid(tmp_path / "metrics_cc_rand_onehot.csv", seeds=(42,))       # old, no variant
+    _grid(tmp_path / "metrics_cc_rand_chemberta_onehot.csv",          # new, records it
+          seeds=(42,), variant="q0cov")
     tab, _, _ = _run_table(table, tmp_path, all_seeds=False, all_variants=False)
     assert set(tab.variant_tag) == {"q0cov"}
     assert set(tab.mol_source) == {"gin", "chemberta"}
 
 
 def test_failed_cells_are_excluded_and_reported(table, tmp_path):
-    p = tmp_path / "metrics_cc_rand_chemberta.csv"
-    _fake_run(p, [("boost_full", np.nan, 0.50), ("graph_legacy", np.nan, 0.60)])
+    p = tmp_path / "metrics_cc_rand_chemberta_onehot.csv"
+    _grid(p)
     df = pd.read_csv(p)
-    df.loc[(df.arm == "graph_legacy") & (df.fold == 1), ["status", "R2"]] = \
-        ["failed: boom", np.nan]
+    hit = (df.arm == "gate") & np.isclose(df.alpha.fillna(-1), 1.0) & (df.fold == 1)
+    df.loc[hit, ["status", "R2"]] = ["failed: boom", np.nan]
     df.to_csv(p, index=False)
-    tab, full, _ = _run_table(table, tmp_path)
-    assert tab[tab.model == "GNN old"].iloc[0].n == 2      # fold 2 only, both seeds
-    assert any("FAILED" in m for m in table.checks(full, tab))
+    tab, full, args = _run_table(table, tmp_path)
+    assert tab[tab.model == "alpha=1"].iloc[0].n == 2      # fold 2 only, both seeds
+    assert any("FAILED" in m for m in table.checks(full, tab, args))

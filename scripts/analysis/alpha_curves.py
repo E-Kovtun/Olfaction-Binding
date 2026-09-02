@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import pathlib
+import sys
 
 import numpy as np
 import pandas as pd
@@ -45,12 +46,14 @@ import pandas as pd
 _root = pathlib.Path(__file__).resolve()
 while not (_root / "pyproject.toml").exists():
     _root = _root.parent
+sys.path.insert(0, str(_root))
 
 GEOMS = ["rsa", "cca", "procrustes"]
 REFS = ["esm", "fun"]
 OF_RECORD = {"regression": "R2", "classification": "AUROC"}
-CLS = ["AUROC", "AUPRC", "MCC", "F1"]
-REG = ["R2", "RMSE", "MAE", "Pearson", "Spearman"]
+# Column names come from the module that emits them; see orbind.dataset.
+from orbind.dataset import METRIC_NAMES                          # noqa: E402
+CLS, REG = METRIC_NAMES["classification"], METRIC_NAMES["regression"]
 SERIES = ["dataset", "regime", "mol_source", "variant_tag", "nodes"]
 KEY = SERIES + ["series"]
 
@@ -171,6 +174,14 @@ def crossings(long):
     return pd.DataFrame(rows)
 
 
+def _splits(long):
+    """Splits per series, not pooled: m2or/inductive's repeats are the cold-molecule
+    seeds 42-46 while every other series uses folds 1-5, so a pooled nunique reads as
+    ten when every series in fact rests on five."""
+    per = long.groupby("series")["fold"].nunique()
+    return per.min() if per.min() == per.max() else f"{per.min()}-{per.max()}"
+
+
 def readable(long, aud, cross, lev, args):
     print("=" * 92)
     print("=== ALPHA CURVES -- does the dial travel, and which way")
@@ -178,7 +189,7 @@ def readable(long, aud, cross, lev, args):
     al = sorted(long.alpha.unique())
     print(f"  {len(al)} alphas: {', '.join(f'{a:g}' for a in al)}")
     print(f"  {long.groupby(SERIES).ngroups} series, "
-          f"{long.fold.nunique()} folds, {long.seed.nunique()} seed(s)\n")
+          f"{_splits(long)} splits each, {long.seed.nunique()} model seed(s)\n")
     # the series label carries dataset/regime/variant/source/nodes, so its width is
     # data-dependent -- measure it rather than guess and weld two columns together
     W = max([len(label(r)) for r in aud.itertuples()] + [len("series")]) + 2
@@ -228,8 +239,9 @@ def readable(long, aud, cross, lev, args):
 
 
 def compact(long, aud, cross, lev, args):
-    print(f"#ACURVE1 alphas={len(long.alpha.unique())} series={long.groupby(SERIES).ngroups} "
-          f"folds={long.fold.nunique()} seeds={long.seed.nunique()}")
+    print(f"#ACURVE1 alphas={len(long.alpha.unique())} "
+          f"series={long.groupby(SERIES).ngroups} splits={_splits(long)} "
+          f"seeds={long.seed.nunique()}")
     print("#cols series geom ref n_alpha at0 at1 travel mono")
     for r in aud.itertuples():
         print(f"{label(r)} {r.geom} {r.ref} {r.n_alpha} {r.at0:.3f} {r.at1:.3f} "

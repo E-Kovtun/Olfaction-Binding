@@ -64,11 +64,6 @@ modeling/
                                     from the graph so alpha is an honest fraction of
                                     structure. (Listed here though it lives in
                                     modeling/train/.)
-    structure_function_grid.py      a grid of graphs over (ESM rank k) x (kept MP edges
-                                    phi): each cell a model, scored geometrically against
-                                    an ESM cloud, a functional cloud and the class target.
-                                    Insects only; resumable, one trajectory at a time. Read by
-                                    notebooks/graph/mechanism_holdout/structure_function_grid.ipynb
     concat_diagnostic.py            why GNN + PCA(ESM) scores below the GNN alone: an alpha
                                     sweep, an ESM-width sweep and a same-width random
                                     control, read from an existing run's embeddings.npz
@@ -85,14 +80,6 @@ analysis/
   mechanism_summary.py              reads a mechanism-holdout run: geometry in raw units
                                     AND as z, the paired GNN+ESM vs one-hot comparison,
                                     and the sparse-matrix assay-design check
-  alpha_gate_summary.py             the v8 alpha sweep: prediction vs both references
-                                    (paired by fold), the geometry dial as z, and a
-                                    verdict. -c for a dense paste
-  sf_grid_summary.py                the (k, phi) grid as text: coverage, the two arms as a
-                                    manipulation check, the target surface, where each cell
-                                    landed, and whether a mix beats both pure sources.
-                                    -c prints the same in ~21 dense lines, for pasting
-```
 
 `setup_envs.sh` creates `.venv-controls` and `.venv-embeddings`.
 

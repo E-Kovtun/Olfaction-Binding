@@ -124,3 +124,118 @@ def split(pairs, y, kind="stratified", test_size=0.2, seed=42):
     tr = np.zeros(n, bool); te = np.zeros(n, bool)
     tr[idx_tr] = True; te[idx_te] = True
     return tr, te
+
+
+# ---------------------------------------------------------------------------
+# The full metric batteries. `metrics` / `regression_metrics` above stay exactly
+# as they were -- every number already reported came out of them, and what follows
+# is a superset that adds columns without moving one.
+
+def _binary_block(y_bin, score, hard):
+    """AUROC/AUPRC from a continuous score, MCC/F1/precision/recall from a hard call.
+
+    The hard call is NOT `score >= 0.5`: on a z-scored response the prediction is in
+    the same units as the truth, so it is thresholded at the very same cut the truth
+    was binarised with. Anything else would score the model against a boundary it was
+    never asked to respect.
+
+    AUROC and AUPRC are NaN when the fold has one class only -- undefined, not zero,
+    and a sweep must not die on it.
+    """
+    import numpy as np
+    from sklearn.metrics import (average_precision_score, f1_score,
+                                 matthews_corrcoef, precision_score,
+                                 recall_score, roc_auc_score)
+    y_bin, hard = np.asarray(y_bin).astype(int), np.asarray(hard).astype(int)
+    both = 0 < y_bin.sum() < len(y_bin)
+    return {
+        "AUROC": float(roc_auc_score(y_bin, score)) if both else float("nan"),
+        "AUPRC": float(average_precision_score(y_bin, score)) if both else float("nan"),
+        "MCC": float(matthews_corrcoef(y_bin, hard)) if both else float("nan"),
+        "F1": float(f1_score(y_bin, hard, zero_division=0)),
+        "precision": float(precision_score(y_bin, hard, zero_division=0)),
+        "recall": float(recall_score(y_bin, hard, zero_division=0)),
+    }
+
+
+def binarisations(y_te, pred, rec_te=None, y_tr=None, rec_tr=None, which=("rec0",)):
+    """Ways of calling a continuous response "a response".
+
+    `rec0` is the reference of record: above that receptor's own TRAIN centre. It is
+    the convention the graph's own edge signs already use (`_mp_edges` with
+    `edge_center="per_receptor"`), and it removes the between-receptor baseline and
+    dynamic-range heterogeneity that a fixed cut inherits -- without it a discrete
+    metric largely reports which receptors are active rather than whether the odorants
+    were called right. `glob0` (y > 0, "above the pool average" on a z-score) is kept
+    because it needs no fitting at all, which makes it the fallback when there is no
+    train split to centre on.
+
+    THE CENTRE IS FIT ON TRAIN. Taken from the test rows it would let the label
+    definition itself see the held-out data -- a leak that flatters whichever arm is
+    being scored, in a column that looks like every other.
+
+    Yields (name, y_bin, score, hard); `score` stays continuous for the ranking
+    metrics, `hard` is the same cut applied to the prediction.
+    """
+    import numpy as np
+    y_te, pred = np.asarray(y_te, float), np.asarray(pred, float)
+    cuts = {"glob0": np.zeros(len(y_te))}          # needs no fitting
+    if rec_te is not None and rec_tr is not None and y_tr is not None:
+        import pandas as pd
+        y_tr, rec_te = np.asarray(y_tr, float), np.asarray(rec_te)
+        mean_r = pd.Series(y_tr).groupby(pd.Series(np.asarray(rec_tr))).mean()
+        glob = float(np.mean(y_tr))
+        cuts["rec0"] = np.array([mean_r.get(r, glob) for r in rec_te], float)
+    for name, c in cuts.items():
+        if which is None or name in which:
+            yield name, (y_te > c), (pred - c), (pred > c)
+
+
+def regression_metrics_full(y, p, rec_te=None, mol_te=None, y_tr=None, rec_tr=None,
+                            which=("rec0",)):
+    """Everything scoreable on a continuous response, in one row.
+
+    Two families: the pooled regression scores upstream reports, and the binary
+    battery after binarising the response at one reference (see `binarisations`).
+    Discrete columns take a `{reference}_` prefix, so `rec0_AUROC` and friends.
+
+    `mol_te` is accepted and ignored -- callers pass it, and dropping it from the
+    signature would be a silent behaviour change at the call site.
+    """
+    import numpy as np
+    from scipy.stats import kendalltau
+    out = dict(regression_metrics(y, p))
+    y, p = np.asarray(y, float), np.asarray(p, float)
+    constant = len(p) == 0 or bool(np.allclose(p, p[0]))
+    out["Kendall"] = 0.0 if constant else float(kendalltau(y, p).statistic)
+    for name, y_bin, score, hard in binarisations(y, p, rec_te, y_tr, rec_tr, which):
+        for k, v in _binary_block(y_bin, score, hard).items():
+            out[f"{name}_{k}"] = v
+    return out
+
+
+def classification_metrics_full(y, p, rec_te=None, mol_te=None, **_ignored):
+    """`metrics` in full: the four headline scores plus precision and recall, which
+    were always computed and then dropped on the way into the row.
+
+    The group arguments are accepted and ignored so both batteries take the same call
+    from the sweep.
+    """
+    return dict(metrics(y, p))
+
+
+# The column names the batteries emit, so a reader never hardcodes them and drifts.
+BINARISATIONS = ("rec0",)
+_DISCRETE = ("AUROC", "AUPRC", "MCC", "F1", "precision", "recall")
+METRIC_NAMES = {
+    "regression": (["R2", "RMSE", "MAE", "Pearson", "Spearman", "Kendall"]
+                   + [f"{c}_{m}" for c in BINARISATIONS for m in _DISCRETE]),
+    "classification": list(_DISCRETE),
+}
+# The short list a progress line or a compact dump shows.
+METRIC_HEADLINE = {"regression": ["R2", "RMSE", "MAE", "Pearson", "Spearman"],
+                   "classification": ["AUROC", "AUPRC", "MCC", "F1"]}
+# The wide batteries, for runs that want every column and will decide what to read
+# later. Same call as METRICS plus optional context (group ids, the train split).
+METRICS_FULL = {"classification": classification_metrics_full,
+                "regression": regression_metrics_full}

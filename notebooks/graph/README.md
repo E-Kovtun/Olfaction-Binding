@@ -16,21 +16,6 @@ notebooks/graph/
   alternatives/         display-only readers for the quantile x criterion sweeps
 ```
 
-## `mechanism_holdout/structure_function_grid.ipynb` -- the (k, phi) surface
-
-Display-only reader for `scripts/modeling/analysis/structure_function_grid.py`, which turns the
-holdout's three fixed representations into a two-axis grid: **k** components of ESM in the node
-features, **phi** of the message-passing edges kept. One trained model per cell, each embedding
-scored by the same three geometries against three clouds -- raw ESM, the retained response
-profile, and the held-out class. The first two are a manipulation check, the third is the
-result, and the claim the grid tests is a *shape*: does a mixed cell beat both pure sources.
-
-The grid is filled one trajectory at a time and every cell is written as it finishes, so the
-notebook is built for a partial surface -- section 1 maps what exists, unvisited cells are drawn
-blank everywhere downstream, and the 1-D arms of section 2 stay readable when the heatmaps are
-mostly holes. Set `DATASET` (`hc` / `cc`), `CLASSES` and `VALUE` (`z` against each cell's own
-permutation null, or `raw`) in the first code cell. Insects only, by construction.
-
 ## `mechanism_holdout/split_alternatives.ipynb` -- would a different split help?
 
 A self-contained probe, not part of the pipeline: cluster the odorant panel by Tanimoto and by
@@ -137,3 +122,9 @@ Note the two datasets need different readings of `q`: on M2OR the coverage quant
 long-tailed distribution, while the insect matrices are complete, so coverage is constant
 and the quantile is a no-op there. The sweep's `k_mode="fraction"` is what makes the axis
 mean anything on Carey/Hallem -- see `orbind/mol_selection.resolve_K`.
+
+## `../legacy/structure_function_grid.ipynb` -- retired
+
+The (k, phi) surface, superseded by the alpha gate: both of its axes only removed
+information, so neither could pull the receptor cloud back toward ESM. Kept as
+reference. Its successor is `mechanism_holdout/alpha_gate_curves.ipynb`.

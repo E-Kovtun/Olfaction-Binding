@@ -131,7 +131,13 @@ REFS = ["esm", "fun"]
 MOL_SOURCES = {"chemberta": {None: "data/embeddings/molecules/chemberta_77m_{ds}.npz"},
                "gin": {None: "data/embeddings/molecules/gin_supervised_contextpred_{ds}.npz",
                        "m2or": "data/embeddings/molecules/"
-                               "gin_supervised_contextpred_all_m2or.npz"}}
+                               "gin_supervised_contextpred_all_m2or.npz"},
+               # ECFP4, 2048 binary bits from `embed_molecules_ecfp.py`. It is the
+               # third source the paper reports GNN-vs-boost on, and the only one
+               # that is not learned -- so a conclusion that holds here does not
+               # depend on any pretrained molecular model. No per-dataset special
+               # case: one file per dataset, all written by the same script.
+               "ecfp": {None: "data/embeddings/molecules/ecfp_{ds}.npz"}}
 # M2OR's protein file carries no dataset suffix; cc/hc have one each.
 PROT_SOURCE = {None: "data/embeddings/proteins/esm1b_650m_mean_{ds}.npz",
                "m2or": "data/embeddings/proteins/esm1b_650m_mean.npz"}

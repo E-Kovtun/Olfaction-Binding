@@ -99,7 +99,8 @@ def test_every_emitted_name_is_readable_back(sweep, table):
                         ("hc", ["transductive", "inductive"]),
                         ("m2or", ["transductive", "inductive"])):
         for regime in regimes:
-            for mol in ("gin", "chemberta"):
+            for mol in sweep.MOL_SOURCES:          # not a hardcoded pair: a new
+                                                   # source must extend this test
                 for nodes in ("esm", "onehot"):
                     for variant in (None, "q0cov", "q99greedy"):
                         args = A(mol_source=mol, nodes=nodes, variant=variant)
@@ -112,6 +113,20 @@ def test_every_emitted_name_is_readable_back(sweep, table):
                         assert table.REGIME_OF[family] == regime, name
                         seen.add(name)
     assert len(seen) > 30
+
+
+def test_the_reader_knows_every_source_the_writer_can_tag(sweep, table):
+    """The one failure mode that costs a whole GPU run and reports nothing.
+
+    `out_path` tags the filename with the molecule source (all but the untagged
+    legacy one), and `parse_name` peels that tag off. A source the writer can emit
+    and the reader has never heard of does not raise: the family comes back as
+    "rand_ecfp", misses REGIME_OF, and the file is dropped with a single counted
+    line -- so the cells are computed, written, and never looked at."""
+    tagged = set(sweep.MOL_SOURCES) - {sweep.UNTAGGED_MOL}
+    assert tagged <= table.KNOWN_MOL, (
+        f"the sweep can write {sorted(tagged - table.KNOWN_MOL)} into a filename that "
+        f"headline_table.parse_name cannot read back")
 
 
 def test_paths_pick_the_right_file_per_dataset(sweep):

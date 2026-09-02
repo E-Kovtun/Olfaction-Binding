@@ -59,7 +59,7 @@ OF_RECORD = {"regression": "R2", "classification": "AUROC"}
 # Filename suffixes, peeled from the right in the order `out_path` appends them:
 # metrics_{ds}_{family}[_{variant}][_{molsource}][_onehot].csv
 KNOWN_NODES = {"onehot"}
-KNOWN_MOL = {"chemberta", "gin"}
+KNOWN_MOL = {"chemberta", "gin", "ecfp"}
 KNOWN_VARIANT = {"q99greedy", "q0cov"}
 REGIME_OF = {"rand": "transductive", "transductive": "transductive",
              "our_inductive": "inductive", "inductive_molecule_v5": "inductive"}

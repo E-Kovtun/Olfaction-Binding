@@ -213,10 +213,15 @@ def _fake_run(path, arms, folds=(1, 2), seeds=(42, 43), task="regression", **ext
 
 
 def _run_table(table, root, **kw):
-    args = argparse.Namespace(root=str(root), dataset=None, regime=None,
-                              mol_source=None, metric=None, all_metrics=False,
-                              compact=False, csv=None, **kw)
-    return table.build(table.load(root, args), args), table.load(root, args), args
+    """The table as `main` would build it. `all_seeds` defaults to True here so a test
+    can use two seeds without tripping the seed-42 view; the default view has its own
+    test below."""
+    base = dict(dataset=None, regime=None, mol_source=None, metric=None,
+                all_metrics=False, compact=False, csv=None, seed=42, all_seeds=True,
+                variant=None, all_variants=True)
+    args = argparse.Namespace(root=str(root), **(base | kw))
+    df = table.load(root, args)
+    return table.build(df, args), df, args
 
 
 def test_table_picks_the_three_models_from_the_two_node_runs(table, tmp_path):
@@ -257,8 +262,8 @@ def test_table_flags_a_single_seed_and_a_missing_arm(table, tmp_path):
     _fake_run(tmp_path / "metrics_hc_our_inductive_chemberta.csv",
               [("boost_full", np.nan, 0.4), ("graph_legacy", np.nan, 0.45)],
               seeds=(42,))
-    tab, df, _ = _run_table(table, tmp_path)
-    msgs = table.checks(df, tab)
+    tab, df, args = _run_table(table, tmp_path)
+    msgs = table.checks(df, tab, args)
     assert any("1 SEED" in m for m in msgs)
     assert any("ABSENT" in m and "GNN new" in m for m in msgs)
     assert tab[tab.model == "GNN new"].iloc[0].n == 0
@@ -287,14 +292,55 @@ def test_table_separates_sources_regimes_and_variants(table, tmp_path):
                                     ("graph_legacy", np.nan, 0.85)], task="classification")
     tab, df, _ = _run_table(table, tmp_path)
     keys = {(r.dataset, r.regime, r.mol_source, r.variant_tag) for r in tab.itertuples()}
-    assert ("cc", "transductive", "chemberta", "") in keys
-    assert ("cc", "transductive", "gin", "") in keys
-    assert ("cc", "inductive", "chemberta", "") in keys
+    assert ("cc", "transductive", "chemberta", "q0cov") in keys
+    assert ("cc", "transductive", "gin", "q0cov") in keys
+    assert ("cc", "inductive", "chemberta", "q0cov") in keys
     assert ("m2or", "transductive", "chemberta", "q99greedy") in keys
     assert ("m2or", "transductive", "chemberta", "q0cov") in keys
     # the metric of record follows the task family, per group
     assert set(tab[tab.dataset == "m2or"].metric) == {"AUROC"}
     assert set(tab[tab.dataset == "cc"].metric) == {"R2"}
+
+
+def test_the_default_view_is_seed_42_and_the_canonical_edge_variant(table, tmp_path):
+    """Two conventions the table leans on, and both are about COMPARABILITY.
+
+    Seed: every reported number was produced at seed 42, so a five-seed series and a
+    one-seed one only sit in the same table if the extra seeds are set aside -- pooled,
+    a 25-cell row and a 5-cell row are not comparable line for line.
+
+    Variant: m2or has two live edge variants and only q99greedy is of record. q0cov is
+    hidden rather than deleted -- it is the evidence that what breaks m2or transductive
+    is the edge set, not the protein embedding."""
+    _fake_run(tmp_path / "metrics_cc_rand_chemberta.csv",
+              [("boost_full", np.nan, 0.50), ("graph_legacy", np.nan, 0.60)],
+              seeds=(42, 43, 44))
+    for v, val in (("q99greedy", 0.85), ("q0cov", 0.70)):
+        _fake_run(tmp_path / f"metrics_m2or_transductive_{v}_chemberta.csv",
+                  [("boost_full", np.nan, 0.80), ("graph_legacy", np.nan, val)],
+                  task="classification", seeds=(42, 43, 44), folds=(1, 2))
+    tab, _, _ = _run_table(table, tmp_path, all_seeds=False, all_variants=False)
+    assert set(tab.seeds) <= {0, 1}, "the default view must rest on one seed"
+    assert set(tab[tab.dataset == "cc"].n) == {0, 2}          # 2 folds x 1 seed
+    assert set(tab.variant_tag) == {"q0cov", "q99greedy"}     # cc's own, and m2or's
+    assert (tab[tab.dataset == "m2or"].variant_tag == "q99greedy").all()
+    # and both are recoverable
+    wide, _, _ = _run_table(table, tmp_path, all_seeds=True, all_variants=True)
+    assert set(wide.seeds) <= {0, 3}
+    assert set(wide[wide.dataset == "m2or"].variant_tag) == {"q99greedy", "q0cov"}
+
+
+def test_a_blank_variant_is_the_datasets_own_default_not_a_second_one(table, tmp_path):
+    """The insect files written before the `variant` column existed carry a blank, and
+    a blank read literally splits one dataset into two rows for the same edge set."""
+    _fake_run(tmp_path / "metrics_cc_rand.csv",                       # old, no variant
+              [("boost_full", np.nan, 0.50), ("graph_legacy", np.nan, 0.60)], seeds=(42,))
+    _fake_run(tmp_path / "metrics_cc_rand_chemberta.csv",             # new, records it
+              [("boost_full", np.nan, 0.51), ("graph_legacy", np.nan, 0.61)],
+              seeds=(42,), variant="q0cov")
+    tab, _, _ = _run_table(table, tmp_path, all_seeds=False, all_variants=False)
+    assert set(tab.variant_tag) == {"q0cov"}
+    assert set(tab.mol_source) == {"gin", "chemberta"}
 
 
 def test_failed_cells_are_excluded_and_reported(table, tmp_path):

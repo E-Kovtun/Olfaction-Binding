@@ -52,6 +52,17 @@ KNOWN_MOL = {"chemberta", "gin"}
 KNOWN_VARIANT = {"q99greedy", "q0cov"}
 REGIME_OF = {"rand": "transductive", "transductive": "transductive",
              "our_inductive": "inductive", "inductive_molecule_v5": "inductive"}
+# The edge variant each dataset's reported numbers stand on. m2or has two live variants
+# and only q99greedy is of record, so the other is hidden unless asked for -- hidden,
+# not deleted: q0cov is the evidence that what breaks m2or transductive is the EDGE SET
+# and not the protein embedding.
+CANONICAL_VARIANT = {"cc": "q0cov", "hc": "q0cov", "m2or": "q99greedy"}
+# Every reported number was produced at seed 42, the ensembler's own default under
+# ofm/full_full. Extra seeds widen the interval honestly, but a 25-cell row is not
+# comparable line for line with a 5-cell one from an older series, and mixing the two
+# in one table is what made it unreadable. Default to the convention; --all-seeds
+# opts into the wider bar.
+DEFAULT_SEED = 42
 # Which arm, in which node run, plays which model.
 MODELS = [("boost", "esm", "boost_full", None),
           ("GNN old", "esm", "graph_legacy", None),
@@ -76,33 +87,49 @@ def parse_name(stem):
 
 def load(root, args):
     """Every metrics CSV as one long frame, tagged with what its filename says."""
-    frames = []
+    frames, skipped = [], []
     for p in sorted(pathlib.Path(root).glob("metrics_*.csv")):
         ds, family, nodes, mol, variant = parse_name(p.stem)
         if family not in REGIME_OF:
-            print(f"  (skipping {p.name}: unrecognised split family {family!r})")
+            skipped.append(p.name)
             continue
         df = pd.read_csv(p)
         if "seed" not in df.columns:          # written before seeds existed
             df["seed"] = 42
-        df = df.assign(seed=df["seed"].fillna(42).astype(int))
-        df["dataset"], df["regime"], df["nodes"] = ds, REGIME_OF[family], nodes
-        df["mol_source"] = mol
-        df["variant_tag"] = (variant or
-                             (df["variant"].dropna().iloc[0]
-                              if "variant" in df.columns and df["variant"].notna().any()
-                              else ""))
-        df["file"] = p.name
+        vtag = variant or (df["variant"].dropna().iloc[0]
+                           if "variant" in df.columns and df["variant"].notna().any()
+                           else "")
+        df = df.assign(seed=df["seed"].fillna(42).astype(int), dataset=ds,
+                       regime=REGIME_OF[family], nodes=nodes, mol_source=mol,
+                       variant_tag=vtag, file=p.name)
         frames.append(df)
+    if skipped:
+        print(f"  ({len(skipped)} file(s) from no recognised split family, ignored)")
     if not frames:
         raise SystemExit(f"no metrics_*.csv under {root}")
     df = pd.concat(frames, ignore_index=True)
+    df["variant_tag"] = df["variant_tag"].fillna("").astype(str)
+    # A blank variant means "written before the column existed", which is always the
+    # dataset's own default -- not a second, nameless variant.
+    df["variant_tag"] = [v or CANONICAL_VARIANT.get(d, "")
+                         for d, v in zip(df.dataset, df.variant_tag)]
     if args.dataset:
         df = df[df.dataset.isin(args.dataset)]
     if args.mol_source:
         df = df[df.mol_source.isin(args.mol_source)]
     if args.regime:
         df = df[df.regime.isin(args.regime)]
+    if getattr(args, "variant", None):
+        df = df[df.variant_tag.isin(args.variant)]
+    elif not getattr(args, "all_variants", False):
+        df = df[[v == CANONICAL_VARIANT.get(d, v)
+                 for d, v in zip(df.dataset, df.variant_tag)]]
+    if not getattr(args, "all_seeds", False):
+        seed = int(getattr(args, "seed", DEFAULT_SEED) or DEFAULT_SEED)
+        df = df[df.seed == seed]
+        if df.empty:
+            raise SystemExit(f"nothing left at seed {seed} -- pass --all-seeds, or "
+                             f"--seed with one that is present")
     return df
 
 
@@ -182,7 +209,7 @@ def build(df, args):
     return pd.DataFrame(out)
 
 
-def checks(df, tab):
+def checks(df, tab, args=None):
     """Everything that would make a cell of the table a lie."""
     msgs = []
     bad = df[df.get("status", pd.Series("ok", index=df.index))
@@ -190,7 +217,7 @@ def checks(df, tab):
     for f, n in bad.groupby("file").size().items():
         msgs.append(f"FAILED  {n} cell(s) in {f} -- excluded from every mean")
     thin = tab[(tab.n > 0) & (tab.seeds < 2)]
-    if len(thin):
+    if len(thin) and getattr(args, "all_seeds", False):
         msgs.append(f"1 SEED  {len(thin)} row(s) rest on a single model draw, so their "
                     f"interval covers splits only: "
                     + ", ".join(sorted({f"{r.dataset}/{r.regime}/{r.mol_source}"
@@ -223,39 +250,122 @@ def checks(df, tab):
     return msgs
 
 
+ORDER_REGIME = {"transductive": 0, "inductive": 1}
+ORDER_MOL = {"chemberta": 0, "gin": 1}
+ID_COLS = [("dataset", 8), ("regime", 14), ("mol_source", 11), ("variant_tag", 11)]
+VW, DW = 15, 23          # width of a value cell and of a delta cell
+
+
+def _val(m, hw, w=VW):
+    """A model's score. `--` rather than a blank, so a missing arm reads as missing
+    rather than as a formatting slip."""
+    if not np.isfinite(m):
+        return f"{'--':^{w}}"
+    return (f"{m:.3f} +/-{hw:.3f}" if np.isfinite(hw) else f"{m:.3f}").rjust(w)
+
+
+def _dlt(d, hw, won, tot, w=DW):
+    """The paired difference against boost, and the cells in favour. Paired on
+    (fold, seed): the arms ran on the same split with the same draw, so the difference
+    removes both nuisances at once and is far sharper than two overlapping intervals."""
+    if not np.isfinite(d):
+        return " " * w
+    body = f"{d:+.3f}" + (f" +/-{hw:.3f}" if np.isfinite(hw) else "")
+    return f"{body:>{w - 6}}{f'{won}/{tot}':>6}"
+
+
+def _shown(tab):
+    """Which identity columns earn a column of their own.
+
+    A column that never varies WITHIN a dataset -- m2or's edge variant, say -- is a
+    property of that dataset rather than a dimension of the study, so printing it on
+    every row is noise. It moves to a note under the title instead."""
+    show, folded = [], []
+    for c, w in ID_COLS:
+        vals = tab[c].astype(str)
+        if c == "dataset":                      # the row's identity, never folded
+            show.append((c, w))
+        elif vals.nunique() <= 1:
+            if vals.iloc[0]:
+                folded.append(f"{c.split('_')[0]} {vals.iloc[0]}")
+        elif tab.groupby("dataset")[c].nunique().max() > 1:
+            show.append((c, w))
+        else:
+            folded += [f"{d} {v}" for d, v in
+                       sorted({(r.dataset, str(getattr(r, c))) for r in tab.itertuples()})
+                       if v]
+    return show, folded
+
+
 def readable(tab, df, args):
-    print("=" * 96)
-    print("=== HEADLINE: boost vs the pre-v8 graph vs the graph with NO protein "
-          "embedding anywhere")
-    print("=" * 96)
-    hdr = (f"  {'dataset':<9}{'regime':<13}{'mol':<11}{'variant':<11}{'model':<9}"
-           f"{'metric':<8}{'value':>17}{'n':>5}{'f x s':>8}{'d vs boost':>18}{'won':>8}")
+    """One row per cell of the study, the three models side by side.
+
+    The earlier shape -- three rows per cell, the identity columns blank on two of
+    them, a blank line between every group -- made a fourteen-cell study read as
+    fourteen separate tables. Everything a reader compares (boost against each graph,
+    and the two graphs against each other) now sits on one line."""
+    piv, keys = {}, []
+    for r in tab.itertuples():
+        k = tuple(getattr(r, c) for c, _ in ID_COLS)
+        if k not in piv:
+            piv[k], _ = {}, keys.append(k)
+        piv[k][r.model] = r
+    keys.sort(key=lambda k: (k[0], ORDER_REGIME.get(k[1], 9),
+                             ORDER_MOL.get(k[2], 9), k[3]))
+    show, folded = _shown(tab)
+    idw = sum(w for _, w in show) + 6 + 5
+    width = idw + 2 * (VW + DW + 2) + VW
+
+    seed_note = ("all seeds pooled" if getattr(args, "all_seeds", False)
+                 else f"seed {getattr(args, 'seed', DEFAULT_SEED)} only")
+    print("=" * width)
+    print("=== HEADLINE -- what the receptor representation is actually worth")
+    print("===   boost    XGBoost on [ raw ESM || molecule ]. No graph.")
+    print("===   GNN old  the pre-v8 graph: ESM in the receptor nodes, no gate.")
+    print("===   GNN new  the same graph with ONE-HOT receptor nodes and the gate at")
+    print("===            alpha=1 -- no protein embedding enters the model anywhere.")
+    print(f"===   {seed_note}; +/- is the 95% interval over cells; deltas paired per cell."
+          + (f"  [{'; '.join(folded)}]" if folded else ""))
+    print("=" * width)
+
+    print(" " * idw + f"  {'boost':^{VW}}  {'GNN old':^{VW + DW}}  {'GNN new':^{VW + DW}}")
+    hdr = ("  " + "".join(f"{c.split('_')[0]:<{w}}" for c, w in show)
+           + f"{'metric':<6}{'n':>4}"
+           + f"  {'value':>{VW}}"
+           + f"  {'value':>{VW}}{'d vs boost':>{DW}}"
+           + f"  {'value':>{VW}}{'d vs boost':>{DW}}")
     print(hdr)
     print("  " + "-" * (len(hdr) - 2))
-    last = None
-    for gk, g in tab.groupby(group_key(tab), dropna=False):
-        if last is not None:
+
+    prev_ds, starred = None, False
+    for k in keys:
+        g = piv[k]
+        named = dict(zip([c for c, _ in ID_COLS], k))
+        if prev_ds is not None and k[0] != prev_ds:
             print()
-        last = gk
-        for i, r in enumerate(g.itertuples()):
-            lead = ([f"{r.dataset:<9}", f"{r.regime:<13}", f"{r.mol_source:<11}",
-                     f"{(r.variant_tag or '-'):<11}"] if i == 0
-                    else [" " * 9, " " * 13, " " * 11, " " * 11])
-            val = ("      (not run)   " if r.n == 0 else
-                   f"{r.mean:>9.3f} +/-{r.hw:>5.3f}" if np.isfinite(r.hw)
-                   else f"{r.mean:>9.3f}       ")
-            dlt = ("" if not np.isfinite(r.delta) else
-                   f"{r.delta:>+10.3f} +/-{r.delta_hw:5.3f}" if np.isfinite(r.delta_hw)
-                   else f"{r.delta:>+10.3f}      ")
-            won = "" if not r.tot else f"{r.won}/{r.tot}"
-            fx = "" if r.n == 0 else f"{r.folds}x{r.seeds}"
-            print("  " + "".join(lead) + f"{r.model + (' *' if r.fallback else ''):<9}"
-                  f"{r.metric:<8}{val}{r.n:>5}{fx:>8}{dlt:>18}{won:>8}")
+        prev_ds = k[0]
+        rows = [g.get(m) for m, *_ in MODELS]
+        met = next((r.metric for r in rows if r is not None), "")
+        cnt = max((r.n for r in rows if r is not None), default=0)
+        line = ("  " + "".join(f"{str(named[c]) or '-':<{w}}" for c, w in show)
+                + f"{met:<6}{cnt:>4}")
+        b = rows[0]
+        line += "  " + (_val(b.mean, b.hw) if b is not None else " " * VW)
+        for r in rows[1:]:
+            line += "  " + (_val(r.mean, r.hw) + _dlt(r.delta, r.delta_hw, r.won, r.tot)
+                            if r is not None else " " * (VW + DW))
+        if any(r is not None and r.fallback for r in rows):
+            line, starred = line + "  *", True
+        print(line)
+    if starred:
+        print("  " + " " * (idw - 2) + "* GNN new read off graph_legacy (one-hot), not "
+              "gate alpha=1")
+
+    msgs = checks(df, tab, args)
     print("\n  CHECKS")
     print("  " + "-" * 8)
-    msgs = checks(df, tab)
-    for m in msgs or ["all clear: every row has both seeds and folds, no failed cells, "
-                      "boost agrees across node runs"]:
+    for m in msgs or ["all clear: no failed cells, every model present, boost agrees "
+                      "across the ESM and one-hot files"]:
         print(f"    {m}")
 
 
@@ -268,7 +378,7 @@ def compact(tab, df, args):
         print(f"{r.dataset} {r.regime[:5]} {r.mol_source} {r.variant_tag or '.'} "
               f"{r.model.replace(' ', '-')} {r.metric} {f(r.mean)} {f(r.hw)} {r.n} "
               f"{r.folds} {r.seeds} {f(r.delta)} {f(r.delta_hw)} {r.won} {r.tot}")
-    for m in checks(df, tab):
+    for m in checks(df, tab, args):
         print(f"#chk {m}")
     print("#end")
 
@@ -282,6 +392,17 @@ def main():
                     choices=["transductive", "inductive"])
     ap.add_argument("--mol-source", nargs="+", default=None,
                     help="restrict to these molecule sources (chemberta, gin)")
+    ap.add_argument("--seed", type=int, default=DEFAULT_SEED,
+                    help="show only this seed. Default 42 -- the seed every reported "
+                         "number was produced at, which keeps a five-seed series and a "
+                         "one-seed one on the same footing (5 cells each)")
+    ap.add_argument("--all-seeds", action="store_true",
+                    help="pool every seed instead: wider evidence per row, but rows "
+                         "with different seed counts stop being comparable line for line")
+    ap.add_argument("--variant", nargs="+", default=None,
+                    help="edge variants to show. Default: each dataset's canonical one "
+                         "(q99greedy on m2or)")
+    ap.add_argument("--all-variants", action="store_true")
     ap.add_argument("--metric", default=None,
                     help="metric to rank on; default R2 for regression runs, AUROC for "
                          "classification, per group")

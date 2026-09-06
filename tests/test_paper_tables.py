@@ -241,7 +241,7 @@ def test_the_combo_matching_the_graph_rows_construction_is_taken(tmp_path):
     assert got["combo"] == "cls+mol"
     assert float(got["frame"]["AUROC"].iloc[0]) == pytest.approx(0.73)
     assert got["offered"] == ["cls", "cls+mol", "cls+prot+mol"]
-    assert got["contaminated"] is False
+    assert got["carries_prot"] is False
     named = pt.baseline_row(pt.find_runs(tmp_path, "hladis"), "m2or", "transductive",
                             ["AUROC"], "classification", combo="cls")
     assert named["combo"] == "cls"
@@ -257,9 +257,10 @@ def test_a_prot_bearing_combo_is_flagged_when_it_is_all_there_is(tmp_path):
                   for r in (1, 2, 3, 4, 5)]).to_csv(d / "metrics.csv", index=False)
     got = pt.baseline_row(pt.find_runs(tmp_path, "hladis"), "m2or", "transductive",
                           ["AUROC"], "classification")
-    assert got["combo"] == "cls+prot+mol" and got["contaminated"] is True
+    assert got["combo"] == "cls+prot+mol" and got["carries_prot"] is True
     notes = pt._baseline_notes("Hladis", "m2or", "transductive", got, None, "AUROC")
     assert any("RAW PROTEIN VECTOR" in n for n in notes)
+    assert any("only one on offer" in n for n in notes)
 
 
 def test_a_timing_pool_is_never_a_results_row(tmp_path):
@@ -309,3 +310,72 @@ def test_a_tuned_head_is_reported_as_such(tmp_path):
     is not."""
     _run(tmp_path, "p", "r", M2OR_TRANS | {"tune_boost": True}, [1, 2, 3, 4, 5])
     assert pt.find_runs(tmp_path, "hladis")[0]["tuned"] is True
+
+
+def test_a_fixed_head_beats_a_tuned_one_at_equal_split_count(tmp_path):
+    """`--tune-boost` gives a run a per-combo optuna search the sweep's rows never had,
+    so at the same number of splits the fixed-head run is the comparable one. Leaving
+    that to mtime makes the table depend on which run was launched last."""
+    import os
+    import time
+    _run(tmp_path, "p1", "fixed", M2OR_TRANS, [1, 2, 3, 4, 5], level=0.72)
+    tuned = _run(tmp_path, "p2", "tuned", M2OR_TRANS | {"tune_boost": True},
+                 [1, 2, 3, 4, 5], level=0.85)
+    t = time.time() + 10_000
+    os.utime(tuned / "metrics.csv", (t, t))          # the tuned run is newer
+    got = pt.baseline_row(pt.find_runs(tmp_path, "hladis"), "m2or", "transductive",
+                          ["AUROC"], "classification")
+    assert got["run"]["tuned"] is False
+    assert float(got["frame"]["AUROC"].iloc[0]) == pytest.approx(0.72)
+
+
+# ---------------------------------------------------------- asking for a combo by name
+
+def test_the_paper_convention_is_the_default_for_hladis(tmp_path):
+    """The paper's Hladis row stands on cls+prot+mol, so that is what `build` asks for
+    unless told otherwise. `baseline_row` itself still defaults to the construction that
+    matches the graph rows -- the convention lives at the CLI layer, not in the reader,
+    so a caller that asks for nothing gets the conservative answer."""
+    import argparse
+    ns = argparse.Namespace(combo=None)
+    assert pt.combo_for("hladis", ns) == "cls+prot+mol"
+    assert pt.combo_for("prosmith", ns) is None
+
+
+def test_a_combo_can_be_named_for_all_baselines_or_for_one():
+    import argparse
+    assert pt.combo_for("hladis", argparse.Namespace(combo=["cls+mol"])) == "cls+mol"
+    ns = argparse.Namespace(combo=["hladis=cls+prot+mol", "prosmith=cls+mol"])
+    assert pt.combo_for("hladis", ns) == "cls+prot+mol"
+    assert pt.combo_for("prosmith", ns) == "cls+mol"
+    assert pt.combo_for("lorax", ns) is None
+
+
+def test_a_run_that_has_the_requested_combo_beats_a_fuller_run_that_does_not(tmp_path):
+    """The trap this ordering exists for: ask for cls+prot+mol, and a run with more
+    splits but only cls+mol would otherwise win and quietly hand back cls+mol under the
+    name of the combo you asked for."""
+    d = tmp_path / "rich" / "r"
+    d.mkdir(parents=True)
+    (d / "config.json").write_text(json.dumps(M2OR_TRANS), encoding="utf-8")
+    pd.DataFrame([dict(repeat=r, kind="combo", name=n, AUROC=v)
+                  for r in (1, 2, 3, 4, 5)
+                  for n, v in (("cls+mol", 0.73), ("cls+prot+mol", 0.88))]
+                 ).to_csv(d / "metrics.csv", index=False)
+    _run(tmp_path, "poor", "r", M2OR_TRANS, [1, 2, 3, 4, 5, 6, 7], level=0.75)
+    got = pt.baseline_row(pt.find_runs(tmp_path, "hladis"), "m2or", "transductive",
+                          ["AUROC"], "classification", combo="cls+prot+mol")
+    assert got["combo"] == "cls+prot+mol"
+    assert got["run"]["pool"] == "rich"       # not the run with two more folds
+    assert got["missed"] is False
+
+
+def test_a_requested_combo_that_exists_nowhere_says_so(tmp_path):
+    """Falling back silently would print a number under the name of a construction that
+    was never run -- the worst of the failure modes here, because the row looks right."""
+    _run(tmp_path, "p", "r", M2OR_TRANS, [1, 2, 3, 4, 5], combos=("cls", "cls+mol"))
+    got = pt.baseline_row(pt.find_runs(tmp_path, "hladis"), "m2or", "transductive",
+                          ["AUROC"], "classification", combo="cls+prot+mol")
+    assert got["missed"] is True and got["combo"] == "cls+mol"
+    notes = pt._baseline_notes("Hladis", "m2or", "transductive", got, None, "AUROC")
+    assert any("NOT in any matching run" in n for n in notes)

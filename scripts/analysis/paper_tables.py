@@ -118,6 +118,17 @@ SKIP_POOL_PREFIX = "_"
 # it is that architecture plus everything `boost` already has, and it beats boost partly
 # by containing it. Reading it as "Hladis" overstates Hladis and understates the graph.
 COMBO_PREFERENCE = ["cls+mol", "cls"]
+# What the PAPER's baseline rows actually stand on, per baseline. `--combo` overrides
+# both this and the preference above.
+#
+# Hladis is reported at `cls+prot+mol`, and that is a deliberate convention, not a
+# slip: `boost` in these tables IS prot+mol, so a baseline at cls+prot+mol answers
+# "does this baseline's representation ADD anything to what boost already has", which
+# is the question the cls-baseline head-to-head asks of every competitor at once. It is
+# a DIFFERENT question from the one the graph rows answer -- those are cls+mol, i.e.
+# "does the graph REPLACE ESM" -- so the two live in one table only with that said out
+# loud, which is what `_baseline_notes` does.
+PAPER_COMBO = {"hladis": "cls+prot+mol"}
 
 
 # ------------------------------------------------------------------ the v8 grid rows
@@ -209,21 +220,31 @@ def baseline_row(runs, ds, regime, metrics, task, combo=None):
         d = pd.read_csv(r["run"] / "metrics.csv")
         return d[d["kind"] == "combo"] if "kind" in d.columns else d
 
-    # MOST SPLITS first, newest only to break a tie. "Newest" alone hands the row to
-    # whichever run happened to be launched last, and the last launch is routinely a
-    # one-fold probe -- a timing measurement, a smoke test, a rerun of fold 3.
+    # The run is chosen in this order, and the FIRST key is the point: when a combo has
+    # been asked for, a run that actually contains it beats a fuller run that does not.
+    # Without that, "the run with the most splits" can win and then silently fall back
+    # to a different construction than the one requested.
+    #
+    #   1. does it offer the requested combo
+    #   2. how many splits it has        -- a one-fold probe is not a table row
+    #   3. fixed head over tuned         -- the sweep's rows are fixed-head
+    #   4. newest, only to break a tie   -- otherwise the row depends on launch order
     scored = []
     for r in cand:
         d = _read(r)
         if d.empty:
             continue
-        scored.append((int(d["repeat"].nunique()),
+        has = bool(combo and "name" in d.columns and combo in set(d["name"]))
+        scored.append((1 if has else 0,
+                       int(d["repeat"].nunique()),
+                       0 if r["tuned"] else 1,
                        (r["run"] / "metrics.csv").stat().st_mtime, r, d))
     if not scored:
         return None
-    _, _, r, d = max(scored, key=lambda x: (x[0], x[1]))
+    *_, r, d = max(scored, key=lambda x: x[:4])
 
     offered = sorted(set(d["name"])) if "name" in d.columns else []
+    requested = bool(combo)
     if combo and combo in offered:
         pick = combo
     else:
@@ -235,7 +256,9 @@ def baseline_row(runs, ds, regime, metrics, task, combo=None):
     return dict(run=r, frame=d.set_index("repeat"), combo=str(pick or "?"),
                 offered=offered,
                 n_runs=len(cand),
-                contaminated="prot" in str(pick or ""))
+                requested=requested,
+                missed=bool(combo and combo not in offered),
+                carries_prot="prot" in str(pick or ""))
 
 
 # --------------------------------------------------------------------------- pairing
@@ -416,6 +439,21 @@ def latex(ds, blocks, metrics, task, col="mean place"):
 
 # ------------------------------------------------------------------------------ main
 
+def combo_for(name, args):
+    """Which head this baseline is read at: the CLI first, then the paper's own
+    convention, then the construction that matches the graph rows."""
+    spec = getattr(args, "combo", None)
+    if isinstance(spec, str):
+        spec = [spec]
+    for item in (spec or []):
+        key, sep, val = str(item).partition("=")
+        if not sep:
+            return key                     # one name, applied to every baseline
+        if key.lower() == name.lower():
+            return val
+    return PAPER_COMBO.get(name.lower())
+
+
 def build(df, args):
     runs_by_baseline = {b: find_runs(args.ensemble_root, b.lower())
                         for b in (args.baseline or [])}
@@ -435,7 +473,8 @@ def build(df, args):
 
             for name, runs in runs_by_baseline.items():
                 label = BASELINE_LABEL.get(name, name)
-                got = baseline_row(runs, ds, regime, metrics, task, args.combo)
+                got = baseline_row(runs, ds, regime, metrics, task,
+                                   combo_for(name, args))
                 if got is None:
                     rows.append(dict(model=label, n=0, source="absent",
                                      **{m: None for m in metrics}))
@@ -498,16 +537,92 @@ def _baseline_notes(label, ds, regime, got, boost, of_record):
         bits.append(f"rests on {theirs} while the sweep rows rest on {ours} -- "
                     f"only {shared} split(s) in common")
     out = [f"{label} @ {ds}/{regime}: " + "; ".join(bits)]
-    if got["contaminated"]:
+    if got["missed"]:
         out.append(
-            f"!! {label} @ {ds}/{regime} is on combo {got['combo']}, which feeds the "
-            f"head the RAW PROTEIN VECTOR alongside the baseline's own feature. That is "
-            f"not the baseline architecture -- it is that architecture plus everything "
-            f"`boost` already has, so it outscores boost partly by containing it. The "
-            f"comparable construction is cls+mol, the same shape as the graph rows; "
-            f"re-run the baseline with that combo, or pass --combo cls+mol if the run "
-            f"has one.")
+            f"!! {label} @ {ds}/{regime}: the combo you asked for is NOT in any matching "
+            f"run -- this row fell back to {got['combo']}. Offered here: "
+            f"{', '.join(got['offered']) or 'nothing'}. Run `--audit` to see every "
+            f"candidate.")
+    if got["carries_prot"]:
+        out.append(
+            f"   {label} @ {ds}/{regime} is on {got['combo']}: the head gets the RAW "
+            f"PROTEIN VECTOR as well as this baseline's own feature. Since `boost` in "
+            f"this table IS prot+mol, that row answers \"does {label} ADD to boost\", "
+            f"while the graph rows (cls+mol) answer \"does the graph REPLACE ESM\". "
+            f"Both are legitimate; they are not the same question, and the mean place "
+            f"ranks them as if they were."
+            + ("" if got["requested"] else
+               f" Nothing asked for this combo -- it was the only one on offer."))
     return out
+
+
+def audit(args):
+    """Every candidate run for every baseline, and what each combo in it scores.
+
+    The tables print ONE row per baseline, chosen by rules (skip `_timing`, most splits
+    wins, match the construction). Those rules are the difference between a plausible
+    number and the right one, so this prints what they chose FROM -- including the runs
+    they deliberately refused, marked as such. Read it whenever a baseline row moves and
+    you want to know which rule moved it."""
+    root = pathlib.Path(args.ensemble_root)
+    print(f"\n=== CANDIDATE RUNS under {root}")
+    print("    (skipped rows are what the selection rules refuse; the chosen row is "
+          "marked ->)")
+    for name in (args.baseline or []):
+        label = BASELINE_LABEL.get(name, name)
+        # deliberately NOT find_runs: this listing must show what find_runs drops
+        allruns = []
+        for cfg_path in sorted(root.glob("*/*/config.json")):
+            try:
+                cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+            except Exception:                     # noqa: BLE001
+                continue
+            if name.lower() not in " ".join(str(x) for x in
+                                            (cfg.get("sources") or [])).lower():
+                continue
+            m = cfg_path.parent / "metrics.csv"
+            if not m.exists():
+                continue
+            allruns.append((cfg_path.parent, cfg, m))
+        if not allruns:
+            print(f"\n  {label}: no run mentions it anywhere under {root}")
+            continue
+        chosen = {}
+        for ds in DATASET_ORDER:
+            for regime in REGIME_ORDER:
+                got = baseline_row(find_runs(root, name.lower()), ds, regime,
+                                   [], ag.TASK[ds], combo_for(name, args))
+                if got:
+                    chosen[(str(got["run"]["run"]), got["combo"])] = f"{ds}/{regime}"
+        print(f"\n  {label}")
+        for run, cfg, m in allruns:
+            pool = run.parent.name
+            scope = _scope_of(cfg)
+            d = pd.read_csv(m)
+            d = d[d["kind"] == "combo"] if "kind" in d.columns else d
+            why = []
+            if pool.startswith(SKIP_POOL_PREFIX):
+                why.append("SKIPPED: bookkeeping pool, not results")
+            if scope is None:
+                why.append("SKIPPED: not one of the six table cells "
+                           f"(regime={cfg.get('regime')}, "
+                           f"{cfg.get('split_family') or cfg.get('full_full_mode') or cfg.get('split')})")
+            head = ("TUNED" if cfg.get("tune_boost") else "fixed")
+            print(f"    {pool}/{run.name}"
+                  + (f"   [{scope[0]}/{scope[1]}]" if scope else "")
+                  + f"   head {head}" + ("   " + "; ".join(why) if why else ""))
+            if d.empty:
+                print("        (no combo rows)")
+                continue
+            task = ag.TASK[scope[0]] if scope else None
+            key = ag.OF_RECORD[task] if task and ag.OF_RECORD[task] in d.columns else None
+            for cname, g in d.groupby("name", sort=True):
+                mark = "  ->" if (str(run), cname) in chosen else "    "
+                val = (f"{ag.OF_RECORD[task]} {g[key].mean():.3f}" if key else "")
+                flag = "   <-- carries the RAW PROTEIN VECTOR" if "prot" in cname else ""
+                print(f"    {mark} combo {cname:<16} folds "
+                      f"{[int(x) for x in sorted(g['repeat'].unique())]}  {val}{flag}")
+    print()
 
 
 def main():
@@ -533,16 +648,27 @@ def main():
                          "whatever the source is). e.g. hladis prosmith lorax molor")
     ap.add_argument("--no-baselines", dest="baseline", action="store_const", const=[],
                     help="v8 grid only -- one tree, everything paired by construction")
-    ap.add_argument("--combo", default=None,
-                    help="combo name to read from a baseline run (default: the one with "
-                         "the most splits)")
+    ap.add_argument("--combo", nargs="+", default=None,
+                    help="which head to read from a baseline run. Either one name for "
+                         "every baseline (`--combo cls+prot+mol`) or per baseline "
+                         "(`--combo hladis=cls+prot+mol prosmith=cls+mol`). Default: "
+                         f"{PAPER_COMBO} for those, else the combo matching the graph "
+                         "rows' construction (cls+mol). A run offering the requested "
+                         "combo is preferred over a fuller run that does not.")
     ap.add_argument("--delta", action="store_true",
                     help="print the paired difference against boost instead of the mean "
                          "place. Available only where the rows share splits; a borrowed "
                          "row on other folds shows `unpaired`")
+    ap.add_argument("--audit", action="store_true",
+                    help="list every candidate ensembler run and every combo in it, "
+                         "with what the selection rules chose and what they refused. "
+                         "Use it when a baseline row moves and you want to know why")
     ap.add_argument("--latex", action="store_true")
     a = ap.parse_args()
 
+    if a.audit:
+        audit(a)
+        return
     df = ag.load(root=a.root, mol_source=a.mol_source, nodes=a.nodes,
                  dataset=a.dataset, regime=a.regime, seed=a.seed)
     tables = build(df, a)

@@ -55,7 +55,31 @@ with no browser:
 ```sh
 python scripts/analysis/alpha_grid.py --mol-source chemberta
 python scripts/analysis/headline_table.py        # the scoreboard of record
+python scripts/analysis/alpha_choice.py --loo    # which alpha do we report?
 ```
+
+### `alpha_choice.py` -- picking the primary alpha
+
+A different question from either of the above, and it gets its own file because it is a
+DECISION and not a reading. The graph-vs-boost comparison is three tables (M2OR, Carey,
+Hallem) with a row per (regime x molecule source); one cell here is one of those rows.
+Every alpha, plus `boost` and `legacy`, is ranked WITHIN each cell and the ranks are
+averaged across all eighteen. The rank is the headline criterion because it is the only
+pooled summary that is not a unit error -- Carey's R2 and M2OR's AUROC cannot be
+averaged, but their orderings can. Beside it: `cells won` against boost, the paired
+advantage per table in its own units, and `dz` (the paired difference over its own
+across-split spread) as the one dimensionless pooled column.
+
+The script is built around the fact that **this is selection on the test folds**. Three
+guards, all printed whether or not they are convenient:
+
+* **the 1-SE set** -- every alpha within one standard error of the best mean rank.
+  Picking the argmax out of a flat set is noise-chasing; among the tied set take the one
+  with an argument behind it, and alpha=1 is that one (no protein embedding enters the
+  model anywhere, which is the claim).
+* **`--loo`** -- choose on two tables, report where that alpha lands on the third.
+* **`--metric`** -- if the argmax moves when R2 becomes Spearman or AUROC becomes AUPRC,
+  the ordering is inside the noise and only the 1-SE set means anything.
 
 The grid itself comes from `scripts/modeling/train/run_alpha_gate_sweep.py`. The
 notebook is safe to open **mid-run**: a series that has only reached its baselines keeps

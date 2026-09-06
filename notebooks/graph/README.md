@@ -56,6 +56,7 @@ with no browser:
 python scripts/analysis/alpha_grid.py --mol-source chemberta
 python scripts/analysis/headline_table.py        # the scoreboard of record
 python scripts/analysis/alpha_choice.py --loo    # which alpha do we report?
+python scripts/analysis/paper_tables.py          # the three tables, printed
 ```
 
 ### `alpha_choice.py` -- picking the primary alpha

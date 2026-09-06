@@ -16,10 +16,26 @@ One table per dataset, one block per regime, one row per model:
     Hladis         Hladis et al. (ICLR 2023), and any other `--baseline` asked for.
 
 Every cell is mean +/- a Student-t 95% interval over the dataset's own five splits
-(folds 1-5, or the cold-molecule seeds 42-46 on m2or/inductive). The last column is the
-PAIRED difference against boost on the metric of record, with the count of splits in
-favour: the arms ran on the same split, so differencing them first removes the split and
-is far stronger than two overlapping intervals.
+(folds 1-5, or the cold-molecule seeds 42-46 on m2or/inductive).
+
+The last column is the MEAN PLACE: each model is ranked among the others WITHIN each
+split and the ranks are averaged, 1 = best. Ranking inside the split is what makes it
+readable at all -- folds differ enormously in difficulty (a cold-molecule fold moves
+every model at once), so a comparison of means partly reports which folds a model was
+measured on. The places are taken over the splits every row in the block shares, and the
+block header says how many that is; a row that shares none is excluded from the ranking
+rather than given a place against nobody. `--delta` swaps the column for the paired
+difference against boost, which is sharper but only exists where the splits match.
+
+WHICH COMBO A BORROWED ROW MUST BE ON
+-------------------------------------
+The sweep's graph rows are `train_boost([ z_prot || raw molecule ])` -- the `cls+mol`
+combo. An ensembler run often carries `cls+prot+mol` as well, and it usually scores
+highest, because that head is handed the RAW ESM VECTOR on top of the baseline's own
+feature: it is the baseline plus everything `boost` already has, so it outscores boost
+partly by containing it. `COMBO_PREFERENCE` therefore matches the CONSTRUCTION rather
+than maximising the score, the footnote lists what else the run offered, and a row that
+can only be had with `prot` in it is printed with a warning attached.
 
 TWO RESULT TREES, AND THE REASON THIS SCRIPT IS CAREFUL
 -------------------------------------------------------
@@ -35,11 +51,17 @@ baseline row is admitted only after its run is matched on
     task                        (so a regression table never quotes an AUROC)
     the SPLIT IDS themselves    (folds 1-5 vs seeds 42-46)
 
-and it is PAIRED with boost only when the split ids match exactly. When they do not, the
-row is still printed -- hiding it would be worse -- but the delta column says `unpaired`
-and the footnote names the mismatch. What this cannot check is the head: an ensembler run
-with `--tune-boost` is not comparable to the sweep's fixed head, and `config.json` is
-read for it and reported in the footnote so the reader can see which it was.
+and among the runs that match, the one with the MOST SPLITS wins -- newest only breaks a
+tie. Newest-wins hands the row to whichever run was launched last, and the last launch is
+routinely a one-fold probe. `_timing/` is skipped outright for the same reason: it holds
+one-fold stopwatch runs made for the params/train-time table, run with
+`--skip-checkpoints` and never intended as a score.
+
+A row that survives all of that is still only PAIRED with boost where the split ids
+match. When they do not, it is printed anyway -- hiding it would be worse -- and the
+footnote names the mismatch. What none of this can check is the head: an ensembler run
+with `--tune-boost` got a per-combo optuna search the sweep's rows never had, so
+`config.json` is read for it and the footnote says which head trained the row.
 
 If a baseline has no run for a (dataset, regime), the row is a dash. Per the project's
 own notes Hladis was run on M2OR and deferred on the insect panels, so expect exactly
@@ -83,6 +105,19 @@ ENSEMBLE_ROOT = "results/ensemble_logs"
 # How a baseline keyword is spelled in a table. Anything not here prints as given.
 BASELINE_LABEL = {"hladis": "Hladis", "prosmith": "ProSmith", "lorax": "LORAX",
                   "molor": "MolOR"}
+# Pools that are bookkeeping, not results. `_timing/` holds one-fold runs made to
+# measure training time for the paper's params/time table -- `--skip-checkpoints`, one
+# repeat, no intention of being a score. Picking one as a baseline row is how a table
+# ends up quoting a single fold of a stopwatch run.
+SKIP_POOL_PREFIX = "_"
+# Which combo of a baseline run belongs in THIS table, most preferred first.
+#
+# It has to match the construction of the row it sits beside. The sweep's graph rows are
+# `train_boost([ z_prot || raw molecule ])` -- cls+mol. A `cls+prot+mol` combo hands the
+# same head the RAW ESM VECTOR as well, so it is not the baseline architecture at all:
+# it is that architecture plus everything `boost` already has, and it beats boost partly
+# by containing it. Reading it as "Hladis" overstates Hladis and understates the graph.
+COMBO_PREFERENCE = ["cls+mol", "cls"]
 
 
 # ------------------------------------------------------------------ the v8 grid rows
@@ -147,7 +182,8 @@ def find_runs(root, keyword):
             continue
         scope = _scope_of(cfg)
         m = cfg_path.parent / "metrics.csv"
-        if scope is None or not m.exists():
+        pool = cfg_path.parent.parent.name
+        if scope is None or not m.exists() or pool.startswith(SKIP_POOL_PREFIX):
             continue
         out.append(dict(run=cfg_path.parent, pool=cfg_path.parent.parent.name,
                         dataset=scope[0], regime=scope[1], cfg=cfg,
@@ -164,27 +200,42 @@ def baseline_row(runs, ds, regime, metrics, task, combo=None):
     Newest by mtime, because a rerun of the same pool is a correction of the earlier
     one -- and the footnote names the run, so the choice is visible rather than
     implied."""
-    cand = [r for r in runs if r["dataset"] == ds and r["regime"] == regime]
-    cand = [r for r in cand if r["task"] == task]
+    cand = [r for r in runs if r["dataset"] == ds and r["regime"] == regime
+            and r["task"] == task]
     if not cand:
         return None
-    r = max(cand, key=lambda x: (x["run"] / "metrics.csv").stat().st_mtime)
-    d = pd.read_csv(r["run"] / "metrics.csv")
-    d = d[d["kind"] == "combo"] if "kind" in d.columns else d
-    if d.empty:
+
+    def _read(r):
+        d = pd.read_csv(r["run"] / "metrics.csv")
+        return d[d["kind"] == "combo"] if "kind" in d.columns else d
+
+    # MOST SPLITS first, newest only to break a tie. "Newest" alone hands the row to
+    # whichever run happened to be launched last, and the last launch is routinely a
+    # one-fold probe -- a timing measurement, a smoke test, a rerun of fold 3.
+    scored = []
+    for r in cand:
+        d = _read(r)
+        if d.empty:
+            continue
+        scored.append((int(d["repeat"].nunique()),
+                       (r["run"] / "metrics.csv").stat().st_mtime, r, d))
+    if not scored:
         return None
-    if combo and "name" in d.columns and combo in set(d["name"]):
-        d = d[d["name"] == combo]
-    elif "name" in d.columns and d["name"].nunique() > 1:
-        # several heads in one run; take the one with the most splits, then the best
-        # metric of record -- and say which, in the footnote
-        key = ag.OF_RECORD[task]
-        pick = (d.groupby("name")
-                .agg(n=("repeat", "nunique"), v=(key, "mean"))
-                .sort_values(["n", "v"], ascending=[False, False]))
-        d = d[d["name"] == pick.index[0]]
-    return dict(run=r, frame=d.set_index("repeat"),
-                combo=str(d["name"].iloc[0]) if "name" in d.columns else "?")
+    _, _, r, d = max(scored, key=lambda x: (x[0], x[1]))
+
+    offered = sorted(set(d["name"])) if "name" in d.columns else []
+    if combo and combo in offered:
+        pick = combo
+    else:
+        # match the construction, do not maximise the score
+        pick = next((c for c in COMBO_PREFERENCE if c in offered),
+                    offered[0] if offered else None)
+    if pick is not None:
+        d = d[d["name"] == pick]
+    return dict(run=r, frame=d.set_index("repeat"), combo=str(pick or "?"),
+                offered=offered,
+                n_runs=len(cand),
+                contaminated="prot" in str(pick or ""))
 
 
 # --------------------------------------------------------------------------- pairing
@@ -246,37 +297,86 @@ def cross_tree_delta(base_frame, boost_frame, metric):
 
 # ------------------------------------------------------------------------- rendering
 
+def mean_place(cells, baselines, metric):
+    """Mean place of each model among the models in this block, 1 = best.
+
+    Ranked WITHIN each split and then averaged, which is the only pooled comparison
+    that survives the fact that folds differ wildly in difficulty: a cold-molecule fold
+    can move every model by 0.1, and a mean-of-scores would report that rather than the
+    ordering.
+
+    The ranking runs on the folds SHARED by every model in the block. A model that
+    overlaps nothing gets no place at all rather than a place computed on its own folds,
+    which would not be a place in the same competition."""
+    series = {}
+    for label, frame in cells.items():
+        if frame is None or metric not in frame.columns:
+            continue
+        v = pd.to_numeric(frame[metric], errors="coerce")
+        v = v.groupby(level="fold").mean() if isinstance(frame.index, pd.MultiIndex) \
+            else v.groupby(level=0).mean()
+        series[label] = v.dropna()
+    for label, frame in baselines.items():
+        if frame is None or metric not in frame.columns:
+            continue
+        v = pd.to_numeric(frame[metric], errors="coerce").groupby(level=0).mean()
+        series[label] = v.dropna()
+    if not series:
+        return {}, [], []
+    folds = set.intersection(*(set(v.index) for v in series.values()))
+    dropped = []
+    if not folds:
+        # one model is on a disjoint fold set (folds 1-5 against seeds 42-46, or a
+        # one-fold probe). Drop the smallest offenders until the rest share something.
+        for label in sorted(series, key=lambda k: len(series[k])):
+            trial = {k: v for k, v in series.items() if k != label}
+            if trial and set.intersection(*(set(v.index) for v in trial.values())):
+                dropped.append(label)
+                series = trial
+                folds = set.intersection(*(set(v.index) for v in series.values()))
+                break
+    if not folds:
+        return {}, sorted(series), []
+    folds = sorted(folds)
+    M = pd.DataFrame({k: v.reindex(folds) for k, v in series.items()})
+    ranks = M.rank(axis=1, ascending=False, method="average")
+    return ranks.mean().to_dict(), dropped, folds
+
+
 def _cell(t, w=16):
     if t is None or not np.isfinite(t[0]):
         return "--".rjust(w)
     return (f"{t[0]:.3f}" + (f" +/-{t[1]:.3f}" if np.isfinite(t[1]) else "")).rjust(w)
 
 
-def render(ds, blocks, metrics, task, notes, w_model=16):
+def render(ds, blocks, metrics, task, notes, col="mean place", w_model=16):
     head = (f"  {'model':<{w_model}}{'n':>4}"
             + "".join(m.rjust(16) for m in metrics)
-            + f"{'d vs boost':>22}")
+            + f"{col:>22}")
     print()
     print("=" * len(head))
     print(f"=== {DATASET_LABEL.get(ds, ds)}   [{task}, metric of record "
           f"{ag.OF_RECORD[task]}]")
     print("=" * len(head))
-    for regime, rows in blocks:
-        print(f"\n  {regime.upper()}")
+    for regime, rows, rank_note in blocks:
+        print(f"\n  {regime.upper()}" + (f"   ({rank_note})" if rank_note else ""))
         print(head)
         print("  " + "-" * (len(head) - 2))
         for r in rows:
             line = f"  {r['model']:<{w_model}}{r['n']:>4}"
             line += "".join(_cell(r.get(m)) for m in metrics)
-            d = r.get("delta")
-            if d is None:
-                line += f"{'':>22}"
-            elif d[3] == 0:
-                line += f"{'unpaired':>22}"
-            else:
-                txt = (f"{d[0]:+.3f}" + (f" +/-{d[1]:.3f}" if np.isfinite(d[1]) else "")
+            if "delta" in r:
+                d = r["delta"]
+                txt = ("unpaired" if d is None or d[3] == 0 else
+                       f"{d[0]:+.3f}"
+                       + (f" +/-{d[1]:.3f}" if np.isfinite(d[1]) else "")
                        + f" [{d[2]}/{d[3]}]")
-                line += txt.rjust(22)
+            elif "place" in r:
+                pl = r["place"]
+                txt = "--" if pl is None or not np.isfinite(pl) else f"{pl:.2f}"
+            else:
+                txt = ""          # boost under --delta: it IS the reference
+            line += txt.rjust(22)
             print(line + ("" if r.get("source") == "v8 grid" else "  *"))
     if notes:
         print()
@@ -284,13 +384,13 @@ def render(ds, blocks, metrics, task, notes, w_model=16):
             print(f"  * {n}")
 
 
-def latex(ds, blocks, metrics, task):
+def latex(ds, blocks, metrics, task, col="mean place"):
     print()
     print(f"% ---- {DATASET_LABEL.get(ds, ds)} ----")
     print(r"\begin{tabular}{l" + "r" * (len(metrics) + 1) + "}")
     print(r"\toprule")
-    print("model & " + " & ".join(metrics) + r" & $\Delta$ vs boost \\")
-    for regime, rows in blocks:
+    print("model & " + " & ".join(metrics) + f" & {col} " + r"\\")
+    for regime, rows, _ in blocks:
         print(r"\midrule")
         print(rf"\multicolumn{{{len(metrics) + 2}}}{{l}}{{\textit{{{regime}}}}} \\")
         for r in rows:
@@ -300,9 +400,15 @@ def latex(ds, blocks, metrics, task):
                 cells.append("--" if t is None or not np.isfinite(t[0])
                              else (rf"${t[0]:.3f} \pm {t[1]:.3f}$"
                                    if np.isfinite(t[1]) else f"${t[0]:.3f}$"))
-            d = r.get("delta")
-            dt = ("" if d is None else "unpaired" if d[3] == 0
-                  else rf"${d[0]:+.3f}$ [{d[2]}/{d[3]}]")
+            if "delta" in r:
+                d = r["delta"]
+                dt = ("unpaired" if d is None or d[3] == 0
+                      else rf"${d[0]:+.3f}$ [{d[2]}/{d[3]}]")
+            elif "place" in r:
+                pl = r["place"]
+                dt = "--" if pl is None or not np.isfinite(pl) else f"{pl:.2f}"
+            else:
+                dt = ""
             print(f"{r['model']} & " + " & ".join(cells) + f" & {dt} " + r"\\")
     print(r"\bottomrule")
     print(r"\end{tabular}")
@@ -325,48 +431,82 @@ def build(df, args):
             if not rows and not any(runs_by_baseline.values()):
                 continue
             boost = cells.get("boost")
-            for r in rows:
-                if r["model"] != "boost":
-                    r["delta"] = paired_delta(cells.get(r["model"]), boost, of_record)
+            base_frames = {}
 
             for name, runs in runs_by_baseline.items():
+                label = BASELINE_LABEL.get(name, name)
                 got = baseline_row(runs, ds, regime, metrics, task, args.combo)
                 if got is None:
-                    rows.append(dict(model=BASELINE_LABEL.get(name, name), n=0,
-                                     source="absent", **{m: None for m in metrics}))
-                    notes.append(f"{BASELINE_LABEL.get(name, name)}: no run under "
-                                 f"{args.ensemble_root} for {ds}/{regime} -- row left "
-                                 f"blank, not omitted")
+                    rows.append(dict(model=label, n=0, source="absent",
+                                     **{m: None for m in metrics}))
+                    notes.append(f"{label}: no run under {args.ensemble_root} for "
+                                 f"{ds}/{regime} -- row left blank, not omitted")
                     continue
                 f = got["frame"]
-                vals = {m: ag.ci(f[m]) if m in f.columns else None for m in metrics}
-                d = cross_tree_delta(f, boost, of_record)
-                rows.append(dict(model=BASELINE_LABEL.get(name, name),
-                                 n=int(f.index.nunique()),
-                                 source="ensemble_logs", delta=d, **vals))
-                r = got["run"]
-                theirs, ours = fold_ids(f), fold_ids(boost)
-                if not d[3]:
-                    mism = (f"; SPLIT IDS DIFFER -- {theirs[:6]} against the sweep's "
-                            f"{ours[:6]}, so NOT paired: the two rows are not measured "
-                            f"on the same held-out data")
-                elif set(theirs) != set(ours):
-                    # It paired, on the intersection -- but then the delta is over a
-                    # DIFFERENT set of folds than the two means printed beside it, and
-                    # nothing in the row says so. This is the quiet version of the trap.
-                    mism = (f"; rests on {theirs} while the sweep rows rest on {ours} "
-                            f"-- the delta is over the {d[3]} shared fold(s) only, so it "
-                            f"is NOT the difference of the two means printed")
-                else:
-                    mism = ""
-                notes.append(
-                    f"{BASELINE_LABEL.get(name, name)} @ {ds}/{regime}: "
-                    f"{r['pool']}/{r['run'].name}, combo {got['combo']}, head "
-                    f"{'TUNED -- not comparable to the sweep fixed head' if r['tuned'] else 'fixed'}"
-                    f"{mism}")
-            blocks.append((regime, rows))
+                base_frames[label] = f
+                rows.append(dict(model=label, n=int(f.index.nunique()),
+                                 source="ensemble_logs",
+                                 **{m: ag.ci(f[m]) if m in f.columns else None
+                                    for m in metrics}))
+                notes.extend(_baseline_notes(label, ds, regime, got, boost, of_record))
+
+            if getattr(args, "delta", False):
+                for r in rows:
+                    if r["model"] == "boost":
+                        continue
+                    src = cells.get(r["model"])
+                    r["delta"] = (paired_delta(src, boost, of_record) if src is not None
+                                  else cross_tree_delta(base_frames.get(r["model"]),
+                                                        boost, of_record))
+                note = ""
+            else:
+                places, dropped, folds = mean_place(cells, base_frames, of_record)
+                for r in rows:
+                    r["place"] = places.get(r["model"])
+                k = len([r for r in rows if r.get("place") is not None])
+                note = (f"places over {k} models on {len(folds)} shared split(s)"
+                        if folds else "no shared splits -- no ranking possible")
+                for label in dropped:
+                    notes.append(
+                        f"{label} is EXCLUDED from the ranking: it shares no split with "
+                        f"the other rows, so it cannot hold a place in the same "
+                        f"competition. Its metric cells above are still its own numbers.")
+            blocks.append((regime, rows, note))
         if blocks:
             out.append((ds, blocks, metrics, task, notes))
+    return out
+
+
+def _baseline_notes(label, ds, regime, got, boost, of_record):
+    """Everything about a borrowed row that the reader has to know and the row itself
+    cannot show: which run it came from out of how many, which head trained it, which
+    combo was taken out of what was offered, and whether its splits are ours."""
+    r, f = got["run"], got["frame"]
+    theirs, ours = fold_ids(f), fold_ids(boost)
+    shared = len(set(theirs) & set(ours))
+    bits = [f"{r['pool']}/{r['run'].name}"]
+    if got["n_runs"] > 1:
+        bits.append(f"picked from {got['n_runs']} matching runs by most splits")
+    bits.append(f"combo {got['combo']}"
+                + (f" (of {', '.join(got['offered'])})"
+                   if len(got["offered"]) > 1 else ""))
+    bits.append("head TUNED -- not comparable to the sweep's fixed head"
+                if r["tuned"] else "head fixed")
+    if not shared:
+        bits.append(f"splits {theirs[:6]} share NOTHING with the sweep's {ours[:6]}")
+    elif set(theirs) != set(ours):
+        bits.append(f"rests on {theirs} while the sweep rows rest on {ours} -- "
+                    f"only {shared} split(s) in common")
+    out = [f"{label} @ {ds}/{regime}: " + "; ".join(bits)]
+    if got["contaminated"]:
+        out.append(
+            f"!! {label} @ {ds}/{regime} is on combo {got['combo']}, which feeds the "
+            f"head the RAW PROTEIN VECTOR alongside the baseline's own feature. That is "
+            f"not the baseline architecture -- it is that architecture plus everything "
+            f"`boost` already has, so it outscores boost partly by containing it. The "
+            f"comparable construction is cls+mol, the same shape as the graph rows; "
+            f"re-run the baseline with that combo, or pass --combo cls+mol if the run "
+            f"has one.")
     return out
 
 
@@ -396,6 +536,10 @@ def main():
     ap.add_argument("--combo", default=None,
                     help="combo name to read from a baseline run (default: the one with "
                          "the most splits)")
+    ap.add_argument("--delta", action="store_true",
+                    help="print the paired difference against boost instead of the mean "
+                         "place. Available only where the rows share splits; a borrowed "
+                         "row on other folds shows `unpaired`")
     ap.add_argument("--latex", action="store_true")
     a = ap.parse_args()
 
@@ -404,12 +548,16 @@ def main():
     tables = build(df, a)
     if not tables:
         raise SystemExit("nothing to print")
-    print(f"\nmolecule source: {a.mol_source}   nodes: {','.join(a.nodes)}   "
-          f"cells: mean +/- 95% t-CI over the splits; "
-          f"[won/n] = splits where the row beat boost")
+    print(f"\nmolecule source: {a.mol_source}   nodes: {','.join(a.nodes)}")
+    print("cells: mean +/- 95% t-CI over the splits.  "
+          + ("last column: paired difference vs boost [won/n]" if a.delta else
+             "mean place: rank among the rows WITHIN each split, averaged (1 = best)"))
+    col = "d vs boost" if a.delta else "mean place"
     for ds, blocks, metrics, task, notes in tables:
-        (latex if a.latex else render)(*( (ds, blocks, metrics, task) if a.latex
-                                          else (ds, blocks, metrics, task, notes)))
+        if a.latex:
+            latex(ds, blocks, metrics, task, col)
+        else:
+            render(ds, blocks, metrics, task, notes, col)
 
 
 if __name__ == "__main__":

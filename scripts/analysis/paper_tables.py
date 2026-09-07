@@ -18,14 +18,23 @@ One table per dataset, one block per regime, one row per model:
 Every cell is mean +/- a Student-t 95% interval over the dataset's own five splits
 (folds 1-5, or the cold-molecule seeds 42-46 on m2or/inductive).
 
-The last column is the MEAN PLACE: each model is ranked among the others WITHIN each
-split and the ranks are averaged, 1 = best. Ranking inside the split is what makes it
-readable at all -- folds differ enormously in difficulty (a cold-molecule fold moves
-every model at once), so a comparison of means partly reports which folds a model was
-measured on. The places are taken over the splits every row in the block shares, and the
-block header says how many that is; a row that shares none is excluded from the ranking
-rather than given a place against nobody. `--delta` swaps the column for the paired
-difference against boost, which is sharper but only exists where the splits match.
+The right-hand block is the MEAN PLACE, ONE COLUMN PER METRIC: each model is ranked
+among the others WITHIN each split and the ranks are averaged, 1 = best. Ranking inside
+the split is what makes it readable at all -- folds differ enormously in difficulty (a
+cold-molecule fold moves every model at once), so a comparison of means partly reports
+which folds a model was measured on. The places are taken over the splits every row in
+the block shares, and the block header says how many that is; a row that shares none is
+excluded from the ranking rather than given a place against nobody.
+
+A place per metric rather than one for the metric of record, because the four are not
+redundant: on a regression table R2 and Pearson answer different questions (calibrated
+error vs shape alone) and a model can lead one and trail the other, and on M2OR the
+threshold-free pair (AUROC/AUPRC) routinely disagrees with the thresholded pair
+(MCC/F1). One column collapsed exactly the disagreement worth seeing. Note RMSE is the
+one metric where SMALLER is better; the ranking already accounts for it.
+
+`--delta` swaps the whole block for a single column, the paired difference against boost
+on the metric of record -- sharper, but it only exists where the splits match.
 
 WHICH COMBO A BORROWED ROW MUST BE ON
 -------------------------------------
@@ -91,6 +100,10 @@ REGIME_ORDER = ["transductive", "inductive"]
 # not the archive -- `headline_table.py --all-metrics` is where everything lives.
 SHOW = {"regression": ["R2", "RMSE", "Pearson", "Spearman"],
         "classification": ["AUROC", "AUPRC", "MCC", "F1"]}
+# The metrics a SMALLER value wins. Only these two appear in any table this script
+# prints, but the set is what the ranking consults, so a metric added to SHOW or passed
+# through --metrics is ranked correctly the moment it is named here.
+LOWER_IS_BETTER = {"RMSE", "MAE"}
 # How a (dataset, regime) of the v8 grid appears in an ensembler run's config.json.
 ENSEMBLE_SCOPE = {
     ("cc", "transductive"): dict(regime="ofm", dataset="cc", split_family="rand"),
@@ -398,8 +411,30 @@ def mean_place(cells, baselines, metric):
         return {}, sorted(series), []
     folds = sorted(folds)
     M = pd.DataFrame({k: v.reindex(folds) for k, v in series.items()})
-    ranks = M.rank(axis=1, ascending=False, method="average")
+    # direction from the metric NAME. It never mattered while only the metric of
+    # record was ranked -- R2 and AUROC are both larger-is-better -- but a place per
+    # metric puts RMSE in the block, where ranking it the same way would silently
+    # award first place to the worst model.
+    ranks = M.rank(axis=1, ascending=metric in LOWER_IS_BETTER, method="average")
     return ranks.mean().to_dict(), dropped, folds
+
+
+def places_by_metric(cells, baselines, metrics):
+    """`mean_place` for each metric: (places per metric, models dropped anywhere,
+    the shared folds per metric).
+
+    Per metric and not once, because a metric can be missing from a borrowed row while
+    the others are present, and then that row is in one competition and not another --
+    which is a fact about the run, and hiding it behind a single ranking would put a
+    place next to a model that never ran that metric."""
+    per, dropped, folds = {}, [], {}
+    for m in metrics:
+        p, d, f = mean_place(cells, baselines, m)
+        per[m], folds[m] = p, f
+        for lab in d:
+            if lab not in dropped:
+                dropped.append(lab)
+    return per, dropped, folds
 
 
 def _cell(t, w=16):
@@ -415,10 +450,39 @@ DIAL_NOTE = {
 }
 
 
+def _place_widths(metrics):
+    """One column per metric, each just wide enough for its own name."""
+    return {m: max(len(m) + 2, 6) for m in metrics}
+
+
+def _place_block(r, metrics, widths):
+    pl = r.get("place")
+    if not isinstance(pl, dict):
+        return None
+    out = []
+    for m in metrics:
+        v = pl.get(m)
+        txt = "--" if v is None or not np.isfinite(v) else f"{v:.2f}"
+        out.append(txt.rjust(widths[m]))
+    return "".join(out)
+
+
 def render(ds, blocks, metrics, task, notes, col="mean place", dial="", w_model=16):
+    ranked = any(isinstance(r.get("place"), dict)
+                 for _, rows, _ in blocks for r in rows)
+    widths = _place_widths(metrics)
+    lead = 2 + w_model + 4
     head = (f"  {'model':<{w_model}}{'n':>4}"
-            + "".join(m.rjust(16) for m in metrics)
-            + f"{col:>22}")
+            + "".join(m.rjust(16) for m in metrics))
+    if ranked:
+        # the metric names appear twice, so the two blocks are named above them --
+        # without that a reader cannot tell 0.894 from a place of 1.20 at a glance
+        head += "  " + "".join(m.rjust(widths[m]) for m in metrics)
+        group = (" " * lead + "value (mean +/- 95% t-CI)".center(16 * len(metrics))
+                 + "  " + f"{col}, 1 = best".center(sum(widths.values())))
+    else:
+        head += f"{col:>22}"
+        group = None
     print()
     print("=" * len(head))
     print(f"=== {DATASET_LABEL.get(ds, ds)}   [{task}, metric of record "
@@ -426,23 +490,27 @@ def render(ds, blocks, metrics, task, notes, col="mean place", dial="", w_model=
     print("=" * len(head))
     for regime, rows, rank_note in blocks:
         print(f"\n  {regime.upper()}" + (f"   ({rank_note})" if rank_note else ""))
+        if group:
+            print(group)
         print(head)
         print("  " + "-" * (len(head) - 2))
         for r in rows:
             line = f"  {r['model']:<{w_model}}{r['n']:>4}"
             line += "".join(_cell(r.get(m)) for m in metrics)
+            block = _place_block(r, metrics, widths)
             if "delta" in r:
                 d = r["delta"]
                 txt = ("unpaired" if d is None or d[3] == 0 else
                        f"{d[0]:+.3f}"
                        + (f" +/-{d[1]:.3f}" if np.isfinite(d[1]) else "")
                        + f" [{d[2]}/{d[3]}]")
-            elif "place" in r:
-                pl = r["place"]
-                txt = "--" if pl is None or not np.isfinite(pl) else f"{pl:.2f}"
+                line += txt.rjust(22)
+            elif block is not None:
+                line += "  " + block
+            elif ranked:
+                line += "  " + " " * sum(widths.values())
             else:
-                txt = ""          # boost under --delta: it IS the reference
-            line += txt.rjust(22)
+                line += "".rjust(22)   # boost under --delta: it IS the reference
             print(line + ("" if r.get("source") == "v8 grid" else "  *"))
     if notes:
         print()
@@ -451,18 +519,27 @@ def render(ds, blocks, metrics, task, notes, col="mean place", dial="", w_model=
 
 
 def latex(ds, blocks, metrics, task, col="mean place", dial=""):
+    ranked = any(isinstance(r.get("place"), dict)
+                 for _, rows, _ in blocks for r in rows)
+    extra = len(metrics) if ranked else 1
     print()
     print(f"% ---- {DATASET_LABEL.get(ds, ds)} ----")
     if dial:
         # which dial this is has to survive the copy-paste into the paper: alpha
         # means opposite things on the two of them
         print("%" + dial)
-    print(r"\begin{tabular}{l" + "r" * (len(metrics) + 1) + "}")
+    print(r"\begin{tabular}{l" + "r" * len(metrics) + "|" + "r" * extra + "}")
     print(r"\toprule")
-    print("model & " + " & ".join(metrics) + f" & {col} " + r"\\")
+    if ranked:
+        print(rf"& \multicolumn{{{len(metrics)}}}{{c}}{{value}} & "
+              rf"\multicolumn{{{len(metrics)}}}{{c}}{{{col}, 1 = best}} \\")
+        print("model & " + " & ".join(metrics) + " & " + " & ".join(metrics) + r" \\")
+    else:
+        print("model & " + " & ".join(metrics) + f" & {col} " + r"\\")
     for regime, rows, _ in blocks:
         print(r"\midrule")
-        print(rf"\multicolumn{{{len(metrics) + 2}}}{{l}}{{\textit{{{regime}}}}} \\")
+        print(rf"\multicolumn{{{len(metrics) + extra + 1}}}{{l}}"
+              rf"{{\textit{{{regime}}}}} \\")
         for r in rows:
             cells = []
             for m in metrics:
@@ -472,14 +549,17 @@ def latex(ds, blocks, metrics, task, col="mean place", dial=""):
                                    if np.isfinite(t[1]) else f"${t[0]:.3f}$"))
             if "delta" in r:
                 d = r["delta"]
-                dt = ("unpaired" if d is None or d[3] == 0
-                      else rf"${d[0]:+.3f}$ [{d[2]}/{d[3]}]")
-            elif "place" in r:
-                pl = r["place"]
-                dt = "--" if pl is None or not np.isfinite(pl) else f"{pl:.2f}"
+                tail = [("unpaired" if d is None or d[3] == 0
+                         else rf"${d[0]:+.3f}$ [{d[2]}/{d[3]}]")]
+            elif isinstance(r.get("place"), dict):
+                tail = []
+                for m in metrics:
+                    v = r["place"].get(m)
+                    tail.append("--" if v is None or not np.isfinite(v)
+                                else f"{v:.2f}")
             else:
-                dt = ""
-            print(f"{r['model']} & " + " & ".join(cells) + f" & {dt} " + r"\\")
+                tail = [""] * extra
+            print(f"{r['model']} & " + " & ".join(cells + tail) + r" \\")
     print(r"\bottomrule")
     print(r"\end{tabular}")
 
@@ -546,12 +626,23 @@ def build(df, args):
                                                         boost, of_record))
                 note = ""
             else:
-                places, dropped, folds = mean_place(cells, base_frames, of_record)
+                per, dropped, folds = places_by_metric(cells, base_frames, metrics)
                 for r in rows:
-                    r["place"] = places.get(r["model"])
-                k = len([r for r in rows if r.get("place") is not None])
-                note = (f"places over {k} models on {len(folds)} shared split(s)"
-                        if folds else "no shared splits -- no ranking possible")
+                    r["place"] = {m: per[m].get(r["model"]) for m in metrics}
+                # the block header counts on the metric of record, or on the first
+                # metric that ranked anything when --metrics leaves it out
+                ref = folds.get(of_record) or next(
+                    (f for f in folds.values() if f), [])
+                k = len([r for r in rows
+                         if any(v is not None for v in r["place"].values())])
+                note = (f"places over {k} models on {len(ref)} shared split(s)"
+                        if ref else "no shared splits -- no ranking possible")
+                spans = {m: len(f) for m, f in folds.items()}
+                if len(set(spans.values())) > 1:
+                    # a borrowed row can carry AUROC and not MCC; then the two columns
+                    # are two different competitions and the header must say so
+                    note += ("; NOT all on the same splits -- "
+                             + ", ".join(f"{m} {n}" for m, n in spans.items()))
                 for label in dropped:
                     notes.append(
                         f"{label} is EXCLUDED from the ranking: it shares no split with "

@@ -226,6 +226,51 @@ def test_places_are_over_the_folds_every_row_shares(tmp_path):
     assert places["Hladis"] == pytest.approx(1.0)
 
 
+def test_rmse_is_ranked_the_other_way_round():
+    """THE trap that only appears once every metric gets a place. R2 and AUROC are
+    larger-is-better, so while the metric of record was the only ranked column the
+    direction never came up. RMSE is smaller-is-better, and ranking it like the rest
+    would hand first place to the worst model in the block."""
+    idx = pd.Index([1, 2, 3, 4, 5], name="fold")
+    cells = {"good": pd.DataFrame({"R2": [0.7] * 5, "RMSE": [0.3] * 5}, index=idx),
+             "bad": pd.DataFrame({"R2": [0.4] * 5, "RMSE": [0.9] * 5}, index=idx)}
+    r2, _, _ = pt.mean_place(cells, {}, "R2")
+    rmse, _, _ = pt.mean_place(cells, {}, "RMSE")
+    assert r2["good"] == pytest.approx(1.0) and r2["bad"] == pytest.approx(2.0)
+    assert rmse["good"] == pytest.approx(1.0) and rmse["bad"] == pytest.approx(2.0)
+
+
+def test_a_place_per_metric_and_the_metrics_are_allowed_to_disagree():
+    """Why there is a column per metric rather than one for the metric of record: a
+    model can lead on R2 and trail on Spearman, and one column hides exactly that."""
+    idx = pd.Index([1, 2, 3, 4, 5], name="fold")
+    cells = {"A": pd.DataFrame({"R2": [0.7] * 5, "Spearman": [0.5] * 5}, index=idx),
+             "B": pd.DataFrame({"R2": [0.6] * 5, "Spearman": [0.8] * 5}, index=idx)}
+    per, dropped, folds = pt.places_by_metric(cells, {}, ["R2", "Spearman"])
+    assert not dropped and folds["R2"] == [1, 2, 3, 4, 5]
+    assert per["R2"]["A"] == pytest.approx(1.0)
+    assert per["Spearman"]["A"] == pytest.approx(2.0)
+
+
+def test_a_metric_only_one_side_has_ranks_on_its_own_and_says_so(tmp_path):
+    """A borrowed row can carry AUROC and not MCC. Then the two place columns are two
+    different competitions, and the block note has to admit it rather than printing
+    both as if they were one."""
+    df = _grid(ds="m2or", regime="transductive")
+    df = df.assign(AUPRC=0.7)
+    d = tmp_path / "pool" / "run"
+    d.mkdir(parents=True)
+    (d / "config.json").write_text(json.dumps(M2OR_TRANS), encoding="utf-8")
+    pd.DataFrame({"kind": ["combo"] * 3, "name": ["cls+mol"] * 3,
+                  "repeat": [1, 2, 3], "AUROC": [0.8] * 3}).to_csv(
+        d / "metrics.csv", index=False)
+    tables = pt.build(df, _args(tmp_path, metrics=["AUROC", "AUPRC"], combo="cls+mol"))
+    _, blocks, _, _, _ = tables[0]
+    note = blocks[0][2]
+    assert "NOT all on the same splits" in note
+    assert "AUROC 3" in note and "AUPRC 5" in note
+
+
 def test_the_delta_column_is_still_available_on_request(tmp_path):
     df = _grid(ds="hc", regime="transductive", boost=0.5, gate=0.6)
     tables = pt.build(df, _args(tmp_path, delta=True))

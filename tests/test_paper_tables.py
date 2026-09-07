@@ -153,7 +153,7 @@ def _args(tmp_path, **kw):
     import argparse
     return argparse.Namespace(**(dict(ensemble_root=str(tmp_path), alphas=[1.0],
                                       metrics=None, baseline=["hladis"], combo=None,
-                                      delta=False) | kw))
+                                      mol_source="chemberta", delta=False) | kw))
 
 
 def test_a_missing_baseline_is_a_dash_and_a_note_not_a_vanished_row(tmp_path):
@@ -379,3 +379,70 @@ def test_a_requested_combo_that_exists_nowhere_says_so(tmp_path):
     assert got["missed"] is True and got["combo"] == "cls+mol"
     notes = pt._baseline_notes("Hladis", "m2or", "transductive", got, None, "AUROC")
     assert any("NOT in any matching run" in n for n in notes)
+
+
+# ------------------------------------------------------- matching the molecule source
+
+def _mol_run(tmp, pool, name, ds, family, mol, level, task="regression"):
+    """One insect Hladis run: the three of them differ ONLY in the molecule npz."""
+    files = {"chemberta": f"chemberta_77m_{ds}.npz", "ecfp": f"ecfp_{ds}.npz",
+             "gin": f"gin_supervised_contextpred_{ds}.npz"}
+    d = tmp / pool / name
+    d.mkdir(parents=True)
+    (d / "config.json").write_text(json.dumps(dict(
+        regime="ofm", dataset=ds, split_family=family, task=task, tune_boost=False,
+        sources=[f"cls=hladis:esm1b_650m_mean_{ds}.npz:1:20000",
+                 f"prot=gin:esm1b_650m_mean_{ds}.npz",
+                 # the loader TYPE is `gin` for every one of them; only the FILE differs
+                 f"mol=gin:data/embeddings/molecules/{files[mol]}"])), encoding="utf-8")
+    pd.DataFrame([dict(repeat=r, kind="combo", name=n, R2=level + off)
+                  for r in (1, 2, 3, 4, 5)
+                  for n, off in (("cls", -0.9), ("cls+prot+mol", 0.0))]
+                 ).to_csv(d / "metrics.csv", index=False)
+    return d
+
+
+def test_the_molecule_source_is_read_from_the_file_not_the_loader_type():
+    """Every one of these specs says `mol=gin:`; only the path says what the embedding
+    actually is. Matching on the type would call all three GIN."""
+    cfg = dict(sources=["cls=hladis:p.npz",
+                        "mol=gin:data/embeddings/molecules/chemberta_77m_cc.npz"])
+    assert pt.mol_source_of(cfg) == "chemberta"
+    cfg["sources"][1] = "mol=gin:data/embeddings/molecules/ecfp_cc.npz"
+    assert pt.mol_source_of(cfg) == "ecfp"
+    cfg["sources"][1] = "mol=gin:data/embeddings/molecules/gin_supervised_contextpred_cc.npz"
+    assert pt.mol_source_of(cfg) == "gin"
+    assert pt.mol_source_of(dict(sources=["cls=hladis:p.npz"])) is None
+
+
+def test_the_baseline_row_comes_from_the_table_s_own_molecule_source(tmp_path):
+    """Three runs per cell, identical but for the molecule embedding, all five folds,
+    all fixed heads. Every tiebreak below `mol source` is blind to the difference, so
+    without this the row is whichever run's file was written last."""
+    _mol_run(tmp_path, "cc-rand-molcross-fixed", "cc_rand_hladis_concatCB",
+             "cc", "rand", "chemberta", 0.660)
+    _mol_run(tmp_path, "cc-rand-molcross-fixed", "cc_rand_hladis_concatECFP",
+             "cc", "rand", "ecfp", 0.641)
+    _mol_run(tmp_path, "cc-rand-molcross-fixed", "cc_rand_hladis_concatGIN",
+             "cc", "rand", "gin", 0.665)
+    runs = pt.find_runs(tmp_path, "hladis")
+    assert len(runs) == 3
+    for want, expect in (("chemberta", 0.660), ("ecfp", 0.641), ("gin", 0.665)):
+        got = pt.baseline_row(runs, "cc", "transductive", ["R2"], "regression",
+                              combo="cls+prot+mol", mol_source=want)
+        assert got["run"]["mol_source"] == want
+        assert got["mol_mismatch"] is False
+        assert float(got["frame"]["R2"].iloc[0]) == pytest.approx(expect)
+
+
+def test_a_cell_with_no_run_on_this_source_says_so_rather_than_swapping_quietly(tmp_path):
+    """Falling back is right -- a row is better than a hole -- but a ChemBERTa table
+    silently carrying an ECFP baseline is the exact mistake this file exists to stop."""
+    _mol_run(tmp_path, "cc-rand-molcross-fixed", "cc_rand_hladis_concatECFP",
+             "cc", "rand", "ecfp", 0.641)
+    got = pt.baseline_row(pt.find_runs(tmp_path, "hladis"), "cc", "transductive",
+                          ["R2"], "regression", combo="cls+prot+mol",
+                          mol_source="chemberta")
+    assert got["mol_mismatch"] is True and got["run"]["mol_source"] == "ecfp"
+    notes = pt._baseline_notes("Hladis", "cc", "transductive", got, None, "R2")
+    assert any("while this table is on chemberta" in n for n in notes)

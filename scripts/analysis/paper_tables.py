@@ -129,6 +129,13 @@ COMBO_PREFERENCE = ["cls+mol", "cls"]
 # "does the graph REPLACE ESM" -- so the two live in one table only with that said out
 # loud, which is what `_baseline_notes` does.
 PAPER_COMBO = {"hladis": "cls+prot+mol"}
+# How to read a molecule source off an ensembler run. The FILE decides, not the source
+# TYPE: a spec reads `mol=gin:data/embeddings/molecules/chemberta_77m_cc.npz`, where
+# `gin` is only the npz loader and the actual embedding is ChemBERTa. Matching on the
+# type would put a ChemBERTa row in the ECFP table and never say a word.
+MOL_FINGERPRINT = {"chemberta": "chemberta",
+                   "gin": "gin_supervised_contextpred",
+                   "ecfp": "ecfp_"}
 
 
 # ------------------------------------------------------------------ the v8 grid rows
@@ -162,6 +169,23 @@ def grid_rows(df, ds, regime, alphas, metrics):
 
 
 # --------------------------------------------------------------- the ensembler rows
+
+def mol_source_of(cfg):
+    """Which molecule embedding an ensembler run was fed, or None if it is unreadable.
+
+    This matters more than it looks. The insect Hladis pools carry three runs per cell
+    -- concatCB, concatECFP, concatGIN -- identical in every other respect. Picking
+    between them by file mtime, which is what any tiebreak on "newest" amounts to, puts
+    whichever finished last into a table whose other rows are on one fixed source."""
+    for spec in (cfg.get("sources") or []):
+        spec = str(spec)
+        if not spec.lower().startswith("mol="):
+            continue
+        for name, mark in MOL_FINGERPRINT.items():
+            if mark in spec.lower():
+                return name
+    return None
+
 
 def _scope_of(cfg):
     """The (dataset, regime) an ensembler run belongs to, or None if it is not one of
@@ -198,6 +222,7 @@ def find_runs(root, keyword):
             continue
         out.append(dict(run=cfg_path.parent, pool=cfg_path.parent.parent.name,
                         dataset=scope[0], regime=scope[1], cfg=cfg,
+                        mol_source=mol_source_of(cfg),
                         task=cfg.get("task") or ("regression"
                                                  if cfg.get("regime") == "ofm"
                                                  else "classification"),
@@ -205,7 +230,7 @@ def find_runs(root, keyword):
     return out
 
 
-def baseline_row(runs, ds, regime, metrics, task, combo=None):
+def baseline_row(runs, ds, regime, metrics, task, combo=None, mol_source=None):
     """One baseline row: the newest matching run, its combo, its per-split values.
 
     Newest by mtime, because a rerun of the same pool is a correction of the earlier
@@ -225,23 +250,26 @@ def baseline_row(runs, ds, regime, metrics, task, combo=None):
     # Without that, "the run with the most splits" can win and then silently fall back
     # to a different construction than the one requested.
     #
-    #   1. does it offer the requested combo
-    #   2. how many splits it has        -- a one-fold probe is not a table row
-    #   3. fixed head over tuned         -- the sweep's rows are fixed-head
-    #   4. newest, only to break a tie   -- otherwise the row depends on launch order
+    #   1. same molecule embedding as the table  -- else the row is from another column
+    #   2. does it offer the requested combo
+    #   3. how many splits it has        -- a one-fold probe is not a table row
+    #   4. fixed head over tuned         -- the sweep's rows are fixed-head
+    #   5. newest, only to break a tie   -- otherwise the row depends on launch order
     scored = []
     for r in cand:
         d = _read(r)
         if d.empty:
             continue
+        same_mol = bool(mol_source and r.get("mol_source") == mol_source)
         has = bool(combo and "name" in d.columns and combo in set(d["name"]))
-        scored.append((1 if has else 0,
+        scored.append((1 if same_mol else 0,
+                       1 if has else 0,
                        int(d["repeat"].nunique()),
                        0 if r["tuned"] else 1,
                        (r["run"] / "metrics.csv").stat().st_mtime, r, d))
     if not scored:
         return None
-    *_, r, d = max(scored, key=lambda x: x[:4])
+    *_, r, d = max(scored, key=lambda x: x[:5])
 
     offered = sorted(set(d["name"])) if "name" in d.columns else []
     requested = bool(combo)
@@ -258,6 +286,8 @@ def baseline_row(runs, ds, regime, metrics, task, combo=None):
                 n_runs=len(cand),
                 requested=requested,
                 missed=bool(combo and combo not in offered),
+                wanted_mol=mol_source,
+                mol_mismatch=bool(mol_source and r.get("mol_source") != mol_source),
                 carries_prot="prot" in str(pick or ""))
 
 
@@ -474,7 +504,7 @@ def build(df, args):
             for name, runs in runs_by_baseline.items():
                 label = BASELINE_LABEL.get(name, name)
                 got = baseline_row(runs, ds, regime, metrics, task,
-                                   combo_for(name, args))
+                                   combo_for(name, args), args.mol_source)
                 if got is None:
                     rows.append(dict(model=label, n=0, source="absent",
                                      **{m: None for m in metrics}))
@@ -525,10 +555,12 @@ def _baseline_notes(label, ds, regime, got, boost, of_record):
     shared = len(set(theirs) & set(ours))
     bits = [f"{r['pool']}/{r['run'].name}"]
     if got["n_runs"] > 1:
-        bits.append(f"picked from {got['n_runs']} matching runs by most splits")
+        bits.append(f"1 of {got['n_runs']} candidate runs, chosen by "
+                    f"molecule source, then combo, then splits")
     bits.append(f"combo {got['combo']}"
                 + (f" (of {', '.join(got['offered'])})"
                    if len(got["offered"]) > 1 else ""))
+    bits.append(f"mol {r.get('mol_source') or '?'}")
     bits.append("head TUNED -- not comparable to the sweep's fixed head"
                 if r["tuned"] else "head fixed")
     if not shared:
@@ -537,6 +569,13 @@ def _baseline_notes(label, ds, regime, got, boost, of_record):
         bits.append(f"rests on {theirs} while the sweep rows rest on {ours} -- "
                     f"only {shared} split(s) in common")
     out = [f"{label} @ {ds}/{regime}: " + "; ".join(bits)]
+    if got["mol_mismatch"]:
+        theirs = got["run"].get("mol_source") or "an unreadable source"
+        out.append(
+            f"!! {label} @ {ds}/{regime} was fed {theirs} molecules while this table is "
+            f"on {got['wanted_mol']} -- no run on {got['wanted_mol']} was found for "
+            f"this cell, so the row comes from a different column of the study. "
+            f"Run `--audit` to see what else is there.")
     if got["missed"]:
         out.append(
             f"!! {label} @ {ds}/{regime}: the combo you asked for is NOT in any matching "
@@ -591,7 +630,8 @@ def audit(args):
         for ds in DATASET_ORDER:
             for regime in REGIME_ORDER:
                 got = baseline_row(find_runs(root, name.lower()), ds, regime,
-                                   [], ag.TASK[ds], combo_for(name, args))
+                                   [], ag.TASK[ds], combo_for(name, args),
+                                   args.mol_source)
                 if got:
                     chosen[(str(got["run"]["run"]), got["combo"])] = f"{ds}/{regime}"
         print(f"\n  {label}")
@@ -610,7 +650,8 @@ def audit(args):
             head = ("TUNED" if cfg.get("tune_boost") else "fixed")
             print(f"    {pool}/{run.name}"
                   + (f"   [{scope[0]}/{scope[1]}]" if scope else "")
-                  + f"   head {head}" + ("   " + "; ".join(why) if why else ""))
+                  + f"   mol {mol_source_of(cfg) or '?'}   head {head}"
+                  + ("   " + "; ".join(why) if why else ""))
             if d.empty:
                 print("        (no combo rows)")
                 continue

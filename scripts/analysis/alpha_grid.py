@@ -92,10 +92,16 @@ def load(root=DEFAULT_ROOT, mol_source=None, nodes="onehot", dataset=None, regim
          variant=None, seed=None, drop_failed=True):
     """Every metrics CSV under `root` as one frame, filtered by the notebook's knobs.
 
-    `nodes` defaults to "onehot" because that is the only setting in which alpha is an
-    honest fraction of structure: with ESM node features the protein embedding still
-    reaches the receptor vector through message passing at alpha=1, so the dial has no
-    upper end. Pass `nodes=None` to look at an older ESM-node series anyway.
+    `nodes` defaults to "onehot" because that is the only setting in which the v8 gate's
+    alpha is an honest fraction of structure: with ESM node features the protein
+    embedding still reaches the receptor vector through message passing at alpha=1, so
+    that dial has no upper end. Pass `nodes=None` to look at an older ESM-node series
+    anyway, and `nodes="nodedial"` for the v9 runs.
+
+    THE TWO DIALS DO NOT MIX. On a v9 run alpha is `prot_mix` and runs the other way --
+    alpha=0 is receptor identity alone, alpha=1 is the legacy graph -- so a frame
+    holding both would put opposite meanings on one axis. The default keeps them apart;
+    if you widen `nodes`, split on it before plotting anything.
 
     `seed` selects the MODEL seed and defaults to every one present -- unlike the
     headline table, which pins 42 to stay line-for-line comparable with the published
@@ -363,23 +369,33 @@ def crossover(geo):
 
 
 def anchor_check(df, tol=0.05):
-    """At alpha=0 the receptor vector is a frozen rotation of the very ESM that `boost`
-    reads raw, so the two are the same information through two different readers and
-    must nearly agree. A gap wider than `tol` means the anchor is wrong -- the rank
-    truncation, the normalisation, or the branch itself -- and every alpha above it
-    inherits the fault. This is the grid's own smoke test, not a result."""
+    """Each dial's END has a model it must reproduce. This is the grid's own smoke test.
+
+    v8 GATE at alpha=0 the receptor vector is a frozen rotation of the very ESM that
+             `boost` reads raw -- the same information through two different readers, so
+             the two must nearly agree.
+    v9 NODES at alpha=1 the node features ARE the embedding file, so the run IS the
+             legacy graph and must land on the `graph_legacy` arm.
+
+    A gap wider than `tol` means that end is not what it claims, and every position
+    along the dial inherits the fault. Which end is checked follows the `nodes` tag, so
+    a v9 file is never audited against v8's expectation -- the two dials run in opposite
+    directions and the wrong check would fail on a perfectly good run."""
     rows = []
     for s, g in df.groupby("series", sort=True):
         m = OF_RECORD[TASK[g.dataset.iloc[0]]]
         if m not in g.columns:
             continue
-        a0 = g[(g.arm == "gate") & np.isclose(g.alpha.astype(float), 0.0)]
-        bo = g[g.arm == "boost_full"]
-        if a0.empty or bo.empty:
+        nodedial = str(g["nodes"].iloc[0]) == "nodedial"
+        end, ref_arm = (1.0, "graph_legacy") if nodedial else (0.0, "boost_full")
+        q = g[(g.arm == "gate") & np.isclose(g.alpha.astype(float), end)]
+        ref = g[g.arm == ref_arm]
+        if q.empty or ref.empty:
             continue
-        va, _, na = ci(a0[m])
-        vb, _, nb = ci(bo[m])
-        rows.append(dict(series=s, metric=m, alpha0=va, boost=vb, gap=va - vb,
+        va, _, na = ci(q[m])
+        vb, _, nb = ci(ref[m])
+        rows.append(dict(series=s, metric=m, end=f"alpha={end:g}", against=ref_arm,
+                         value=va, reference=vb, gap=va - vb,
                          n=min(na, nb), ok=bool(abs(va - vb) <= tol)))
     return pd.DataFrame(rows)
 

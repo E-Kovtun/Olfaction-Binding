@@ -313,6 +313,16 @@ def parse_source_arg(raw: str):
         # the gate on this is what makes alpha an honest fraction of structure.
         if len(parts) > 13 and parts[13]:
             kwargs["onehot_nodes"] = parts[13] not in ("0", "false", "False")
+        # field 14: v9 node dial. Blank = the node features are the embedding file.
+        # x_prot = mu + rho*centred(ESM) + (1-rho)*centred(random unit vector per
+        # receptor); 1 = the legacy graph exactly, 0 = receptor identity and nothing
+        # else. A DIFFERENT axis from field 12 -- that gates the output, this moves the
+        # input -- and it runs the other way round. See GnnSignedExtractor.prot_mix.
+        if len(parts) > 14 and parts[14]:
+            kwargs["prot_mix"] = float(parts[14])
+        # field 15: which draw of the identity vectors (default 0).
+        if len(parts) > 15 and parts[15]:
+            kwargs["mix_seed"] = int(parts[15])
         return name, _factory(type_)(name=name, **kwargs)
 
     if type_ in _GNNLORA_TYPES:

@@ -331,10 +331,16 @@ def _graph_row(arm, alpha, fold, seed, ds, P, args):
     """One trained graph -> the cls+mol boost feature -> metrics + geometry."""
     task = TASK[ds]
     pp, mp = paths(ds, args)
+    dial = getattr(args, "dial", "gate")
+    knob = ({"alpha": alpha} if dial == "gate" else
+            {"prot_mix": alpha, "mix_seed": args.mix_seed,
+             "mix_renorm": not args.no_mix_renorm})
     ext = GnnSignedExtractor(
         name="cls", protein_path=pp, molecule_path=mp, **VARIANTS[args._variant],
-        task=task, n_models=args.n_models, epochs=args.epochs,
-        emit="prot", alpha=alpha, onehot_nodes=(args.nodes == "onehot"))
+        task=task, n_models=args.n_models, epochs=args.epochs, emit="prot",
+        # the v9 dial replaces the node features itself, so `onehot_nodes` must be off
+        # there -- its rho=0 end IS the one-hot arm, and the extractor refuses both
+        onehot_nodes=(args.nodes == "onehot" and dial == "gate"), **knob)
     Zp_tr, Zp_va, Zp_te = ext.fit_transform(P["pairs"], P["tr"], P["va"], P["te"], seed)
     pred = train_boost(np.concatenate([Zp_tr, P["Xm_tr"]], 1), P["y_tr"],
                        np.concatenate([Zp_te, P["Xm_te"]], 1),
@@ -366,7 +372,8 @@ def _graph_row(arm, alpha, fold, seed, ds, P, args):
     _dump(args, ds, args._regime, arm, alpha, fold, seed, **dump)
     return _row(arm, alpha, fold, seed, n_receptors=len(P["order"]),
                 k_pca=int(getattr(ext, "_k_pca", 0)), variant=args._variant,
-                mol_source=args.mol_source, nodes=args.nodes,
+                mol_source=args.mol_source, nodes=args.nodes, dial=dial,
+                mix_seed=(args.mix_seed if dial == "nodes" else ""),
                 **_score(P, pred, task), **geo)
 
 
@@ -436,7 +443,13 @@ def out_path(ds, regime, args):
     Column: everything else, the seed included, so one file accumulates the whole seed
     grid and stays resumable across separate invocations."""
     variant = args.variant or DEFAULT_VARIANT[ds]
-    tag = "" if args.nodes == "esm" else f"_{args.nodes}"
+    # The v9 dial gets its own tag, and it is not optional: `alpha` means the OPPOSITE
+    # thing on the two dials (v8 runs structure -> function as it rises, v9 runs
+    # function -> structure), so a file that mixed them would be unreadable and would
+    # look fine.
+    tag = "" if getattr(args, "dial", "gate") == "gate" else "_nodedial"
+    tag += "" if args.nodes == "esm" or getattr(args, "dial", "gate") == "nodes" \
+        else f"_{args.nodes}"
     if args.mol_source != UNTAGGED_MOL:
         tag = f"_{args.mol_source}{tag}"
     if ds == "m2or":
@@ -501,7 +514,10 @@ def sweep(ds, regime, args, dash=None):
     jobs = plan(reps, args, done)
 
     pp, mp = paths(ds, args)
+    ends = ("a=0 structure alone -> a=1 the graph alone" if args.dial == "gate"
+            else "a=0 receptor identity alone -> a=1 the legacy graph (ESM nodes)")
     print(f"\n=== {ds.upper()} / {regime} ({FAMILY[ds][regime]}) ===\n"
+          f"    dial {args.dial}: {ends}\n"
           f"    repeats {reps}  seeds {args.seeds}  alphas {args.alphas}  "
           f"legacy {args.legacy}\n"
           f"    task {TASK[ds]}  nodes {args.nodes}  variant {args._variant} "
@@ -689,6 +705,29 @@ def main():
     ap.add_argument("--epochs", type=int, default=900)
     ap.add_argument("--n-perm", type=int, default=200,
                     help="permutations per geometry null; 0 skips the nulls")
+    ap.add_argument("--dial", choices=["gate", "nodes"], default="gate",
+                    help="WHICH KNOB --alphas moves.\n"
+                         "  gate  (v8) the graph's OUTPUT against a frozen ESM branch: "
+                         "z_prot = (1-a)*frozen_SVD(ESM) + a*graph. a=0 is structure "
+                         "alone, a=1 the graph alone. Use with --nodes onehot, which is "
+                         "what makes a an honest fraction of structure.\n"
+                         "  nodes (v9) the graph's INPUT: x_prot = mu + a*centred(ESM) "
+                         "+ (1-a)*centred(one fixed near-orthogonal vector per "
+                         "receptor). a=1 IS the legacy graph, a=0 is a graph over "
+                         "receptor identity alone. NOTE THE DIRECTION IS REVERSED "
+                         "relative to the gate, and --nodes is ignored because this "
+                         "dial sets the node features itself")
+    ap.add_argument("--mix-seed", type=int, default=0,
+                    help="--dial nodes: which draw of the identity vectors. Not the "
+                         "model seed -- who a receptor is should not change with the "
+                         "training run -- but sweeping it checks that no result rests "
+                         "on one lucky set of directions")
+    ap.add_argument("--no-mix-renorm", action="store_true",
+                    help="--dial nodes: skip the rescaling that holds the mixture's "
+                         "centred spread constant. Off, the middle of the dial is "
+                         "quieter than both ends by sqrt(a^2+(1-a)^2) and any dip there "
+                         "is an artefact of the parameterisation -- which is what this "
+                         "flag exists to demonstrate")
     ap.add_argument("--nodes", choices=["esm", "onehot"], default="esm",
                     help="receptor NODE features. `onehot` removes ESM from the graph "
                          "entirely, so with the gate on it reaches the receptor vector "

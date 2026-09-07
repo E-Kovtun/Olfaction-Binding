@@ -102,6 +102,133 @@ RTYPE_NEG = (PROT, "rev_no_binds", MOL)
 
 # --------------------------------------------------------------------------- graph plumbing (no model logic)
 
+
+# --------------------------------------------------------------------------- v9 dial
+# The v9 dial moves the receptor NODE FEATURES between the two graphs we already know,
+# instead of gating the graph's OUTPUT the way v8 does:
+#
+#     x_prot(rho) = mu + rho * centred(ESM) + (1 - rho) * centred(identity vectors)
+#
+#     rho = 1   the node features ARE the embedding file -- the legacy graph, exactly
+#     rho = 0   one fixed random vector per receptor, near-orthogonal to every other:
+#               identity and nothing else, which is a one-hot in all but coordinates
+#
+# Both ends were already reachable (`onehot_nodes` and the plain extractor); what was
+# missing was the road between them, because "half a one-hot" has no meaning as a
+# discrete object. Random near-orthogonal vectors give it one: they live in the same
+# space as ESM, so the two can be mixed continuously, and in 1280 dimensions n random
+# directions are mutually near-perpendicular (expected |cos| ~ 1/sqrt(d) = 0.028), which
+# is the property that makes them carry identity and no similarity structure.
+
+
+def _identity_vectors(receptors, dim, seed=0):
+    """One fixed unit vector per receptor, drawn once and near-orthogonal to the rest.
+
+    Keyed by the receptor NAME, not by its position: the same receptor must get the same
+    vector in every fold, every worker process and every dataset ordering, or "identity"
+    silently means something different from one cell of a sweep to the next. Python's
+    own `hash` is salted per process and cannot be used for this.
+
+    `seed` shifts the whole draw. It is deliberately NOT the model seed -- the identity
+    of a receptor is a property of the experiment, not of a training run -- but sweeping
+    it is the honest robustness check that no conclusion rests on one lucky draw.
+    """
+    import hashlib
+    X = np.empty((len(receptors), int(dim)), dtype=np.float64)
+    for i, r in enumerate(receptors):
+        h = hashlib.blake2b(str(r).encode("utf-8"), digest_size=8).digest()
+        rng = np.random.default_rng(int.from_bytes(h, "big") ^ (int(seed) & 0xFFFFFFFF))
+        X[i] = rng.standard_normal(int(dim))
+    return X / np.linalg.norm(X, axis=1, keepdims=True)
+
+
+def _centred_rms(A):
+    """Root-mean-square of a receptor cloud about its own centre, per receptor."""
+    return float(np.sqrt((A ** 2).sum(1).mean())) if len(A) else 0.0
+
+
+def mix_protein_features(proteins, train_receptors, rho, seed=0, renorm=True):
+    """The v9 node features at dial position `rho`. Returns a new {receptor: vector}.
+
+    THREE decisions, and the first is the one that decides whether the dial is a dial or
+    a step function:
+
+    1. MATCH THE CENTRED SPREAD, NOT THE TOTAL ENERGY. Mean-pooled ESM is about 94% a
+       vector every receptor shares -- the between-receptor share of its energy is 5.6%
+       on CC and 7.2% on HC. A random vector has no common part at all: every bit of it
+       separates receptors. Scaling the two clouds to equal NORM therefore hands the
+       random end an order of magnitude more usable signal, and the mixture stops being
+       ESM almost immediately. v8 measured exactly that: with total-energy matching the
+       crossover sat at alpha ~ 0.05 and the knob was a step. So both sides are centred
+       on the TRAIN receptors and the random side is rescaled to the train ESM's centred
+       RMS -- after which rho really is the fraction of receptor-separating signal that
+       comes from structure.
+
+    2. RENORMALISE THE MIXTURE. Two independent clouds of equal spread mix to spread
+       sqrt(rho^2 + (1-rho)^2), which dips to 0.71 at rho = 0.5. Without a correction the
+       middle of the dial is quieter than both ends by construction, and any dip in the
+       curve there would be an artefact of the parameterisation rather than a finding.
+       `renorm=False` leaves it uncorrected, which is how you check that claim.
+
+    3. THE TRAIN MEAN IS THE OFFSET. It carries no between-receptor information -- a
+       constant added to every node is a bias the first linear layer absorbs -- but
+       keeping it is what makes rho = 1 the embedding file itself rather than something
+       one rescaling away from it. Fitting it on train receptors matches what the v8
+       structural anchor does; on these two regimes every receptor is warm anyway, so it
+       is a discipline rather than a fix. Note the pooled mean over ALL receptors does
+       drift slightly with rho, because a test receptor's deviation from the train
+       centre is scaled like everyone else's -- which is the point of applying one
+       fitted transform to all of them.
+
+    rho = 1 short-circuits to the input dict, so the legacy end of the dial is the legacy
+    input and not a float-error away from it.
+    """
+    rho = float(rho)
+    if not 0.0 <= rho <= 1.0:
+        raise ValueError(f"prot_mix must be in [0, 1], got {rho!r}")
+    if rho == 1.0:
+        return dict(proteins)
+    recs = sorted(proteins)
+    E = np.stack([np.asarray(proteins[r], dtype=np.float64) for r in recs])
+    want = set(map(str, train_receptors or []))
+    tr = [i for i, r in enumerate(recs) if str(r) in want] or list(range(len(recs)))
+
+    mu = E[tr].mean(0)
+    Ec = E - mu
+    s_esm = _centred_rms(Ec[tr])
+
+    R = _identity_vectors(recs, E.shape[1], seed)
+    Rc = R - R[tr].mean(0)
+    s_rand = _centred_rms(Rc[tr])
+    if s_rand > 1e-12:
+        Rc = Rc * (s_esm / s_rand)
+
+    Z = rho * Ec + (1.0 - rho) * Rc
+    if renorm:
+        s_mix = _centred_rms(Z[tr])
+        if s_mix > 1e-12:
+            Z = Z * (s_esm / s_mix)
+    out = mu + Z
+    return {r: out[i].astype(np.float32) for i, r in enumerate(recs)}
+
+
+
+def _identity_overlap(proteins, rho):
+    """How one-hot the rho=0 end really is, as a printed number.
+
+    Random directions are only NEARLY orthogonal, and how nearly depends on how many
+    receptors are packed into the dimension: 24 vectors in 1280-d are essentially a
+    basis, 1237 are not quite. The largest off-diagonal cosine is the honest statement
+    of that, and it belongs in the log rather than in a footnote nobody reads."""
+    recs = sorted(proteins)
+    d = int(np.asarray(next(iter(proteins.values()))).shape[-1])
+    R = _identity_vectors(recs, d)
+    C = R @ R.T
+    np.fill_diagonal(C, 0.0)
+    return (f"identity vectors: {len(recs)} in {d}-d, |cos| mean "
+            f"{np.abs(C).mean():.3f} max {np.abs(C).max():.3f}")
+
+
 def _build_universe(pairs: pd.DataFrame, all_idx, proteins: dict, molecules: dict):
     """Local node-id maps + initial (mean-pooled) feature tensors for every
     molecule/protein referenced anywhere in train/val/test for this call."""
@@ -522,6 +649,22 @@ def _run_models(ext, pairs: pd.DataFrame, train_idx, val_idx, test_idx, seed: in
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     all_idx = np.concatenate([train_idx, val_idx, test_idx])
+    if getattr(ext, "prot_mix", None) is not None and ext._anchor_proteins is None:
+        # v9: the node features move along the dial. The originals are kept aside for
+        # the same reason the one-hot swap keeps them -- the v8 gate's frozen branch is
+        # built from ESM, and an SVD of the mixture would quietly make that axis mean
+        # something else. The two dials are independent and may be combined; neither
+        # reads the other's value.
+        ext._anchor_proteins = ext._proteins
+        tr_recs = pd.unique(pairs.iloc[train_idx]["receptor"])
+        ext._proteins = mix_protein_features(
+            ext._anchor_proteins, tr_recs, ext.prot_mix,
+            seed=getattr(ext, "mix_seed", 0),
+            renorm=getattr(ext, "mix_renorm", True))
+        diag = _identity_overlap(ext._anchor_proteins, ext.prot_mix)
+        print(f"  {ext.name}: v9 node dial rho={ext.prot_mix:g} over "
+              f"{len(ext._proteins)} receptors (rho=1 -> the embedding file itself, "
+              f"rho=0 -> one fixed near-orthogonal vector each); {diag}", flush=True)
     if getattr(ext, "onehot_nodes", False) and ext._anchor_proteins is None:
         # Swap the receptor NODE features for an identity over exactly the receptors
         # the embedding file covers -- same universe, same edges, only the structural
@@ -710,6 +853,24 @@ class GnnSignedExtractor:
     # With one-hot nodes the only route is the branch, and alpha=1 contains no
     # structural information whatsoever.
     onehot_nodes: bool = False
+    # v9 NODE DIAL (default None = the node features are the embedding file, untouched).
+    #   x_prot = mu + rho*centred(ESM) + (1 - rho)*centred(one fixed random unit vector
+    #                                                      per receptor)
+    # rho = 1 is the legacy graph exactly; rho = 0 is a graph over receptor IDENTITY and
+    # nothing else -- a one-hot in all but coordinates, and near-orthogonal because n
+    # random directions in 1280-d are. This is a different dial from `alpha`: that one
+    # gates the graph's OUTPUT against a frozen ESM branch and runs structure -> function
+    # as it rises, this one moves the graph's INPUT and runs function -> structure. They
+    # are independent and may be set together; neither reads the other.
+    prot_mix: float | None = None
+    # Which draw of the identity vectors. NOT the model seed -- who a receptor is should
+    # not change with the training run -- but sweeping it checks no result rests on one
+    # lucky set of directions.
+    mix_seed: int = 0
+    # Rescale the mixture to constant centred spread. Off, the middle of the dial is
+    # quieter than both ends by sqrt(rho^2 + (1-rho)^2), and a dip there would be an
+    # artefact of the parameterisation. See `mix_protein_features`.
+    mix_renorm: bool = True
     pooling: str = "signed_sage"
     dgi_weight: float = 0.0            # >0 enables the DeepGraphInfomax auxiliary loss
     dgi_scope: str = "shared"          # "shared" (mol+prot) or "prot"
@@ -727,6 +888,15 @@ class GnnSignedExtractor:
                              f"got {self.k_mode!r}")
         if self.alpha is not None and not (0.0 <= float(self.alpha) <= 1.0):
             raise ValueError(f"alpha must be in [0, 1] or None, got {self.alpha!r}")
+        if self.prot_mix is not None and not (0.0 <= float(self.prot_mix) <= 1.0):
+            raise ValueError(f"prot_mix must be in [0, 1] or None, got {self.prot_mix!r}")
+        if self.prot_mix is not None and self.onehot_nodes:
+            # Both replace the receptor node features, so one would silently win. They
+            # also mean nearly the same thing at one end -- prot_mix=0 IS the one-hot
+            # arm, up to a rotation -- which is exactly why picking by accident is bad.
+            raise ValueError("prot_mix and onehot_nodes both replace the receptor node "
+                             "features; prot_mix=0 is the one-hot end of that dial, so "
+                             "set one or the other, never both")
         if self.dgi_scope not in ("shared", "prot"):
             raise ValueError(f"dgi_scope must be 'shared' or 'prot', got {self.dgi_scope!r}")
         if self.edge_center not in ("global", "per_receptor"):

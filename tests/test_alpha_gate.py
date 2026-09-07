@@ -9,6 +9,14 @@ Everything here is CPU-only and tiny; the readout is RSA, the same cosine-rank
 correlation the mechanism holdout scores with, so "same geometry" means the same
 thing it means in the results.
 """
+import pytest
+from conftest import torch_geometric_is_stubbed
+
+# these build and forward-pass a real _SignedSage, so an import stub is
+# not enough -- skip rather than fail on the stub's no-op layers
+pytestmark = pytest.mark.skipif(torch_geometric_is_stubbed(),
+                                reason="needs a real torch_geometric")
+
 import numpy as np
 import pytest
 

@@ -58,7 +58,11 @@ METRIC_SETS = METRIC_NAMES
 OF_RECORD = {"regression": "R2", "classification": "AUROC"}
 # Filename suffixes, peeled from the right in the order `out_path` appends them:
 # metrics_{ds}_{family}[_{variant}][_{molsource}][_onehot].csv
-KNOWN_NODES = {"onehot"}
+# `nodedial` is the v9 run: its receptor node features ARE the dial, so it belongs to
+# the same filename slot as `onehot`. Leaving it out is not a cosmetic miss -- an
+# unrecognised tag makes the family unparseable and the whole file is dropped with one
+# counted line, which is how a finished sweep reads as an empty directory.
+KNOWN_NODES = {"onehot", "nodedial"}
 KNOWN_MOL = {"chemberta", "gin", "ecfp"}
 KNOWN_VARIANT = {"q99greedy", "q0cov"}
 REGIME_OF = {"rand": "transductive", "transductive": "transductive",

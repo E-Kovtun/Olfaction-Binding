@@ -111,11 +111,18 @@ def parse_name(stem):
     return ds, "_".join(rest), nodes, mol, variant
 
 
-def load(root, args):
-    """Every metrics CSV as one long frame, tagged with what its filename says."""
+def load(root, args, prefix="metrics_"):
+    """Every metrics CSV as one long frame, tagged with what its filename says.
+
+    `prefix` picks WHICH SPLIT is being read: "metrics_" is the sweep's own test
+    scores, "val_metrics_" the validation rescore written by `val_rescore.py`. They are
+    separate files on purpose -- one glob can never pick up the other by accident, and
+    a frame that mixed them would put a number chosen on val beside one reported on
+    test with nothing in the row to tell them apart.
+    """
     frames, skipped = [], []
-    for p in sorted(pathlib.Path(root).glob("metrics_*.csv")):
-        ds, family, nodes, mol, variant = parse_name(p.stem)
+    for p in sorted(pathlib.Path(root).glob(f"{prefix}*.csv")):
+        ds, family, nodes, mol, variant = parse_name(p.stem[len(prefix):])
         if family not in REGIME_OF:
             skipped.append(p.name)
             continue
@@ -132,7 +139,7 @@ def load(root, args):
     if skipped:
         print(f"  ({len(skipped)} file(s) from no recognised split family, ignored)")
     if not frames:
-        raise SystemExit(f"no metrics_*.csv under {root}")
+        raise SystemExit(f"no {prefix}*.csv under {root}")
     df = pd.concat(frames, ignore_index=True)
     df.loc[:, "variant_tag"] = df["variant_tag"].fillna("").astype(str)
     # A blank variant means "written before the column existed", which is always the

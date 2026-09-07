@@ -60,6 +60,7 @@ if str(_root) not in sys.path:
 
 from scripts.analysis import alpha_grid as ag                    # noqa: E402
 
+NL = chr(10)
 # One row of one of the three tables.
 CELL = ["dataset", "regime", "mol_source"]
 DATASET_LABEL = {"cc": "Carey", "hc": "Hallem", "m2or": "M2OR"}
@@ -165,6 +166,69 @@ def one_se(rk):
     lead = gate.iloc[0]
     cut = lead.mean_rank + (lead.se if np.isfinite(lead.se) else 0.0)
     return gate[gate.mean_rank <= cut], cut
+
+
+def chosen_alpha(df, metric_of):
+    """The dial position the leader board picks, and the set it is tied with.
+
+    The leader alone is not the answer -- `one_se` exists because an argmax out of a
+    flat set is noise-chasing -- so both come back and the tied set is printed. What
+    the leader IS good for is the confirmation slice below: SOME alpha has to be
+    carried to test, and carrying the val argmax is the strictest version of the
+    procedure (no human eye in the loop between the two splits)."""
+    rk = ranked(scores(df, metric_of))
+    gate = rk[rk.alpha.notna()]
+    if gate.empty:
+        return None, gate
+    tied, _ = one_se(rk)
+    return float(gate.iloc[0].alpha), tied
+
+
+def confirm(val_df, test_df, args):
+    """Report the chosen alpha on TEST -- the only place test is allowed to be read.
+
+    Two numbers matter and both are printed. The first is what the paper would quote.
+    The second is the OPTIMISM AVOIDED: how much better the best-on-test alpha looks
+    than the one val picked. That gap is exactly what choosing on test would have
+    silently added to the claim, and printing it is the difference between a protocol
+    and an assertion that one was followed."""
+    metric_of = _metric_of(test_df, args)
+    a = args.at_alpha if args.at_alpha is not None else chosen_alpha(val_df, metric_of)[0]
+    if a is None:
+        print(f"{NL}  nothing to confirm: the val frame holds no gate arm")
+        return
+    src = "you asked for it" if args.at_alpha is not None else "chosen on val"
+    print(f"{NL}{'=' * 78}{NL}CONFIRMATION SLICE: alpha = {a:g} ({src}), read on TEST"
+          f"{NL}{'=' * 78}")
+    sc = scores(test_df, metric_of)
+    adv = advantage(test_df, metric_of)
+    lab = f"a={a:g}"
+    print(f"{NL}  {'cell':<34}{'metric':>9}{'value':>9}{'vs boost':>19}"
+          f"{'rank on test':>14}{'best there':>12}")
+    print("  " + "-" * 95)
+    for key, g in sc.groupby(CELL, sort=True):
+        cell = dict(zip(CELL, key))
+        name = (f"{DATASET_LABEL.get(cell['dataset'], cell['dataset'])}/"
+                f"{cell['regime'][:5]}/{cell['mol_source']}")
+        m = metric_of[cell["dataset"]]
+        row = g[g.competitor == lab]
+        if row.empty:
+            print(f"  {name:<34}{m:>9}{'--':>9}{'not run here':>19}")
+            continue
+        v = float(row.iloc[0].value)
+        gate = g[g.alpha.notna()].sort_values("value", ascending=False)
+        rank = int((gate.value > v).sum()) + 1
+        best = float(gate.iloc[0].value)
+        d = adv[(adv.dataset == cell["dataset"]) & (adv.regime == cell["regime"])
+                & (adv.mol_source == cell["mol_source"])
+                & np.isclose(adv.alpha.astype(float), a)]
+        dtxt = ("--" if d.empty else
+                f"{float(d.iloc[0].d):+.3f} [{int(d.iloc[0].won)}/{int(d.iloc[0].n)}]")
+        print(f"  {name:<34}{m:>9}{v:>9.3f}{dtxt:>19}"
+              f"{f'{rank} of {len(gate)}':>14}{best - v:>+12.3f}")
+    print(f"{NL}  `best there` is the OPTIMISM AVOIDED: how much the luckiest alpha on "
+          f"these very folds{NL}  outscores the one val picked. Quoting that instead "
+          f"would be selection on the test set.")
 
 
 def loo(df, metric_of, args):
@@ -298,12 +362,23 @@ def report(df, args):
     print()
     print("  READ THIS BEFORE QUOTING A NUMBER")
     print("  " + "-" * 60)
-    print("    This ranking is computed on the same folds the paper reports, so the")
-    print("    winner's margin is partly the luck of those folds. Quoting the best")
-    print("    alpha's score as if alpha had been fixed in advance overstates it. If the")
-    print("    1-SE set has more than one member -- it usually will -- say in the paper")
-    print("    that alpha was fixed at the END of the dial on the argument, not tuned,")
-    print("    and let this table be the evidence that nothing was lost by doing so.")
+    if getattr(args, "select_on", "test") == "val":
+        print("    This ranking is on the VALIDATION rows, which the paper does not")
+        print("    report -- so the choice made here is legitimate and the test slice")
+        print("    below is the first and only time test is read. What it does NOT buy")
+        print("    is a sharper claim: if the 1-SE set has more than one member -- it")
+        print("    usually will -- the dial is flat there, and the honest sentence is")
+        print("    'alpha was fixed at the end of the dial, and nothing was lost'.")
+    else:
+        print("    This ranking is computed on the same folds the paper reports, so the")
+        print("    winner's margin is partly the luck of those folds. Quoting the best")
+        print("    alpha's score as if alpha had been fixed in advance overstates it. "
+              "If the")
+        print("    1-SE set has more than one member -- it usually will -- say in the "
+              "paper")
+        print("    that alpha was fixed at the END of the dial on the argument, not "
+              "tuned,")
+        print("    and let this table be the evidence that nothing was lost by doing so.")
     if not args.metric:
         alt = {"regression": "Spearman", "classification": "AUPRC"}
         tasks = {ag.TASK[d] for d in metric_of}
@@ -321,7 +396,18 @@ def main():
     ap.add_argument("--mol-source", nargs="+", default=None,
                     help="default: every source on disk, each its own cell")
     ap.add_argument("--nodes", nargs="+", default=["onehot"],
-                    choices=["esm", "onehot"])
+                    choices=["esm", "onehot", "nodedial"],
+                    help="which dial. Never two at once: alpha runs structure -> "
+                         "function on the v8 gate and function -> structure on the v9 "
+                         "node dial, so one axis would carry two meanings")
+    ap.add_argument("--select-on", choices=["val", "test"], default="val",
+                    help="WHICH SPLIT THE CHOICE IS MADE ON. `val` is the only honest "
+                         "one and needs val_rescore.py to have been run; `test` is a "
+                         "diagnostic -- it answers 'what would we have picked with "
+                         "hindsight', which is a different question and must never be "
+                         "the number the paper defends")
+    ap.add_argument("--at-alpha", type=float, default=None,
+                    help="confirm this alpha on test instead of the one val chose")
     ap.add_argument("--dataset", nargs="+", default=None)
     ap.add_argument("--regime", nargs="+", default=None,
                     choices=["transductive", "inductive"])
@@ -335,9 +421,27 @@ def main():
     ap.add_argument("--csv", default=None, help="write the per-cell scores here")
     a = ap.parse_args()
 
-    df = ag.load(root=a.root, mol_source=a.mol_source, nodes=a.nodes,
-                 dataset=a.dataset, regime=a.regime, seed=a.seed)
+    kw = dict(root=a.root, mol_source=a.mol_source, nodes=a.nodes,
+              dataset=a.dataset, regime=a.regime, seed=a.seed)
+    try:
+        df = ag.load(split=a.select_on, **kw)
+    except SystemExit:
+        if a.select_on != "val":
+            raise
+        raise SystemExit(
+            f"no val_metrics_*.csv under {a.root} -- the sweep writes TEST only."
+            f"{NL}Produce them first (one XGBoost refit per cell, no graph training):"
+            f"{NL}    python scripts/analysis/val_rescore.py --root {a.root} --dry-run"
+            f"{NL}    python scripts/analysis/val_rescore.py --root {a.root}"
+            f"{NL}Or pass --select-on test, which answers a different question: what "
+            f"hindsight would have picked.")
+    print(f"{NL}  ALPHA IS BEING CHOSEN ON: {a.select_on.upper()}"
+          + ("" if a.select_on == "val" else
+             "   <-- these are the rows the paper reports. This is the "
+             "hindsight view, not a choice."))
     report(df, a)
+    if a.select_on == "val":
+        confirm(df, ag.load(split="test", **kw), a)
     if a.csv:
         metric_of = _metric_of(df, a)
         # drop the duplicate split count the merge would otherwise emit as n_x/n_y

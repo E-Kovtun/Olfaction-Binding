@@ -73,6 +73,19 @@ modeling/
                                     artifacts that notebooks/graph/mechanism_holdout/ draws.
 
 analysis/
+  alpha_grid.py                     the alpha sweep melted: curves, geometry, paired
+                                    deltas, mean PLACES. The layer the dial notebooks
+                                    import so they compute nothing themselves
+  alpha_choice.py                   WHICH alpha to report. --select-on val is the
+                                    honest form: choose on validation, then read test
+                                    once and print the optimism that choosing on test
+                                    would have added
+  val_rescore.py                    the sweep scores TEST only. This refits the head
+                                    from each cell's dumped receptor cloud, same seed,
+                                    and scores VALIDATION -- no graph retraining. Run
+                                    it before alpha_choice --select-on val
+  paper_tables.py                   the three paper tables, one place column per metric
+  headline_table.py                 the scoreboard of record at one alpha
   summarize_runs.py                 one row per (run, combo), mean +- 95% CI,
                                     task-aware columns
   extend_runs_with_combo.py         prints the commands that add a cls+prot+mol row

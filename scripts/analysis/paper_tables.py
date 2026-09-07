@@ -100,10 +100,9 @@ REGIME_ORDER = ["transductive", "inductive"]
 # not the archive -- `headline_table.py --all-metrics` is where everything lives.
 SHOW = {"regression": ["R2", "RMSE", "Pearson", "Spearman"],
         "classification": ["AUROC", "AUPRC", "MCC", "F1"]}
-# The metrics a SMALLER value wins. Only these two appear in any table this script
-# prints, but the set is what the ranking consults, so a metric added to SHOW or passed
-# through --metrics is ranked correctly the moment it is named here.
-LOWER_IS_BETTER = {"RMSE", "MAE"}
+# The metrics a SMALLER value wins. Defined once in the base reader and imported, so
+# this table and `alpha_grid.places` can never rank a column in opposite directions.
+LOWER_IS_BETTER = ag.LOWER_IS_BETTER
 # How a (dataset, regime) of the v8 grid appears in an ensembler run's config.json.
 ENSEMBLE_SCOPE = {
     ("cc", "transductive"): dict(regime="ofm", dataset="cc", split_family="rand"),

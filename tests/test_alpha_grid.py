@@ -233,3 +233,49 @@ def test_the_v9_end_is_audited_against_legacy_not_against_boost():
     assert set(got["end"]) == {"alpha=1"} and set(got["against"]) == {"graph_legacy"}
     got8 = ag.anchor_check(df)
     assert set(got8["end"]) == {"alpha=0"} and set(got8["against"]) == {"boost_full"}
+
+
+# ------------------------------------------------------------------- places along the dial
+
+def _dial(metric="R2", vals=((0.0, 0.50), (0.5, 0.60), (1.0, 0.55)), boost=0.52,
+          legacy=0.56, folds=(1, 2, 3, 4, 5)):
+    rows = []
+    for f in folds:
+        base = dict(dataset="hc", regime="transductive", mol_source="chemberta",
+                    fold=f, seed=42, status="ok", nodes="nodedial", variant_tag="q0cov")
+        rows.append(base | {"arm": "boost_full", "alpha": np.nan, metric: boost})
+        rows.append(base | {"arm": "graph_legacy", "alpha": np.nan, metric: legacy})
+        for a, v in vals:
+            rows.append(base | {"arm": "gate", "alpha": a, metric: v})
+    return ag.add_series(pd.DataFrame(rows))
+
+
+def test_places_rank_every_alpha_against_the_reference_arms():
+    """The dial's own competitors ARE the reference arms too -- a place taken only
+    among alphas would say nothing about whether the dial beats boost at all."""
+    p = ag.places(_dial(), "R2")
+    got = dict(zip(p.competitor, p.place))
+    assert got["a=0.5"] == pytest.approx(1.0)      # 0.60, the best
+    assert got["legacy graph"] == pytest.approx(2.0)
+    assert got["a=1"] == pytest.approx(3.0)
+    assert got["boost [ESM || mol]"] == pytest.approx(4.0)
+    assert got["a=0"] == pytest.approx(5.0)
+    assert set(p["k"]) == {5} and set(p["n"]) == {5}
+
+
+def test_places_invert_for_an_error_metric():
+    """RMSE is smaller-is-better. Ranking it like a score is silent and wrong."""
+    p = ag.places(_dial(metric="RMSE", vals=((0.0, 0.90), (1.0, 0.30)),
+                        boost=0.60, legacy=0.70), "RMSE")
+    got = dict(zip(p.competitor, p.place))
+    assert got["a=1"] == pytest.approx(1.0) and got["a=0"] == pytest.approx(4.0)
+
+
+def test_places_need_a_shared_split_and_say_how_many():
+    """A competitor measured on other folds is not in the same competition; the ranking
+    falls back to the folds everyone shares rather than inventing a comparison."""
+    df = _dial()
+    df = df[~((df.arm == "gate") & np.isclose(df.alpha.astype(float), 0.5)
+              & df.fold.isin([4, 5]))]
+    p = ag.places(df, "R2")
+    assert set(p["n"]) == {3}

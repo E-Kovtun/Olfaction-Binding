@@ -61,6 +61,11 @@ OF_RECORD = {"regression": "R2", "classification": "AUROC"}
 # on it. `naive` is the constant train mean -- R2's honest zero, and AUROC 0.5.
 LEVEL_ARMS = ["boost_full", "graph_legacy", "naive"]
 
+# The metrics a SMALLER value wins. It lives here, in the base reader, so every layer
+# above ranks the same way -- `paper_tables` imports it rather than keeping a second
+# copy that could drift.
+LOWER_IS_BETTER = {"RMSE", "MAE"}
+
 GEOM_LABEL = {"rsa": "RSA - neighbour order",
               "cca": "CCA - shared linear subspace",
               "procrustes": "Procrustes - same shape"}
@@ -88,8 +93,11 @@ def _as_list(v):
     return [v] if isinstance(v, (str, int, np.integer)) else list(v)
 
 
+SPLIT_PREFIX = {"test": "metrics_", "val": "val_metrics_"}
+
+
 def load(root=DEFAULT_ROOT, mol_source=None, nodes="onehot", dataset=None, regime=None,
-         variant=None, seed=None, folds=None, drop_failed=True):
+         variant=None, seed=None, folds=None, drop_failed=True, split="test"):
     """Every metrics CSV under `root` as one frame, filtered by the notebook's knobs.
 
     `nodes` defaults to "onehot" because that is the only setting in which the v8 gate's
@@ -106,6 +114,12 @@ def load(root=DEFAULT_ROOT, mol_source=None, nodes="onehot", dataset=None, regim
     `seed` selects the MODEL seed and defaults to every one present -- unlike the
     headline table, which pins 42 to stay line-for-line comparable with the published
     series. Here more seeds simply widen the interval, and `coverage` says how many.
+
+    `split` picks WHICH HELD-OUT SET the metrics are on. "test" is the sweep's own
+    output. "val" is the validation rescore from `val_rescore.py`, and it is the only
+    frame alpha may be CHOSEN on -- choosing on "test" and then reporting "test" is
+    choosing the number and its defence from the same rows. The two live in separate
+    files with separate globs, so the frames cannot silently merge.
     """
     import argparse
     ht = _parser()
@@ -116,7 +130,11 @@ def load(root=DEFAULT_ROOT, mol_source=None, nodes="onehot", dataset=None, regim
                             regime=_as_list(regime), nodes=_as_list(nodes),
                             variant=_as_list(variant), all_variants=False,
                             all_seeds=True)
-    df = ht.load(root, ns)
+    if split not in SPLIT_PREFIX:
+        raise ValueError(f"split must be one of {sorted(SPLIT_PREFIX)}, got {split!r}")
+    df = ht.load(root, ns, prefix=SPLIT_PREFIX[split])
+    if "split" not in df.columns:
+        df = df.assign(split=split)
     if seed is not None:
         df = df[df.seed.isin(_as_list(seed))]
     if folds is not None:
@@ -268,6 +286,53 @@ def geometry(df, scale="value", by=("series",), level=0.95):
                          "--no-gate?")
     return _agg(pd.concat(out, ignore_index=True), "v",
                 by + ["geom", "ref", "alpha"], level)
+
+
+def places(df, metric, by=("series",), arms=("boost_full", "graph_legacy")):
+    """Mean place along the dial: one row per (series, competitor), 1 = best.
+
+    Every alpha AND the reference arms are ranked WITHIN each split and the ranks are
+    averaged. This is the summary that survives the fact that folds differ wildly in
+    difficulty -- a cold-molecule fold moves every competitor at once, so a curve of
+    MEANS partly plots which folds happened to be hard, while a curve of PLACES cannot.
+    Read the two side by side: where they disagree, the mean is being moved by one fold.
+
+    The ranking runs on the splits every competitor in that series shares, `n` says how
+    many those are, and `k` how many competitors were in the race -- a place of 3.0 out
+    of 5 and out of 13 are not the same statement.
+    """
+    by = list(by)
+    out = []
+    for k, g in df.groupby(by, dropna=False, sort=True):
+        key = dict(zip(by, k if isinstance(k, tuple) else (k,)))
+        if metric not in g.columns:
+            continue
+        parts = {}
+        for a, q in g[g.arm == "gate"].groupby("alpha"):
+            parts[f"a={float(a):g}"] = q.set_index(SPLIT)[metric]
+        for arm in arms:
+            q = g[g.arm == arm]
+            if not q.empty:
+                parts[ARM_LABEL.get(arm, arm)] = q.set_index(SPLIT)[metric]
+        parts = {n: pd.to_numeric(v[~v.index.duplicated()], errors="coerce").dropna()
+                 for n, v in parts.items()}
+        parts = {n: v for n, v in parts.items() if len(v)}
+        if len(parts) < 2:
+            continue
+        common = set.intersection(*(set(v.index) for v in parts.values()))
+        if not common:
+            continue
+        idx = sorted(common)
+        M = pd.DataFrame({n: v.reindex(idx) for n, v in parts.items()})
+        # descending for the usual metrics, ascending for RMSE -- ranking an error the
+        # same way as a score hands first place to the worst model and looks fine
+        R = M.rank(axis=1, ascending=metric in LOWER_IS_BETTER, method="average")
+        for name, col in R.items():
+            out.append(key | dict(
+                competitor=name,
+                alpha=float(name[2:]) if name.startswith("a=") else np.nan,
+                place=float(col.mean()), n=len(idx), k=M.shape[1]))
+    return pd.DataFrame(out, columns=by + ["competitor", "alpha", "place", "n", "k"])
 
 
 def delta_vs(df, metric, ref_arm="boost_full", arm="gate", by=("series",), level=0.95):

@@ -10,8 +10,10 @@ ledger) is archived under [`../../legacy/`](../../legacy/README.md).
 
 ```
 notebooks/graph/
-  alpha_gate/           the alpha dial: where the receptor cloud sits between
+  alpha_gate/           v8, the OUTPUT gate: where the receptor cloud sits between
                         structure and function, and what that costs in prediction
+  node_dial/            v9, the INPUT dial: the same two questions plus the choice of
+                        alpha, made on validation before test is read once
   mechanism_holdout/    ligand-class holdout: does the refined receptor transfer a
                         MECHANISM to a chemistry it never trained on?
   alternatives/         display-only readers for the quantile x criterion sweeps
@@ -86,6 +88,63 @@ The grid itself comes from `scripts/modeling/train/run_alpha_gate_sweep.py`. The
 notebook is safe to open **mid-run**: a series that has only reached its baselines keeps
 its panel and says "not run yet", and `coverage` flags a ragged dial, where some alphas
 rest on fewer splits than others and the wiggles are partly the run schedule.
+
+## `node_dial/node_dial.ipynb` -- the v9 dial, and where alpha is chosen
+
+Same two questions as `alpha_gate`, on the other dial, plus a third the v8 notebook does
+not answer. Its subject is the graph's INPUT:
+
+    x_prot(alpha) = mu + alpha * centred(ESM) + (1 - alpha) * centred(identity vector)
+
+one fixed near-orthogonal random vector per receptor, drawn once by name (blake2b, not
+`hash()` -- that is salted per process and the sweep runs a dozen workers). alpha=0 is a
+graph over receptor identity alone; alpha=1 hands back the embedding file unchanged and
+therefore IS the legacy graph.
+
+**alpha runs the OPPOSITE way to the v8 gate** -- function to structure, not structure to
+function. The `nodes` tag keeps the two apart in every reader and the loader defaults
+refuse to mix them; a frame holding both would put two meanings on one axis.
+
+Three blocks:
+
+* **Geometry** -- as in v8: alignment to raw ESM and to the train response profile under
+  RSA, CCA and Procrustes, the crossover, and the travel from end to end. If the cloud
+  does not move, no score difference along the dial can be attributed to structure.
+* **Performance** -- the metric of record, the paired advantage over boost, the whole
+  battery, and **mean place per metric** (`alpha_grid.places`) -- ranked within each split
+  and averaged, which is the summary a single hard fold cannot move. Every panel carries
+  the **repeat bar**: `|alpha=1 - legacy|`, the same model trained twice, which is this
+  cell's run-to-run floor and the ruler for every difference on the dial. It is not the
+  shaded across-fold interval -- that one is 2-30x wider and shared by every row.
+* **The choice of alpha, on VALIDATION.** alpha is a hyperparameter, so choosing it on the
+  folds the paper reports is selection on the test set. The block runs the leader board on
+  val, applies the 1-SE rule, and only then reads test once at the chosen alpha, printing
+  the gap to the luckiest alpha there as the *optimism avoided*.
+
+### The sweep writes TEST only -- run the rescore first
+
+`run_alpha_gate_sweep.py` computes `Zp_va` and uses it only to collect receptor vectors,
+so nothing on disk is a validation score. `scripts/analysis/val_rescore.py` fills that in
+**without retraining any graph**: it reloads each cell's dumped receptor cloud
+(`--dump-embeddings`, on by default), refits the boosting head on the same train rows with
+the same seed -- reproducing the estimator whose test score is already recorded -- and
+scores the val rows instead. One XGBoost fit per cell.
+
+```sh
+python scripts/analysis/val_rescore.py --root results/graph/v9_node_dial --dry-run
+python scripts/analysis/val_rescore.py --root results/graph/v9_node_dial
+python scripts/analysis/alpha_choice.py --root results/graph/v9_node_dial     --nodes nodedial --select-on val
+```
+
+`--verify` (on by default) also predicts TEST from the refit model and compares against
+the number the sweep recorded: agreement to ~1e-6 is what makes the val number
+trustworthy, and anything larger is printed loudly. The output lands in
+`val_metrics_*.csv` beside the originals -- a separate glob, so no reader can pick up one
+thinking it is the other (`alpha_grid.load(..., split="val")`).
+
+The val splits are the right shape for this. `inductive_molecule_v5` draws val molecules
+disjoint from train and test, and `our_inductive` spreads val over the same dynamic-range
+order as test, so a cold-molecule choice is made on cold-molecule evidence.
 
 ## `mechanism_holdout/split_alternatives.ipynb` -- would a different split help?
 

@@ -337,9 +337,14 @@ def audit(geo):
                          travel=float(m.max() - m.min()),
                          mono=float(spearmanr(m.index.to_numpy(),
                                               m.to_numpy()).statistic)))
+    cols = ["series", "geom", "ref", "n_alpha", "at0", "at1", "travel", "mono", "ok"]
+    if not rows:
+        # Two-point canaries land here, and so does any series still on its first
+        # alphas. A bare DataFrame() has no columns, so the caller's groupby("series")
+        # raises KeyError three frames up -- which is a crash where the honest answer is
+        # "not enough of the dial yet".
+        return pd.DataFrame(columns=cols)
     out = pd.DataFrame(rows)
-    if out.empty:
-        return out
     return out.assign(ok=np.sign(out.mono) == np.where(out.ref == "esm", -1.0, 1.0))
 
 
@@ -365,7 +370,7 @@ def crossover(geo):
         x0, x1, y0, y1 = a[i - 1], a[i], d.iloc[i - 1], d.iloc[i]
         rows.append(dict(series=k[0], geom=k[1],
                          alpha_cross=float(x0 - y0 * (x1 - x0) / (y1 - y0))))
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows, columns=["series", "geom", "alpha_cross"])
 
 
 def anchor_check(df, tol=0.05):
@@ -422,6 +427,7 @@ def _report(df, level=0.95):
     geo = geometry(df, level=level)
     aud, cross = audit(geo), crossover(geo)
     W = max([len(s) for s in df.series.unique()] + [8]) + 2
+    n_alpha = int(df.loc[df.arm == "gate", "alpha"].nunique())
 
     print("=" * (W + 76))
     print("=== ALPHA GRID")
@@ -433,9 +439,15 @@ def _report(df, level=0.95):
         print("  anchor OK everywhere" if anc.ok.all() else
               "  !! anchor off -- read nothing above alpha=0 on those rows", "\n")
 
-    print(f"  {'series':<{W}}{'geom':<12}{'vs ESM  a=0 -> a=1':>26}{'mono':>7}"
-          f"{'   ':<3}{'vs PROFILE  a=0 -> a=1':>26}{'mono':>7}{'  cross':>8}")
-    print("  " + "-" * (W + 82))
+    if aud.empty:
+        print(f"  GEOMETRY: {n_alpha} alpha(s) on the dial -- the direction check "
+              "and the crossover both need 3. The raw values are still in the "
+              "frame; a canary is read on the ENDS below, not on the shape.")
+        print()
+    if not aud.empty:
+        print(f"  {'series':<{W}}{'geom':<12}{'vs ESM  a=0 -> a=1':>26}{'mono':>7}"
+              f"{'   ':<3}{'vs PROFILE  a=0 -> a=1':>26}{'mono':>7}{'  cross':>8}")
+        print("  " + "-" * (W + 82))
     for s, g in aud.groupby("series", sort=True):
         for i, geom in enumerate(GEOMS):
             e, f = (g[(g.geom == geom) & (g.ref == r)] for r in REFS)
@@ -450,9 +462,12 @@ def _report(df, level=0.95):
             print(f"  {s if i == 0 else '':<{W}}{geom:<12}{cell(e):>26}{mono(e)}"
                   f"{'   ':<3}{cell(f):>26}{mono(f)}{xc}")
         print()
-    off = aud[~aud.ok]
-    print("  every curve travels the way the gate defines (esm falls, profile rises)"
-          if not len(off) else f"  !! {len(off)} curve(s) travel the WRONG way")
+    off = aud[~aud.ok.astype(bool)] if len(aud) else aud
+    if aud.empty:
+        pass
+    else:
+        print("  every curve travels the way the dial defines"
+              if not len(off) else f"  !! {len(off)} curve(s) travel the WRONG way")
     for r in off.head(8).itertuples():
         print(f"     {r.series:<{W}}{r.geom}/{r.ref}  mono {r.mono:+.2f}  "
               f"travel {r.travel:.3f}")
@@ -498,7 +513,11 @@ def main():
     ap.add_argument("--root", default=DEFAULT_ROOT)
     ap.add_argument("--mol-source", nargs="+", default=None)
     ap.add_argument("--nodes", nargs="+", default=["onehot"],
-                    choices=["esm", "onehot"])
+                    choices=["esm", "onehot", "nodedial"],
+                    help="which series. `onehot` is the v8 gate (alpha: structure -> "
+                         "function), `nodedial` the v9 node dial (alpha: function -> "
+                         "structure), `esm` the pre-separation runs. Do NOT pass two: "
+                         "alpha means opposite things on the first two")
     ap.add_argument("--dataset", nargs="+", default=None)
     ap.add_argument("--regime", nargs="+", default=None,
                     choices=["transductive", "inductive"])

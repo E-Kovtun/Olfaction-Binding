@@ -205,3 +205,31 @@ def test_a_blank_variant_does_not_delete_a_dataset():
     df.loc[:, "variant_tag"] = np.nan
     got = ag.add_series(df)
     assert got.series.notna().all() and got.series.nunique() == 1
+
+
+# ------------------------------------------------------------------------ the canary
+
+def test_a_two_point_dial_reads_without_crashing():
+    """The canary runs `--alphas 0 1.0`, so the shape checks have nothing to work with.
+    `audit` and `crossover` need three points and correctly return nothing -- but they
+    must return nothing WITH COLUMNS, or the reader's groupby("series") raises KeyError
+    three frames up and the first command anyone runs after a canary dies."""
+    df = _rows(alphas=(0.0, 1.0), folds=(1, 2))
+    geo = ag.geometry(df)
+    aud, cross = ag.audit(geo), ag.crossover(geo)
+    assert aud.empty and {"series", "geom", "ref", "mono", "ok"} <= set(aud.columns)
+    assert cross.empty and {"series", "geom", "alpha_cross"} <= set(cross.columns)
+    assert aud.groupby("series").ngroups == 0          # the call that used to raise
+    ag._report(df)                                     # and the whole report renders
+
+
+def test_the_v9_end_is_audited_against_legacy_not_against_boost():
+    """The two dials run in opposite directions, so the wrong end check would fail on a
+    perfectly good v9 run: its alpha=0 is receptor identity alone and has no reason to
+    land on boost."""
+    df = _rows(alphas=(0.0, 1.0))
+    v9 = df.assign(nodes="nodedial")
+    got = ag.anchor_check(ag.add_series(v9))
+    assert set(got["end"]) == {"alpha=1"} and set(got["against"]) == {"graph_legacy"}
+    got8 = ag.anchor_check(df)
+    assert set(got8["end"]) == {"alpha=0"} and set(got8["against"]) == {"boost_full"}

@@ -89,7 +89,7 @@ def _as_list(v):
 
 
 def load(root=DEFAULT_ROOT, mol_source=None, nodes="onehot", dataset=None, regime=None,
-         variant=None, seed=None, drop_failed=True):
+         variant=None, seed=None, folds=None, drop_failed=True):
     """Every metrics CSV under `root` as one frame, filtered by the notebook's knobs.
 
     `nodes` defaults to "onehot" because that is the only setting in which the v8 gate's
@@ -119,6 +119,11 @@ def load(root=DEFAULT_ROOT, mol_source=None, nodes="onehot", dataset=None, regim
     df = ht.load(root, ns)
     if seed is not None:
         df = df[df.seed.isin(_as_list(seed))]
+    if folds is not None:
+        # A two-fold canary against a five-fold series is not a comparison: on the cold
+        # regimes a single fold moves R2 by 0.1, so the difference would mostly be which
+        # rows each side happened to hold out. Restrict both to the same folds first.
+        df = df[df.fold.isin([int(f) for f in _as_list(folds)])]
     if drop_failed and "status" in df.columns:
         df = df[~df["status"].astype(str).str.startswith("failed")]
     if df.empty:
@@ -523,10 +528,14 @@ def main():
                     choices=["transductive", "inductive"])
     ap.add_argument("--seed", type=int, nargs="+", default=None,
                     help="model seed(s); default: every one on disk")
+    ap.add_argument("--folds", type=int, nargs="+", default=None,
+                    help="restrict to these splits. Use it to read a canary against a "
+                         "finished series on the folds they share")
     ap.add_argument("--level", type=float, default=0.95)
     a = ap.parse_args()
     _report(load(root=a.root, mol_source=a.mol_source, nodes=a.nodes,
-                 dataset=a.dataset, regime=a.regime, seed=a.seed), level=a.level)
+                 dataset=a.dataset, regime=a.regime, seed=a.seed, folds=a.folds),
+            level=a.level)
 
 
 if __name__ == "__main__":

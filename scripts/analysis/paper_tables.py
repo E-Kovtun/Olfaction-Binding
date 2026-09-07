@@ -402,14 +402,21 @@ def _cell(t, w=16):
     return (f"{t[0]:.3f}" + (f" +/-{t[1]:.3f}" if np.isfinite(t[1]) else "")).rjust(w)
 
 
-def render(ds, blocks, metrics, task, notes, col="mean place", w_model=16):
+DIAL_NOTE = {
+    "onehot": "   v8 gate: alpha 0 = structure alone -> 1 = the graph alone",
+    "nodedial": "   v9 node dial: alpha 0 = receptor identity alone -> 1 = ESM nodes "
+                "(legacy)",
+}
+
+
+def render(ds, blocks, metrics, task, notes, col="mean place", dial="", w_model=16):
     head = (f"  {'model':<{w_model}}{'n':>4}"
             + "".join(m.rjust(16) for m in metrics)
             + f"{col:>22}")
     print()
     print("=" * len(head))
     print(f"=== {DATASET_LABEL.get(ds, ds)}   [{task}, metric of record "
-          f"{ag.OF_RECORD[task]}]")
+          f"{ag.OF_RECORD[task]}]{dial}")
     print("=" * len(head))
     for regime, rows, rank_note in blocks:
         print(f"\n  {regime.upper()}" + (f"   ({rank_note})" if rank_note else ""))
@@ -437,7 +444,7 @@ def render(ds, blocks, metrics, task, notes, col="mean place", w_model=16):
             print(f"  * {n}")
 
 
-def latex(ds, blocks, metrics, task, col="mean place"):
+def latex(ds, blocks, metrics, task, col="mean place", dial=""):
     print()
     print(f"% ---- {DATASET_LABEL.get(ds, ds)} ----")
     print(r"\begin{tabular}{l" + "r" * (len(metrics) + 1) + "}")
@@ -677,7 +684,10 @@ def main():
                     help="ONE source per table -- the tables are per dataset, not per "
                          "source. Pass another to reprint them on it")
     ap.add_argument("--nodes", nargs="+", default=["onehot"],
-                    choices=["esm", "onehot"])
+                    choices=["esm", "onehot", "nodedial"],
+                    help="which series to table. `onehot` is the v8 gate, `nodedial` the "
+                         "v9 node dial. Never both: alpha runs structure -> function on "
+                         "the first and function -> structure on the second")
     ap.add_argument("--dataset", nargs="+", default=None)
     ap.add_argument("--regime", nargs="+", default=None,
                     choices=["transductive", "inductive"])
@@ -720,11 +730,12 @@ def main():
           + ("last column: paired difference vs boost [won/n]" if a.delta else
              "mean place: rank among the rows WITHIN each split, averaged (1 = best)"))
     col = "d vs boost" if a.delta else "mean place"
+    dial = "".join(DIAL_NOTE.get(n, "") for n in a.nodes)
     for ds, blocks, metrics, task, notes in tables:
         if a.latex:
             latex(ds, blocks, metrics, task, col)
         else:
-            render(ds, blocks, metrics, task, notes, col)
+            render(ds, blocks, metrics, task, notes, col, dial)
 
 
 if __name__ == "__main__":

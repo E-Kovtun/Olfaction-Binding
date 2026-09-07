@@ -45,6 +45,7 @@ from __future__ import annotations
 import argparse
 import pathlib
 import sys
+import time
 
 import numpy as np
 import pandas as pd
@@ -72,6 +73,11 @@ sweep = _module("scripts/modeling/train/run_alpha_gate_sweep.py", "_sweep_for_va
 ht = _module("scripts/analysis/headline_table.py", "_ht_for_val")
 
 VAL_PREFIX = "val_metrics_"
+
+
+def _fmt(sec):
+    sec = int(round(sec)); h, r = divmod(sec, 3600); m, s = divmod(r, 60)
+    return f"{h}h{m:02d}m{s:02d}s" if h else f"{m:02d}m{s:02d}s"
 
 
 def dumps_dir(csv_path):
@@ -199,6 +205,7 @@ def rescore_file(csv_path, args):
     key_metric = "R2" if of_record == "regression" else "AUROC"
 
     written, gaps, cache = 0, [], {}
+    t0 = time.time()
     for fold in sorted({int(r["fold"]) for r in todo}):
         if fold not in cache:
             cache[fold] = sweep._fold_prep(ds, regime, fold, ns, data)
@@ -228,8 +235,13 @@ def rescore_file(csv_path, args):
             tmp = out.with_suffix(".tmp.csv")
             pd.DataFrame(rows).to_csv(tmp, index=False)
             tmp.replace(out)
-        print(f"  fold {fold}: {sum(1 for x in todo if int(x['fold']) == fold)} cell(s), "
-              f"val n={len(V['y'])}")
+            # per CELL, not per fold: a fold is fourteen XGBoost fits and on m2or that
+            # is minutes of silence, which reads exactly like a hang
+            el = time.time() - t0
+            a = "" if pd.isna(r["alpha"]) else f" a={float(r['alpha']):.2f}"
+            print(f"  [{written}/{len(todo)} {_fmt(el)} "
+                  f"ETA {_fmt(el / written * (len(todo) - written))}] "
+                  f"f{fold} {r['arm']}{a}  val n={len(V['y'])}", flush=True)
     return written, gaps
 
 

@@ -149,6 +149,12 @@ def grid_rows(df, ds, regime, alphas, metrics):
     g = df[(df.dataset == ds) & (df.regime == regime)]
     if g.empty:
         return [], {}
+    if alphas is None:
+        # `--alphas all`: whatever this cell actually holds. Resolved PER CELL rather
+        # than once for the whole frame, because a sweep is usually finished unevenly
+        # and a union would print empty rows for alphas this dataset never ran.
+        alphas = sorted(pd.to_numeric(g.loc[g.arm == "gate", "alpha"],
+                                      errors="coerce").dropna().unique())
     rows, cells = [], {}
 
     def add(label, q):
@@ -447,6 +453,10 @@ def render(ds, blocks, metrics, task, notes, col="mean place", dial="", w_model=
 def latex(ds, blocks, metrics, task, col="mean place", dial=""):
     print()
     print(f"% ---- {DATASET_LABEL.get(ds, ds)} ----")
+    if dial:
+        # which dial this is has to survive the copy-paste into the paper: alpha
+        # means opposite things on the two of them
+        print("%" + dial)
     print(r"\begin{tabular}{l" + "r" * (len(metrics) + 1) + "}")
     print(r"\toprule")
     print("model & " + " & ".join(metrics) + f" & {col} " + r"\\")
@@ -679,7 +689,11 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--root", default=ag.DEFAULT_ROOT)
     ap.add_argument("--ensemble-root", default=ENSEMBLE_ROOT)
-    ap.add_argument("--alphas", type=float, nargs="+", default=[0.4, 1.0])
+    ap.add_argument("--alphas", nargs="+", default=["0.4", "1.0"],
+                    help="which dial positions get a row. `all` takes every alpha "
+                         "present in the files, resolved per (dataset, regime), which "
+                         "is the way to see the whole sweep rather than the two or "
+                         "three positions you already suspect")
     ap.add_argument("--mol-source", default="chemberta",
                     help="ONE source per table -- the tables are per dataset, not per "
                          "source. Pass another to reprint them on it")
@@ -716,6 +730,8 @@ def main():
                          "Use it when a baseline row moves and you want to know why")
     ap.add_argument("--latex", action="store_true")
     a = ap.parse_args()
+    a.alphas = (None if any(str(x).lower() == "all" for x in a.alphas)
+                else [float(x) for x in a.alphas])
 
     if a.audit:
         audit(a)
@@ -733,7 +749,7 @@ def main():
     dial = "".join(DIAL_NOTE.get(n, "") for n in a.nodes)
     for ds, blocks, metrics, task, notes in tables:
         if a.latex:
-            latex(ds, blocks, metrics, task, col)
+            latex(ds, blocks, metrics, task, col, dial)
         else:
             render(ds, blocks, metrics, task, notes, col, dial)
 

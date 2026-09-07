@@ -170,6 +170,17 @@ def test_a_missing_baseline_is_a_dash_and_a_note_not_a_vanished_row(tmp_path):
 
 # ------------------------------------------------------------------- the place column
 
+def test_alphas_none_takes_every_position_this_cell_actually_ran():
+    """`--alphas all`. Resolved from the frame and PER CELL: a sweep finishes unevenly,
+    and a union over datasets would print rows for alphas this one never ran."""
+    df = _grid(alphas=(0.0, 0.25, 0.5, 0.75, 1.0))
+    rows, cells = pt.grid_rows(df, "m2or", "transductive", None, ["AUROC"])
+    got = [r["model"] for r in rows]
+    assert got == ["boost", "GNN alpha=0", "GNN alpha=0.25", "GNN alpha=0.5",
+                   "GNN alpha=0.75", "GNN alpha=1", "legacy GNN"]
+    assert all(cells[m]["AUROC"].notna().all() for m in got)
+
+
 def test_the_place_is_a_rank_within_each_split_not_a_rank_of_the_means():
     """Folds differ wildly in difficulty -- a cold-molecule fold moves every model by
     0.1 -- so ranking the means would report which folds a model happened to be

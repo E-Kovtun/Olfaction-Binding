@@ -65,17 +65,56 @@ extend that row rather than replacing it.
         --mol-source chemberta --nodes onehot --no-legacy \\
         --alphas 0 0.05 0.1 0.15 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 1.0
 
-Resumable: a finished (arm, alpha, fold, seed) is skipped, the CSV is rewritten after
-every cell, and the parent process is its sole writer. A CSV written before seeds
-existed is read as seed 42, so an old series is extended, not recomputed.
+WHAT ONE RUN WRITES -- three files, one computation:
+
+    metrics_*.csv       the TEST rows, in the schema every existing reader parses.
+    val_metrics_*.csv   the same fitted head scored on VALIDATION. This is the only
+                        split alpha may be CHOSEN on: alpha is a hyperparameter, fixed
+                        before training and used unchanged at inference, so picking it
+                        by the score on the folds the paper reports is selection on the
+                        test set. See scripts/analysis/alpha_choice.py --select-on val.
+    records_*.csv       EVERY row -- train, val and test -- with per-cell wall clock
+                        (graph and head separately), split sizes, the geometry readouts,
+                        and provenance (git commit, host, run start). The full dump; the
+                        other two are views of it, so they cannot disagree.
+
+Scoring all three splits costs two extra predicts per cell and no extra training: the
+head is fit ONCE and asked three times. Refitting per split would make each column a
+different model and the val number would stop being about the reported one.
+
+SEEDING THE GRAPH (`--seed-graph`). Off by default, and the default is the historical
+behaviour: `_train_one` never applied `hp["seed"]`, so the graph's weights came from
+torch's global RNG -- drawn from OS entropy at first use, then advanced by whatever else
+that worker process trained first. That is why the `gate alpha=1` and `graph_legacy`
+arms, which are provably the same computation on the same input (rho=1 returns the
+embedding file unchanged; legacy switches the dial off), do not land on the same number:
+their gap is a free measurement of the init lottery, pooled at 0.006 on both metric
+scales. With the flag the lottery is gone -- though not bit-determinism, since the
+message passing's scatter-add on CUDA is atomic and reorders between runs.
+
+It is opt-in because turning it on changes every number already in results/graph/. A run
+with it is a NEW series, not more folds of an old one, and every row carries a
+`seeded_graph` column saying which kind it is.
+
+Resumable: a finished (arm, alpha, fold, seed) is skipped -- the test row is written
+last, so a cell killed mid-way is recomputed rather than left with train and val only.
+The parent process is the sole writer of all three files. A records file written before
+seeds existed is read as seed 42, so an old series is extended, not recomputed. A
+directory holding a metrics file but NO records file is refused: it predates the dump,
+and resuming into it would produce a records file covering only the cells that happened
+to be missing. Point --out somewhere new, --force to recompute in place, or run
+scripts/analysis/val_rescore.py to add val to the old run without retraining.
 """
 from __future__ import annotations
 
 import argparse
 import os
 import pathlib
+import socket
+import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 
 import numpy as np
 import pandas as pd
@@ -85,7 +124,7 @@ while not (_root / "pyproject.toml").exists():
     _root = _root.parent
 sys.path.insert(0, str(_root))
 
-from orbind.baselines import train_boost                          # noqa: E402
+from orbind.baselines import fit_boost, predict_scores            # noqa: E402
 from orbind.dataset import (                                       # noqa: E402
     METRICS as METRIC_FNS, METRICS_FULL, load_npz_dict)
 from orbind.gnn_extractor import GnnSignedExtractor                # noqa: E402
@@ -144,6 +183,50 @@ PROT_SOURCE = {None: "data/embeddings/proteins/esm1b_650m_mean_{ds}.npz",
 UNTAGGED_MOL = "gin"
 
 
+# Which held-out set a row is scored on. `train` is in the dump because an overfit
+# head is invisible in a test column and obvious next to a train one; it costs one
+# predict. `val` is what alpha may be CHOSEN on -- see scripts/analysis/alpha_choice.py.
+SPLITS = ["train", "val", "test"]
+# (labels, receptor ids, molecule ids) per split, as `_fold_prep` names them.
+SPLIT_KEYS = {"train": ("y_tr", "rec_tr", "mol_tr"),
+              "val": ("y_va", "rec_va", "mol_va"),
+              "test": ("y_te", "rec_te", "mol_te")}
+
+
+def _git_commit():
+    try:
+        return subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=_root,
+                              capture_output=True, text=True, timeout=5,
+                              check=True).stdout.strip()
+    except Exception:                       # noqa: BLE001 -- provenance is not the job
+        return ""
+
+
+_PROV = None
+
+
+def provenance(args):
+    """Stamped on every record row. A dump that cannot say which code and which
+    embedding files produced it is a table of numbers, not evidence -- and six months
+    from now the difference matters more than the numbers do."""
+    global _PROV
+    if _PROV is None:
+        _PROV = dict(commit=_git_commit(), host=socket.gethostname(),
+                     started=datetime.now(timezone.utc).isoformat(timespec="seconds"))
+    return dict(_PROV)
+
+
+def splits_wanted(args, P):
+    """The splits to score. An empty val is normal on some split families and must not
+    become a row of NaN that later reads as a failure."""
+    out = ["test"]
+    if len(P["va"]):
+        out.insert(0, "val")
+    if getattr(args, "score_train", True):
+        out.insert(0, "train")
+    return out
+
+
 def paths(ds, args):
     src = MOL_SOURCES[args.mol_source]
     mp = args.mol_embeddings or src.get(ds, src[None])
@@ -169,6 +252,12 @@ def _fmt(sec):
 
 
 def _mat(emb, keys):
+    if not len(keys):
+        # `np.stack([])` raises. An empty split is legal -- some families ship no val --
+        # and it must arrive downstream as a zero-row matrix of the right width, not as
+        # an exception thrown from fold preparation for every arm at once.
+        d = int(np.asarray(next(iter(emb.values()))).shape[-1])
+        return np.empty((0, d), dtype=np.float32)
     return np.stack([emb[k] for k in keys]).astype(np.float32)
 
 
@@ -218,13 +307,17 @@ def _fold_prep(ds, regime, fold, args, data):
     R[[rank[r] for r in rc[tr]], [mrank[m] for m in ik[tr]]] = lab[tr]
     R = np.nan_to_num(R, nan=float(np.nanmean(R)) if np.isfinite(R).any() else 0.0)
     return {"pairs": pairs, "tr": tr, "va": va, "te": te,
-            "y_tr": lab[tr], "y_te": lab[te],
+            "y_tr": lab[tr], "y_va": lab[va], "y_te": lab[te],
             # group ids for the within-receptor / within-molecule scores, and the
             # TRAIN response for the binarisation cuts -- which must never be fit
             # on test rows, or the label definition itself sees the held-out data
-            "rec_te": rc[te], "mol_te": ik[te], "rec_tr": rc[tr],
-            "Xm_tr": _mat(mol, ik[tr]), "Xm_te": _mat(mol, ik[te]),
-            "Xp_tr": _mat(prot, rc[tr]), "Xp_te": _mat(prot, rc[te]),
+            "rec_tr": rc[tr], "mol_tr": ik[tr],
+            "rec_va": rc[va], "mol_va": ik[va],
+            "rec_te": rc[te], "mol_te": ik[te],
+            "Xm_tr": _mat(mol, ik[tr]), "Xm_va": _mat(mol, ik[va]),
+            "Xm_te": _mat(mol, ik[te]),
+            "Xp_tr": _mat(prot, rc[tr]), "Xp_va": _mat(prot, rc[va]),
+            "Xp_te": _mat(prot, rc[te]),
             "order": order, "prank": rank,
             "ref": {"esm": _mat(prot, order).astype(np.float64),
                     "fun": R - R.mean(1, keepdims=True)}}
@@ -273,6 +366,16 @@ def _score(P, pred, task, full=True):
     return {k: float(v) for k, v in m.items()}
 
 
+def _score_split(P, pred, task, split):
+    """`_score` on one split. The metric battery is written against the "test" keys, so
+    the split's own labels and group ids are swapped in rather than the battery being
+    duplicated -- one definition of every metric, for every split."""
+    yk, rk, mk = SPLIT_KEYS[split]
+    Q = dict(P)
+    Q["y_te"], Q["rec_te"], Q["mol_te"] = P[yk], P[rk], P[mk]
+    return _score(Q, pred, task)
+
+
 def _dump(args, ds, regime, arm, alpha, fold, seed, **arrays):
     """One npz per cell, keyed by everything that changes what is in it.
 
@@ -309,14 +412,27 @@ def _baseline_rows(fold, seed, P, args):
     0.516. Extra seeds therefore ADD to the seed-42 row, they do not replace it."""
     task = TASK[args._ds]
     rows = []
-    pred = train_boost(np.concatenate([P["Xp_tr"], P["Xm_tr"]], 1), P["y_tr"],
-                       np.concatenate([P["Xp_te"], P["Xm_te"]], 1),
-                       seed=seed, task=task)
-    rows.append(_row("boost_full", None, fold, seed, n_receptors=len(P["order"]),
-                     mol_source=args.mol_source, **_score(P, pred, task)))
-    const = np.full(len(P["y_te"]), float(P["y_tr"].mean()), dtype=np.float32)
-    rows.append(_row("naive", None, fold, seed, n_receptors=len(P["order"]),
-                     mol_source=args.mol_source, **_score(P, const, task)))
+    want = splits_wanted(args, P)
+    X = {s: np.concatenate([P[f"Xp_{k}"], P[f"Xm_{k}"]], 1)
+         for s, k in (("train", "tr"), ("val", "va"), ("test", "te")) if s in want}
+    t0 = time.time()
+    est = fit_boost(X["train"] if "train" in X
+                    else np.concatenate([P["Xp_tr"], P["Xm_tr"]], 1),
+                    P["y_tr"], seed=seed, task=task)
+    t_head = time.time() - t0
+    base = dict(n_receptors=len(P["order"]), mol_source=args.mol_source,
+                t_graph=0.0, t_head=t_head, **provenance(args))
+    for s in want:
+        rows.append(_row("boost_full", None, fold, seed, split=s,
+                         n_rows=len(P[SPLIT_KEYS[s][0]]), **base,
+                         **_score_split(P, predict_scores(est, X[s], task), task, s)))
+    for s in want:
+        y = P[SPLIT_KEYS[s][0]]
+        const = np.full(len(y), float(P["y_tr"].mean()), dtype=np.float32)
+        rows.append(_row("naive", None, fold, seed, split=s, n_rows=len(y),
+                         **(base | dict(t_head=0.0)),
+                         **_score_split(P, const, task, s)))
+    pred = predict_scores(est, X["test"], task)
     # boost has no receptor cloud, but its per-pair predictions are half of every
     # stratified comparison against the graph, so they are dumped alongside
     if args.dump_predictions:
@@ -340,11 +456,22 @@ def _graph_row(arm, alpha, fold, seed, ds, P, args):
         task=task, n_models=args.n_models, epochs=args.epochs, emit="prot",
         # the v9 dial replaces the node features itself, so `onehot_nodes` must be off
         # there -- its rho=0 end IS the one-hot arm, and the extractor refuses both
-        onehot_nodes=(args.nodes == "onehot" and dial == "gate"), **knob)
+        onehot_nodes=(args.nodes == "onehot" and dial == "gate"),
+        deterministic_init=args.seed_graph, **knob)
+    t0 = time.time()
     Zp_tr, Zp_va, Zp_te = ext.fit_transform(P["pairs"], P["tr"], P["va"], P["te"], seed)
-    pred = train_boost(np.concatenate([Zp_tr, P["Xm_tr"]], 1), P["y_tr"],
-                       np.concatenate([Zp_te, P["Xm_te"]], 1),
-                       seed=seed, task=task)
+    t_graph = time.time() - t0
+    want = splits_wanted(args, P)
+    Z = {"train": Zp_tr, "val": Zp_va, "test": Zp_te}
+    X = {s: np.concatenate([Z[s], P[f"Xm_{k}"]], 1)
+         for s, k in (("train", "tr"), ("val", "va"), ("test", "te")) if s in want}
+    t1 = time.time()
+    # ONE fit, scored on every split. Refitting per split would be a different model
+    # per column and the val number would stop being about the reported one.
+    est = fit_boost(np.concatenate([Zp_tr, P["Xm_tr"]], 1), P["y_tr"],
+                    seed=seed, task=task)
+    t_head = time.time() - t1
+    pred = predict_scores(est, X["test"], task)
     # One receptor, one row: the per-pair features repeat the receptor vector, so
     # collapse back to the universe order the reference clouds are in. All three
     # splits are walked -- a receptor that appears only in val would otherwise be
@@ -370,16 +497,23 @@ def _graph_row(arm, alpha, fold, seed, ds, P, args):
                      receptor=np.asarray(P["rec_te"], dtype=object).astype("U"),
                      inchikey=np.asarray(P["mol_te"], dtype=object).astype("U"))
     _dump(args, ds, args._regime, arm, alpha, fold, seed, **dump)
-    return _row(arm, alpha, fold, seed, n_receptors=len(P["order"]),
+    base = dict(n_receptors=len(P["order"]),
                 k_pca=int(getattr(ext, "_k_pca", 0)), variant=args._variant,
                 mol_source=args.mol_source, nodes=args.nodes, dial=dial,
                 mix_seed=(args.mix_seed if dial == "nodes" else ""),
-                **_score(P, pred, task), **geo)
+                seeded_graph=bool(args.seed_graph),
+                t_graph=t_graph, t_head=t_head, **provenance(args), **geo)
+    # The geometry is a property of the CELL, not of a split -- it is measured on the
+    # receptor cloud, which no held-out set changes. Repeated on every row so one line
+    # of the dump is self-contained.
+    return [_row(arm, alpha, fold, seed, split=s, n_rows=len(P[SPLIT_KEYS[s][0]]),
+                 **base, **_score_split(P, predict_scores(est, X[s], task), task, s))
+            for s in want]
 
 
 def _failed(job, err):
     arm, alpha, fold, seed = job
-    r = _row(arm, alpha, fold, seed,
+    r = _row(arm, alpha, fold, seed, split="test",
              **{k: float("nan") for k in TASK_METRICS["regression"]},
              **{k: float("nan") for k in TASK_METRICS["classification"]})
     r["status"] = f"failed: {err}"
@@ -395,7 +529,7 @@ def _run_job(job, ds, regime, args, cache, data):
     P = cache[fold]
     if arm == "baselines":
         return _baseline_rows(fold, seed, P, args)
-    return [_graph_row(arm, alpha, fold, seed, ds, P, args)]
+    return _graph_row(arm, alpha, fold, seed, ds, P, args)
 
 
 def _worker(job_q, res_q, ds, regime, args, wid=0, log_dir=None):
@@ -458,20 +592,64 @@ def out_path(ds, regime, args):
         f"metrics_{ds}_{FAMILY[ds][regime]}{tag}.csv"
 
 
-def load_done(out, force=False):
-    """(rows already on disk, their keys). A file written before seeds existed holds
-    exactly one seed, 42 -- the ensembler's default, which is what those rows were
-    produced at. Reading them as 42 is what lets an old series be EXTENDED with more
-    seeds instead of recomputed, or worse, skipped as if the new seeds were done."""
-    if not out.exists() or force:
+def sibling_paths(ds, regime, args):
+    """The three files one run writes, from ONE computation:
+
+      metrics_*.csv       TEST rows, the schema every existing reader already parses
+      val_metrics_*.csv   the same rows scored on VALIDATION -- what alpha may be
+                          chosen on, and the same filename the old rescore produced,
+                          so `alpha_grid.load(split="val")` needs no change
+      records_*.csv       EVERY row: train, val and test, with timings, sizes,
+                          geometry and provenance. The full dump; the other two are
+                          views of it.
+
+    Three files rather than one long frame because the first two are contracts with
+    code that already exists, and the third is a contract with analysis that does not
+    exist yet -- which is exactly why it carries everything.
+    """
+    m = out_path(ds, regime, args)
+    stem = m.stem.replace("metrics_", "")
+    return m, m.parent / f"val_metrics_{stem}.csv", m.parent / f"records_{stem}.csv"
+
+
+def load_done(rec_out, out, args):
+    """(record rows already on disk, the CELLS they cover).
+
+    Resume reads the RECORDS file, because that is the one holding every split: a cell
+    present in metrics_*.csv but absent from records_*.csv has no val row and no train
+    row, so treating it as done would leave the dump permanently ragged.
+
+    That is also why an old directory is refused rather than silently extended. A sweep
+    run before this file existed has test rows and nothing else; continuing into it
+    would produce a records file covering only the cells that happened to be missing,
+    which is worse than either recomputing or starting clean.
+
+    A file written before seeds existed holds exactly one seed, 42 -- the ensembler's
+    default, which is what those rows were produced at. Reading them as 42 is what lets
+    an old series be EXTENDED with more seeds instead of recomputed.
+    """
+    if args.force:
         return [], set()
-    prev = pd.read_csv(out)
+    if not rec_out.exists():
+        if out.exists():
+            raise SystemExit(
+                f"{out.name} exists but {rec_out.name} does not: this directory holds a "
+                f"sweep from before the full dump, so its cells have no val or train "
+                f"rows.\n  Point --out at a new directory to build the dump cleanly, or "
+                f"pass --force to recompute in place (which OVERWRITES {out.name}).\n"
+                f"  To add val to the old run without recomputing anything:\n"
+                f"    python scripts/analysis/val_rescore.py --root {out.parent}")
+        return [], set()
+    prev = pd.read_csv(rec_out)
     if "seed" not in prev.columns:
         prev["seed"] = 42
     prev = prev.assign(seed=prev["seed"].fillna(42).astype(int))
-    return (prev.to_dict("records"),
-            {key(r["arm"], None if pd.isna(r["alpha"]) else r["alpha"],
-                 r["fold"], r["seed"]) for _, r in prev.iterrows()})
+    if "split" not in prev.columns:
+        prev = prev.assign(split="test")
+    cells = {key(r["arm"], None if pd.isna(r["alpha"]) else r["alpha"],
+                 r["fold"], r["seed"])
+             for _, r in prev[prev["split"].astype(str) == "test"].iterrows()}
+    return prev.to_dict("records"), cells
 
 
 def plan(reps, args, done):
@@ -508,10 +686,32 @@ def sweep(ds, regime, args, dash=None):
     args._ds, args._variant = ds, (args.variant or DEFAULT_VARIANT[ds])
     args._regime = regime
     reps = repeats(ds, regime, args)
-    out = out_path(ds, regime, args)
+    out, val_out, rec_out = sibling_paths(ds, regime, args)
     out.parent.mkdir(parents=True, exist_ok=True)
-    rows, done = load_done(out, args.force)
+    rows, done = load_done(rec_out, out, args)
     jobs = plan(reps, args, done)
+
+    def flush():
+        """One stream, three views. Written whenever a cell completes, so a kill loses
+        at most the cell in flight and never leaves the three disagreeing.
+
+        Defined before the early return on purpose: reopening a finished directory then
+        rebuilds metrics_/val_metrics_ from the records file, which is the repair for a
+        run killed between the two writes."""
+        if not rows:
+            return
+        rec = pd.DataFrame(rows)
+        if "split" not in rec.columns:
+            rec = rec.assign(split="test")
+        for path, want in ((out, "test"), (val_out, "val"), (rec_out, None)):
+            d = rec if want is None else rec[rec["split"].astype(str) == want]
+            if want is not None:
+                d = d.drop(columns=["split"])
+            if d.empty:
+                continue
+            tmp = path.with_suffix(".tmp.csv")
+            d.to_csv(tmp, index=False)
+            tmp.replace(path)
 
     pp, mp = paths(ds, args)
     ends = ("a=0 structure alone -> a=1 the graph alone" if args.dial == "gate"
@@ -524,12 +724,19 @@ def sweep(ds, regime, args, dash=None):
           f"{VARIANTS[args._variant]}\n"
           f"    mol {args.mol_source}: {mp.rsplit('/', 1)[-1]}   "
           f"prot: {pp.rsplit('/', 1)[-1]}\n"
-          f"    {len(jobs)} jobs ({len(done)} cells already done)  ->  {out}", flush=True)
+          f"    graph init {'SEEDED from --seeds' if args.seed_graph else 'unseeded (global RNG)'}"
+          f"   splits scored: {'train+' if args.score_train else ''}val+test\n"
+          f"    {len(jobs)} jobs ({len(done)} cells already done)  ->  {out.name}, "
+          f"{val_out.name}, {rec_out.name}", flush=True)
     if not jobs:
+        flush()
         return out
 
     heavy = sum(1 for j in jobs if j[0] != "baselines")
     t0, state = time.time(), {"n": 0}
+    seen_rows = {(key(r["arm"], None if pd.isna(r.get("alpha")) else r.get("alpha"),
+                     r["fold"], r["seed"]), str(r.get("split", "test")))
+                 for r in rows}
     if dash is not None:
         dash.set_stage(f"{ds}/{regime} {args.mol_source}/{args.nodes} -- "
                        f"{heavy} cells, {len(done)} already on disk")
@@ -537,11 +744,16 @@ def sweep(ds, regime, args, dash=None):
     def record(row):
         k = key(row["arm"], None if pd.isna(row["alpha"]) else row["alpha"],
                 row["fold"], row["seed"])
-        if k in done:
+        split = str(row.get("split", "test"))
+        if (k, split) in seen_rows:
             return
-        rows.append(row); done.add(k)
-        tmp = out.with_suffix(".tmp.csv")
-        pd.DataFrame(rows).to_csv(tmp, index=False); tmp.replace(out)
+        rows.append(row); seen_rows.add((k, split))
+        # a CELL is finished when its test row lands: that is when the three files are
+        # consistent, and it is the granularity `plan` resumes at
+        if split != "test":
+            return
+        done.add(k)
+        flush()
         if row["arm"] in ("boost_full", "naive"):
             tag = f"[{row['arm']}]"
         else:
@@ -639,6 +851,7 @@ def sweep(ds, regime, args, dash=None):
                 record(row)
         for p in procs:
             p.join()
+    flush()
     return out
 
 
@@ -734,6 +947,22 @@ def main():
                          "ONLY through the frozen branch at weight (1-alpha) -- the "
                          "decomposition in which alpha is an honest fraction of "
                          "structure. Writes its own metrics_*_onehot.csv")
+    ap.add_argument("--seed-graph", action="store_true",
+                    help="SEED THE GRAPH'S OWN INITIALISATION from --seeds. Off (the "
+                         "default) the weights come from torch's global RNG, which is "
+                         "drawn from OS entropy and then advanced by whatever else that "
+                         "worker trained first -- which is why the alpha=1 and "
+                         "graph_legacy arms, provably the same computation on the same "
+                         "input, do not land on the same number. On, that lottery is "
+                         "gone (the scatter-add on CUDA is still atomic, so this is not "
+                         "bit-determinism). It is OFF by default because turning it on "
+                         "changes every number already in results/graph/ -- a run with "
+                         "it is a NEW series, not more folds of an old one, and the "
+                         "`seeded_graph` column records which kind each row is")
+    ap.add_argument("--no-score-train", dest="score_train", action="store_false",
+                    help="skip scoring the fitted head on its own train rows. They cost "
+                         "one predict and are the only column in which an overfit head "
+                         "is visible at all")
     ap.add_argument("--baselines-only", action="store_true",
                     help="only boost_full + naive (no graph, so seconds not hours) -- the "
                          "cheap way to check this sweep reproduces the table of record "
@@ -784,7 +1013,8 @@ def main():
     for mol, ds, regime in todo:
         args.mol_source = mol
         args._variant = args.variant or DEFAULT_VARIANT[ds]
-        _, done = load_done(out_path(ds, regime, args), args.force)
+        m, _, rec = sibling_paths(ds, regime, args)
+        _, done = load_done(rec, m, args)
         total += sum(1 for j in plan(repeats(ds, regime, args), args, done)
                      if j[0] != "baselines")
 

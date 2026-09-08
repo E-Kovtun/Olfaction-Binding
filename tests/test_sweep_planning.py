@@ -198,10 +198,12 @@ def test_a_seedless_csv_is_read_as_seed_42(sweep, tmp_path):
                            "status": "ok", "R2": 0.55} for f in (1, 2)]
                        + [{"arm": "naive", "alpha": np.nan, "fold": f, "status": "ok",
                            "R2": 0.0} for f in (1, 2)])
-    p = tmp_path / "metrics_cc_rand_chemberta.csv"
-    old.to_csv(p, index=False)
+    # resume now reads the RECORDS file -- it is the only one carrying every split
+    m = tmp_path / "metrics_cc_rand_chemberta.csv"
+    r = tmp_path / "records_cc_rand_chemberta.csv"
+    old.to_csv(r, index=False)
 
-    rows, done = sweep.load_done(p)
+    rows, done = sweep.load_done(r, m, A())
     assert len(rows) == 8
     assert all(k[3] == 42 for k in done)
     assert sweep.plan([1, 2], A(seeds=[42], alphas=[1.0]), done) == []
@@ -209,7 +211,7 @@ def test_a_seedless_csv_is_read_as_seed_42(sweep, tmp_path):
     assert {j[3] for j in jobs} == {43, 44}
     assert len(jobs) == 2 * 2 * 3          # 2 new seeds x 2 folds x (baselines+legacy+gate)
     # --force ignores the file entirely
-    assert sweep.load_done(p, force=True) == ([], set())
+    assert sweep.load_done(r, m, A(force=True)) == ([], set())
 
 
 # --------------------------------------------------------------------------- reader

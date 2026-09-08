@@ -79,6 +79,7 @@ fix since v5's own command also passes `--grad-clip 1.0`.
 from __future__ import annotations
 
 import pathlib
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
@@ -92,6 +93,11 @@ from torch_geometric.nn import HeteroConv, MessagePassing, SAGEConv
 from . import dataset as D
 from . import mol_selection
 from .tasks import check_task
+
+# torch.manual_seed is GLOBAL while the n_models bags train as concurrent
+# threads, so seeding must not interleave with another bag's build. Same guard
+# lorax/molor use, and for the same reason.
+_INIT_LOCK = threading.Lock()
 
 MOL, PROT = "mol", "prot"
 ETYPE = (MOL, "binds", PROT)
@@ -537,7 +543,8 @@ def _dgi_loss(weight_mat, z_pos, z_neg):
 
 def _train_one(build_model, x_mol, x_prot, pos_eidx, neg_eidx,
                 mol_idx_train, prot_idx_train, y_train, hp, device, checkpoint_path=None,
-                dgi_weight=0.0, dgi_scope="shared", hidden=None, pos_ew=None, neg_ew=None):
+                dgi_weight=0.0, dgi_scope="shared", hidden=None, pos_ew=None, neg_ew=None,
+                deterministic_init=False):
     """Full-batch training loop (the whole graph is small enough to fit in
     one forward/backward per epoch): BCE loss on train-row decodes, fixed
     epoch count, no early stopping, no LR scheduler -- matches the actual v5
@@ -559,7 +566,18 @@ def _train_one(build_model, x_mol, x_prot, pos_eidx, neg_eidx,
     discriminator is training-only -- it is not saved and not needed to emit
     embeddings, so a reloaded checkpoint ignores DGI entirely. `dgi_scope`
     picks the node set (see `_dgi_pool`)."""
-    model = build_model().to(device)
+    if deterministic_init:
+        # global RNG under a lock: the n_models bags run as concurrent THREADS in one
+        # process, so two of them seeding and building at once would interleave their
+        # draws and neither would be reproducible. `hp["seed"]` already differs per bag
+        # (seed + seed_offset*m), so the lock costs nothing but the build itself.
+        with _INIT_LOCK:
+            torch.manual_seed(hp["seed"])
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(hp["seed"])
+            model = build_model().to(device)
+    else:
+        model = build_model().to(device)
     x_mol_d, x_prot_d = x_mol.to(device), x_prot.to(device)
     pos_eidx_d = {k: v.to(device) for k, v in pos_eidx.items()}
     neg_eidx_d = {k: v.to(device) for k, v in neg_eidx.items()}
@@ -739,7 +757,9 @@ def _run_models(ext, pairs: pd.DataFrame, train_idx, val_idx, test_idx, seed: in
                                            checkpoint_path=checkpoint_path,
                                            dgi_weight=getattr(ext, "dgi_weight", 0.0),
                                            dgi_scope=getattr(ext, "dgi_scope", "shared"),
-                                           hidden=ext.hidden, pos_ew=pos_ew, neg_ew=neg_ew)
+                                           hidden=ext.hidden, pos_ew=pos_ew, neg_ew=neg_ew,
+                                           deterministic_init=getattr(
+                                               ext, "deterministic_init", False))
         return m, z_mol, z_prot, model
 
     with ThreadPoolExecutor(max_workers=ext.n_models) as pool:
@@ -871,6 +891,19 @@ class GnnSignedExtractor:
     # quieter than both ends by sqrt(rho^2 + (1-rho)^2), and a dip there would be an
     # artefact of the parameterisation. See `mix_protein_features`.
     mix_renorm: bool = True
+    # Seed the GRAPH's own initialisation from `hp["seed"]`, the way every other
+    # extractor in this repo already does (hladis/lorax/molor/prosmith all call
+    # torch.manual_seed there). Default False ONLY because turning it on changes every
+    # number already in results/graph/: with it off the weights come from torch's global
+    # RNG, which is drawn from OS entropy at first use and is then advanced by whatever
+    # else that worker process happened to train first. That is the whole reason the
+    # alpha=1 and graph_legacy arms -- provably the same computation on the same input
+    # -- do not land on the same number.
+    #
+    # It does not buy bit-determinism on a GPU: the message passing's scatter-add is
+    # atomic and reorders between runs. It removes the init lottery, which is the large
+    # half.
+    deterministic_init: bool = False
     pooling: str = "signed_sage"
     dgi_weight: float = 0.0            # >0 enables the DeepGraphInfomax auxiliary loss
     dgi_scope: str = "shared"          # "shared" (mol+prot) or "prot"

@@ -4,8 +4,11 @@
     python scripts/analysis/val_rescore.py --root results/graph/v9_node_dial
     python scripts/analysis/val_rescore.py --root ... --dataset hc --dry-run
 
-WHY THIS EXISTS. `run_alpha_gate_sweep.py` computes `Zp_va` and then uses it only to
-collect receptor vectors: every metric it writes is on TEST. So the grid on disk cannot
+WHY THIS EXISTS -- FOR RUNS MADE BEFORE Sep 2026. The sweep now scores val itself and
+writes `val_metrics_*.csv` directly, so a fresh run needs nothing from this file. It is
+the repair for the grids already on disk, which were produced when
+`run_alpha_gate_sweep.py` computed `Zp_va` and then used it only to
+collect receptor vectors: every metric it wrote was on TEST. So the grid on disk cannot
 answer "which alpha should we report" without choosing alpha on the very rows the choice
 is later defended with. That is the one thing a hyperparameter must never be chosen on,
 and alpha is a hyperparameter -- it is fixed before training and used unchanged at

@@ -135,16 +135,29 @@ def test_a_partial_overlap_pairs_on_the_shared_folds_only(tmp_path):
     assert pt.cross_tree_delta(got["frame"], boost, "AUROC")[3] == 3
 
 
-def test_the_grid_rows_pair_on_fold_and_seed_together(tmp_path):
-    """Inside one tree both the split and the model draw are shared, so both are
-    removed. This is a stronger pairing than the cross-tree one and must not silently
-    degrade to it."""
+def test_the_grid_rows_pair_on_seed_then_reduce_to_folds(tmp_path):
+    """Two reductions, in this order.
+
+    PAIR on (fold, seed): inside one tree both the split and the model draw are shared,
+    so differencing removes both. That is stronger than the cross-tree pairing and must
+    not silently degrade to it.
+
+    Then AVERAGE THE SEEDS inside each fold, so `n` counts FOLDS. Five seeds on one fold
+    are one observation about generalisation, not five: they rest on the same held-out
+    rows. Reporting n = folds x seeds would put t(24) = 2.06 and sqrt(25) into an
+    interval whose effective sample size is 5, making it roughly half its honest width --
+    and every gap read as significant off that inherits the error."""
     df = _grid()
     two = pd.concat([df, df.assign(seed=43)], ignore_index=True)
     rows, cells = pt.grid_rows(ag.add_series(two), "m2or", "transductive",
                               [1.0], ["AUROC"])
     d = pt.paired_delta(cells["GNN alpha=1"], cells["boost"], "AUROC")
-    assert d[3] == 10                      # 5 folds x 2 seeds, not 5
+    assert d[3] == 5, "the unit is the fold, not the (fold, seed) cell"
+    # and the pairing still happened per (fold, seed): the fixture's two seeds are
+    # identical, so the mean difference is unchanged by the extra seed
+    one = pt.grid_rows(df, "m2or", "transductive", [1.0], ["AUROC"])[1]
+    assert d[0] == pytest.approx(
+        pt.paired_delta(one["GNN alpha=1"], one["boost"], "AUROC")[0])
 
 
 # ------------------------------------------------------------------ what gets printed

@@ -172,7 +172,8 @@ def grid_rows(df, ds, regime, alphas, metrics):
     def add(label, q):
         if q.empty:
             return
-        vals = {m: ag.ci(q[m]) for m in metrics if m in q.columns}
+        # seeds averaged inside each fold first: `n` is folds, the independent unit
+        vals = {m: ag.ci_folds(q, m) for m in metrics if m in q.columns}
         n = max((v[2] for v in vals.values()), default=0)
         rows.append(dict(model=label, n=n, source="v8 grid",
                          **{m: vals.get(m, (np.nan, np.nan, 0)) for m in metrics}))
@@ -324,15 +325,33 @@ def _delta(x, y):
     return mu, hw, int((d > 0).sum()), n
 
 
+def _to_folds(s):
+    """Collapse a (fold, seed) series to one value per fold."""
+    if isinstance(s.index, pd.MultiIndex) and "fold" in s.index.names:
+        return pd.to_numeric(s, errors="coerce").groupby(level="fold").mean()
+    return pd.to_numeric(s, errors="coerce")
+
+
 def paired_delta(a, b, metric):
-    """Within the v8 grid: paired on (fold, seed).
+    """Within the v8 grid: paired on (fold, seed), then averaged over seeds per fold.
 
     Both the split AND the model draw are shared between two arms of the same sweep, so
-    differencing removes both. This is the strongest form available and it is only
-    available here, inside one tree."""
+    differencing removes both -- that is the strongest form available and it exists only
+    here, inside one tree. Averaging the seeds afterwards is what keeps the interval
+    honest: five seeds on one fold are one observation about generalisation, not five."""
     if a is None or b is None or metric not in a or metric not in b:
         return np.nan, np.nan, 0, 0
-    return _delta(a[metric], b[metric])
+    common = a.index.intersection(b.index)
+    if not len(common):
+        return np.nan, np.nan, 0, 0
+    d = (pd.to_numeric(a[metric].loc[common], errors="coerce")
+         - pd.to_numeric(b[metric].loc[common], errors="coerce")).dropna()
+    if d.empty:
+        return np.nan, np.nan, 0, 0
+    if isinstance(d.index, pd.MultiIndex) and "fold" in d.index.names:
+        d = d.groupby(level="fold").mean()
+    mu, hw, n = ag.ci(d)
+    return mu, hw, int((d > 0).sum()), n
 
 
 def fold_ids(frame):

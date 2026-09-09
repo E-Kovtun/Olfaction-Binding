@@ -22,10 +22,16 @@ WHAT ONE ROW OF THE SWEEP IS. One (arm, alpha, fold, seed) cell:
             m2or/inductive. This is the axis the error bars are over.
     seed    the model's own draw (graph init, the bag, the head's subsample/colsample).
 
-SO THE ERROR BAR IS OVER THE SPLITS. `n` is the number of (fold, seed) cells behind a
-point, and at one model seed that is five. At n=5 the 1.96 normal approximation is 29%
-too narrow, so the interval here is Student-t -- see `ci`. An interval is still a
-refusal to look at five numbers; `coverage` and `spread` are how they get looked at.
+THE UNIT OF EVIDENCE IS THE FOLD, NOT THE (fold, seed) CELL. Every interval in this
+module first averages the model seeds inside each fold and is then taken over the fold
+means, so `n` counts folds and `seeds` says how many draws went into each one. Five
+seeds on one fold rest on the same held-out rows: they are one observation about
+generalisation, not five, and counting them as five halves the interval. See
+`fold_means` for the argument and `noise_split` for the two spreads it separates.
+
+At n=5 the 1.96 normal approximation is 29% too narrow, so the interval here is
+Student-t -- see `ci`. An interval is still a refusal to look at five numbers;
+`per_fold_delta`, `place_matrix`, `coverage` and `spread` are how they get looked at.
 
 DIRECTION OF EVERY GEOMETRY COLUMN. RSA, CCA and Procrustes are all reported so that
 LARGER IS MORE ALIGNED (Procrustes as 1 - disparity), against both references. The dial
@@ -217,22 +223,78 @@ def ci(v, level=0.95):
     return float(v.mean()), hw, n
 
 
-def _agg(df, value, by, level=0.95):
+def fold_means(df, value, by=()):
+    """One number per (by..., fold): the mean over MODEL SEEDS.
+
+    THE UNIT OF EVIDENCE IS THE FOLD, and this is the function that says so.
+
+    A fold changes which rows are held out -- that is the thing a claim about
+    generalisation is over. A model seed changes only the draw the same model made on
+    the same rows: graph init, the bag, the head's subsample/colsample. It is a nuisance
+    to be averaged away, not a second sample of the world.
+
+    Treating the 25 (fold, seed) cells of a five-seed grid as 25 observations is
+    therefore wrong twice over. They are not independent -- five of them share a fold,
+    and folds differ enormously in difficulty -- so a Student-t interval over them uses
+    t(24) = 2.06 where the honest one is t(4) = 2.78, and it divides by sqrt(25) where
+    the effective sample size is 5. The interval comes out roughly half of what it
+    should be, and every "significant" gap read off it inherits that.
+
+    Averaging first still buys the seeds' worth: each fold mean carries 1/5 of the seed
+    variance, so the between-fold spread shrinks toward the pure fold-difficulty
+    component. The narrowing arrives through the numerator, which is real, rather than
+    through the denominator, which would be invented.
+    """
     by = list(by)
+    if "fold" not in df.columns or df.empty:
+        return df.assign(_nseed=1) if len(df) else df.assign(_nseed=pd.Series(dtype=int))
+    keys = by + ["fold"]
+    g = df.groupby(keys, dropna=False, sort=False)
+    out = g[value].mean().reset_index()
+    n = (g["seed"].nunique() if "seed" in df.columns else g.size()).reset_index(
+        name="_nseed")
+    return out.merge(n, on=keys, how="left")
+
+
+def _agg(df, value, by, level=0.95, unit="fold"):
+    """mean +- t interval of `value` over the independent unit.
+
+    `unit="fold"` (the default, and the only one that supports an inference) averages
+    model seeds inside each fold first -- see `fold_means`. `unit="cell"` keeps every
+    (fold, seed) row as its own observation; it is kept for looking at the raw scatter
+    and must not be used for an interval anyone will quote.
+    """
+    by = list(by)
+    seeds = np.nan
+    if unit == "fold" and len(df) and "fold" in df.columns:
+        df = fold_means(df, value, by)
+        seeds = float(pd.to_numeric(df["_nseed"], errors="coerce").mean())
     rows = []
     for k, g in df.groupby(by, dropna=False, sort=True):
         m, hw, n = ci(g[value], level)
         rows.append(dict(zip(by, k if isinstance(k, tuple) else (k,)))
-                    | dict(mean=m, hw=hw, lo=m - hw, hi=m + hw, n=n))
+                    | dict(mean=m, hw=hw, lo=m - hw, hi=m + hw, n=n,
+                           seeds=(float(pd.to_numeric(g["_nseed"],
+                                                      errors="coerce").mean())
+                                  if "_nseed" in g.columns else seeds)))
     if not rows:
         # Typed, not merely empty. An object-dtype empty frame reaches matplotlib as
         # `fill_between(object[], object[])` and dies on `isfinite` -- which is what a
         # series that has only reached its baselines looks like MID-RUN, i.e. exactly
         # when a notebook is most likely to be opened.
-        empty = pd.DataFrame(columns=by + ["mean", "hw", "lo", "hi", "n"])
-        return empty.astype({c: float for c in ["mean", "hw", "lo", "hi"]}
+        empty = pd.DataFrame(columns=by + ["mean", "hw", "lo", "hi", "n", "seeds"])
+        return empty.astype({c: float for c in ["mean", "hw", "lo", "hi", "seeds"]}
                             | {"n": "int64"})
     return pd.DataFrame(rows).sort_values(by).reset_index(drop=True)
+
+
+def ci_folds(df, metric, level=0.95):
+    """(mean, half-width, n_folds) over fold means. The scalar form of `_agg`."""
+    if metric not in df.columns or df.empty:
+        return float("nan"), float("nan"), 0
+    f = fold_means(df.assign(**{metric: pd.to_numeric(df[metric], errors="coerce")}),
+                   metric)
+    return ci(f[metric].dropna(), level)
 
 
 def curve(df, metric, arm="gate", by=("series",), level=0.95):
@@ -288,34 +350,114 @@ def geometry(df, scale="value", by=("series",), level=0.95):
                 by + ["geom", "ref", "alpha"], level)
 
 
-def places(df, metric, by=("series",), arms=("boost_full", "graph_legacy")):
-    """Mean place along the dial: one row per (series, competitor), 1 = best.
+def per_fold_delta(df, metric, ref_arm="boost_full", arm="gate", by=("series",)):
+    """The advantage over `ref_arm`, ONE ROW PER FOLD -- the sample `delta_vs` summarises.
 
-    Every alpha AND the reference arms are ranked WITHIN each split and the ranks are
-    averaged. This is the summary that survives the fact that folds differ wildly in
+    `delta_vs` returns the interval; this returns the five numbers inside it. They are
+    worth drawing next to it, because an advantage of +0.01 that holds on five folds and
+    one that is +0.06 on one fold and zero on four are the same mean and are not the same
+    result. The fold is exactly what an interval hides.
+    """
+    by = list(by)
+    cols = by + ["alpha", "fold", "d", "n_seeds"]
+    if metric not in df.columns:
+        return pd.DataFrame(columns=cols).astype({"d": float, "n_seeds": float})
+    ref = df[df.arm == ref_arm]
+    g = df[df.arm == arm]
+    if ref.empty or g.empty:
+        return pd.DataFrame(columns=cols).astype({"d": float, "n_seeds": float})
+    ref = (ref[by + SPLIT + [metric]].rename(columns={metric: "_ref"})
+           .drop_duplicates(subset=by + SPLIT))
+    m = g[by + SPLIT + ["alpha", metric]].merge(ref, on=by + SPLIT, how="inner")
+    m = m.assign(_d=pd.to_numeric(m[metric], errors="coerce")
+                 - pd.to_numeric(m["_ref"], errors="coerce")).dropna(subset=["_d"])
+    if m.empty:
+        return pd.DataFrame(columns=cols).astype({"d": float, "n_seeds": float})
+    out = fold_means(m, "_d", by + ["alpha"])
+    return out.rename(columns={"_d": "d", "_nseed": "n_seeds"})[cols]
+
+
+def noise_split(df, metric, by=("series",), arm="gate"):
+    """How much of the spread is the MODEL and how much is the FOLD.
+
+    Two numbers per (by..., alpha), and they answer different questions:
+
+      within   the SD across model seeds INSIDE a fold, pooled over folds. This is the
+               noise averaging removes -- the graph's initialisation, the bag, the head's
+               subsample. It says nothing about generalisation.
+      between  the SD of the fold means. This is the quantity every interval in this
+               module is built from: how much the answer depends on WHICH rows were held
+               out, which is the thing a claim about generalisation is about.
+
+    `between` still contains within/sqrt(n_seeds) -- averaging shrinks the model
+    component but does not delete it -- so `floor` reports that residual. When `between`
+    is close to `floor`, the folds agree and what is left is model noise; when it towers
+    over it, the folds genuinely disagree and no number of seeds will help.
+    """
+    by = list(by)
+    cols = by + ["alpha", "within", "between", "floor", "n_folds", "n_seeds"]
+    q = df[df.arm == arm]
+    if metric not in df.columns or q.empty or "seed" not in q.columns:
+        return pd.DataFrame(columns=cols)
+    q = q.assign(_v=pd.to_numeric(q[metric], errors="coerce")).dropna(subset=["_v"])
+    rows = []
+    for k, g in q.groupby(by + ["alpha"], dropna=False, sort=True):
+        key = dict(zip(by + ["alpha"], k if isinstance(k, tuple) else (k,)))
+        per = g.groupby("fold")["_v"]
+        # pooled within-fold SD: the average VARIANCE across folds, then the root --
+        # averaging the SDs instead would be a different and smaller number
+        v = per.var(ddof=1).dropna()
+        within = float(np.sqrt(v.mean())) if len(v) else np.nan
+        means = per.mean()
+        between = float(means.std(ddof=1)) if len(means) > 1 else np.nan
+        ns = float(g.groupby("fold")["seed"].nunique().mean())
+        rows.append(key | dict(within=within, between=between,
+                               floor=(within / np.sqrt(ns) if np.isfinite(within)
+                                      and ns else np.nan),
+                               n_folds=int(len(means)), n_seeds=ns))
+    return pd.DataFrame(rows, columns=cols)
+
+
+def place_matrix(df, metric, by=("series",), arms=("boost_full", "graph_legacy")):
+    """The ranking PER FOLD -- one row per (series, competitor, fold).
+
+    What `places` averages away. A model with mean place 2.0 that is second on every
+    fold and one that is first on three and fourth on two are the same number and are
+    not the same result, and the fold column is where that shows.
+
+    Model seeds are averaged inside each fold FIRST, then every alpha AND the reference
+    arms are ranked within that fold, then the ranks are averaged over folds. Ranking at
+    the (fold, seed) level instead would let one lucky initialisation take a place away
+    from a better model, and would count five seeds agreeing on one fold as five pieces
+    of evidence rather than one.
+
+    This is the summary that survives the fact that folds differ wildly in
     difficulty -- a cold-molecule fold moves every competitor at once, so a curve of
     MEANS partly plots which folds happened to be hard, while a curve of PLACES cannot.
     Read the two side by side: where they disagree, the mean is being moved by one fold.
 
-    The ranking runs on the splits every competitor in that series shares, `n` says how
-    many those are, and `k` how many competitors were in the race -- a place of 3.0 out
-    of 5 and out of 13 are not the same statement.
+    The ranking runs on the splits every competitor in that series shares.
     """
     by = list(by)
     out = []
+
+    def _per_fold(q):
+        """One value per fold, seeds averaged -- the row the ranking sees."""
+        f = fold_means(q.assign(_v=pd.to_numeric(q[metric], errors="coerce")), "_v")
+        return f.set_index("fold")["_v"].dropna()
+
     for k, g in df.groupby(by, dropna=False, sort=True):
         key = dict(zip(by, k if isinstance(k, tuple) else (k,)))
         if metric not in g.columns:
             continue
         parts = {}
         for a, q in g[g.arm == "gate"].groupby("alpha"):
-            parts[f"a={float(a):g}"] = q.set_index(SPLIT)[metric]
+            parts[f"a={float(a):g}"] = _per_fold(q)
         for arm in arms:
             q = g[g.arm == arm]
             if not q.empty:
-                parts[ARM_LABEL.get(arm, arm)] = q.set_index(SPLIT)[metric]
-        parts = {n: pd.to_numeric(v[~v.index.duplicated()], errors="coerce").dropna()
-                 for n, v in parts.items()}
+                parts[ARM_LABEL.get(arm, arm)] = _per_fold(q)
+        parts = {n: v[~v.index.duplicated()].dropna() for n, v in parts.items()}
         parts = {n: v for n, v in parts.items() if len(v)}
         if len(parts) < 2:
             continue
@@ -328,20 +470,47 @@ def places(df, metric, by=("series",), arms=("boost_full", "graph_legacy")):
         # same way as a score hands first place to the worst model and looks fine
         R = M.rank(axis=1, ascending=metric in LOWER_IS_BETTER, method="average")
         for name, col in R.items():
-            out.append(key | dict(
-                competitor=name,
-                alpha=float(name[2:]) if name.startswith("a=") else np.nan,
-                place=float(col.mean()), n=len(idx), k=M.shape[1]))
-    return pd.DataFrame(out, columns=by + ["competitor", "alpha", "place", "n", "k"])
+            a = float(name[2:]) if name.startswith("a=") else np.nan
+            for fold, rank in col.items():
+                out.append(key | dict(competitor=name, alpha=a, fold=fold,
+                                      rank=float(rank), value=float(M.loc[fold, name]),
+                                      k=M.shape[1]))
+    return pd.DataFrame(out, columns=by + ["competitor", "alpha", "fold", "rank",
+                                           "value", "k"])
+
+
+def places(df, metric, by=("series",), arms=("boost_full", "graph_legacy")):
+    """`place_matrix` averaged over folds: one row per (series, competitor), 1 = best.
+
+    `n` is how many folds the race ran on and `k` how many competitors were in it -- a
+    place of 3.0 out of 5 and out of 13 are not the same statement.
+    """
+    by = list(by)
+    pm = place_matrix(df, metric, by, arms)
+    cols = by + ["competitor", "alpha", "place", "n", "k"]
+    if pm.empty:
+        return pd.DataFrame(columns=cols)
+    g = pm.groupby(by + ["competitor"], dropna=False, sort=True)
+    out = g.agg(alpha=("alpha", "first"), place=("rank", "mean"),
+                n=("fold", "nunique"), k=("k", "first")).reset_index()
+    return out[cols]
 
 
 def delta_vs(df, metric, ref_arm="boost_full", arm="gate", by=("series",), level=0.95):
-    """The paired difference `arm - ref_arm`, cell by cell, then aggregated.
+    """The paired difference `arm - ref_arm`: per (fold, seed) first, then per FOLD.
 
-    Paired on (fold, seed): both arms ran on the same split with the same draw, so the
-    difference removes the split and the draw at once. That is far stronger than two
-    overlapping intervals, and it is the only form in which a 0.01 effect over five
-    folds is readable at all. `won` counts the cells in favour."""
+    Two reductions, in this order, and the order is the whole point.
+
+    1. PAIR ON (fold, seed). Both arms ran on the same split with the same draw, so
+       differencing removes the split and the draw at once. That is far stronger than
+       two overlapping intervals and it is the only form in which a 0.01 effect is
+       readable at all.
+    2. AVERAGE THE SEEDS INSIDE EACH FOLD. What is left is one advantage per held-out
+       set -- the model noise gone, the fold's own character intact -- and those five
+       numbers are the independent sample the interval is taken over. `won` counts
+       FOLDS in favour, out of five, not (fold, seed) cells out of twenty-five: five
+       seeds agreeing on one fold is one piece of evidence, not five.
+    """
     by = list(by)
     # Every early return hands back a frame with the RIGHT COLUMNS, not a bare empty
     # one: a reader that does `d[np.isclose(d.alpha, 1)]` has no way to tell "this arm
@@ -362,8 +531,11 @@ def delta_vs(df, metric, ref_arm="boost_full", arm="gate", by=("series",), level
     if m.empty:
         return empty
     out = _agg(m, "_d", by + ["alpha"], level)
-    won = (m.assign(w=m["_d"] > 0).groupby(by + ["alpha"], sort=True)["w"]
-           .sum().reset_index(name="won"))
+    # counted on the SAME reduction the interval uses, or the two would disagree about
+    # what an observation is
+    per_fold = fold_means(m, "_d", by + ["alpha"])
+    won = (per_fold.assign(w=per_fold["_d"] > 0)
+           .groupby(by + ["alpha"], sort=True)["w"].sum().reset_index(name="won"))
     return out.merge(won, on=by + ["alpha"], how="left")
 
 

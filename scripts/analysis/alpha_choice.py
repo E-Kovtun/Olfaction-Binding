@@ -86,6 +86,9 @@ def _metric_of(df, args):
 def scores(df, metric_of):
     """Per (cell, competitor): the mean over the cell's splits, and n.
 
+    Model seeds are averaged inside each fold before anything else, so `n` counts FOLDS
+    -- the independent unit -- and five seeds agreeing on one fold stay one observation.
+
     The competitors are every alpha the sweep ran plus boost and legacy. A cell that is
     missing one of them is dropped from that competitor's rank -- not filled in -- and
     `coverage` below reports how ragged that makes the comparison, because a mean rank
@@ -98,10 +101,10 @@ def scores(df, metric_of):
             q = g[g.arm == arm]
             if q.empty:
                 continue
-            mu, _, n = ag.ci(q[m])
+            mu, _, n = ag.ci_folds(q, m)
             rows.append(cell | dict(competitor=label, alpha=np.nan, value=mu, n=n))
         for a, q in g[g.arm == "gate"].groupby("alpha"):
-            mu, _, n = ag.ci(q[m])
+            mu, _, n = ag.ci_folds(q, m)
             rows.append(cell | dict(competitor=f"a={a:g}", alpha=float(a),
                                     value=mu, n=n))
     return pd.DataFrame(rows)
@@ -128,13 +131,17 @@ def advantage(df, metric_of, ref_arm="boost_full"):
     """Per (cell, alpha): the paired difference against boost, and its spread.
 
     Paired on (fold, seed) -- both arms ran on the same split with the same draw, so the
-    difference removes the split and the draw at once. `dz` is that difference in units
-    of its own across-split SD: dimensionless, so it is the only form in which Carey's
-    R2 and M2OR's AUROC can be put in one column."""
+    difference removes the split and the draw at once -- and then averaged over model
+    seeds within each fold, so `n` is folds and not (fold, seed) cells. `dz` is that
+    difference in units of its own across-FOLD SD: dimensionless, so it is the only
+    form in which Carey's R2 and M2OR's AUROC can be put in one column."""
     rows = []
     for key, g in df.groupby(CELL, sort=True):
         cell = dict(zip(CELL, key))
         m = metric_of[cell["dataset"]]
+        # pair on (fold, seed), THEN average the seeds inside each fold: the model
+        # noise cancels in the difference and what survives is one advantage per
+        # held-out set, which is the sample the interval is over
         ref = (g[g.arm == ref_arm].set_index(ag.SPLIT)[m]
                .pipe(pd.to_numeric, errors="coerce"))
         ref = ref[~ref.index.duplicated()]
@@ -143,6 +150,8 @@ def advantage(df, metric_of, ref_arm="boost_full"):
         for a, q in g[g.arm == "gate"].groupby("alpha"):
             v = pd.to_numeric(q.set_index(ag.SPLIT)[m], errors="coerce")
             d = (v - ref.reindex(v.index)).dropna()
+            if isinstance(d.index, pd.MultiIndex):
+                d = d.groupby(level="fold").mean()
             if d.empty:
                 continue
             sd = float(d.std(ddof=1)) if len(d) > 1 else np.nan

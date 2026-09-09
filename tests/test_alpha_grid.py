@@ -279,3 +279,83 @@ def test_places_need_a_shared_split_and_say_how_many():
               & df.fold.isin([4, 5]))]
     p = ag.places(df, "R2")
     assert set(p["n"]) == {3}
+
+
+# ------------------------------------------------------- the fold is the unit of evidence
+
+def _seeded(metric="R2", seeds=(42, 43, 44, 45, 46), folds=(1, 2, 3, 4, 5),
+            gate=0.66, boost=0.60, jitter=0.0):
+    """A grid with a real seed axis. `jitter` moves seeds WITHIN a fold only, so the
+    fold means are unchanged however many seeds are added."""
+    rows = []
+    for i, f in enumerate(folds):
+        for j, s in enumerate(seeds):
+            base = dict(dataset="hc", regime="transductive", mol_source="chemberta",
+                        fold=f, seed=s, status="ok", nodes="nodedial",
+                        variant_tag="q0cov")
+            shift = jitter * (j - (len(seeds) - 1) / 2)
+            rows.append(base | {"arm": "boost_full", "alpha": np.nan,
+                                metric: boost + 0.01 * i + shift})
+            rows.append(base | {"arm": "gate", "alpha": 1.0,
+                                metric: gate + 0.01 * i + shift})
+    return ag.add_series(pd.DataFrame(rows))
+
+
+def test_the_interval_counts_folds_not_fold_times_seed_cells():
+    """THE correction. Five seeds on one fold rest on the same held-out rows, so they
+    are one observation about generalisation. Counting 25 would put t(24)=2.06 and
+    sqrt(25) into an interval whose effective sample size is 5."""
+    c = ag.curve(_seeded(), "R2")
+    assert list(c["n"]) == [5]
+    assert list(c["seeds"]) == [5.0]
+
+
+def test_seed_noise_is_averaged_away_and_does_not_widen_the_interval():
+    """Jitter that moves seeds inside a fold must leave the fold means alone, so the
+    interval must not move either. Under the old (fold, seed) counting it would."""
+    quiet = ag.curve(_seeded(jitter=0.0), "R2")
+    noisy = ag.curve(_seeded(jitter=0.04), "R2")
+    assert float(noisy["mean"].iloc[0]) == pytest.approx(float(quiet["mean"].iloc[0]))
+    assert float(noisy["hw"].iloc[0]) == pytest.approx(float(quiet["hw"].iloc[0]))
+
+
+def test_won_counts_folds_in_favour_not_cells():
+    d = ag.delta_vs(_seeded(), "R2")
+    assert int(d["won"].iloc[0]) == 5 and int(d["n"].iloc[0]) == 5
+
+
+def test_per_fold_delta_hands_back_the_five_numbers_the_interval_hides():
+    pf = ag.per_fold_delta(_seeded(), "R2")
+    assert len(pf) == 5 and set(pf["fold"]) == {1, 2, 3, 4, 5}
+    assert pf["d"].to_numpy() == pytest.approx([0.06] * 5)
+    assert set(pf["n_seeds"]) == {5}
+
+
+def test_noise_split_separates_the_model_draw_from_the_fold():
+    """`within` is the seed spread inside a fold; `between` is how much the answer
+    depends on which rows were held out. They are different questions and the panel
+    that shows both is the one that justifies averaging at all."""
+    ns = ag.noise_split(_seeded(jitter=0.04), "R2")
+    assert len(ns) == 1
+    r = ns.iloc[0]
+    # fold means step by 0.01 -> sd of (0, .01, .02, .03, .04)
+    assert float(r["between"]) == pytest.approx(np.std([0, .01, .02, .03, .04], ddof=1))
+    assert float(r["within"]) == pytest.approx(np.std(
+        [-2 * .04, -.04, 0, .04, 2 * .04], ddof=1))
+    assert float(r["floor"]) == pytest.approx(float(r["within"]) / np.sqrt(5))
+    assert int(r["n_folds"]) == 5 and float(r["n_seeds"]) == 5.0
+
+
+def test_places_average_seeds_before_ranking():
+    """A lucky initialisation must not take a place from a better model. Ranked per
+    (fold, seed) A and B tie at 1.5; ranked on the fold means B wins outright."""
+    rows = []
+    for s, a in ((42, 1.0), (43, 0.0)):
+        base = dict(dataset="hc", regime="transductive", mol_source="chemberta",
+                    fold=1, seed=s, status="ok", nodes="nodedial", variant_tag="q0cov")
+        rows.append(base | {"arm": "gate", "alpha": 1.0, "R2": a})
+        rows.append(base | {"arm": "boost_full", "alpha": np.nan, "R2": 0.6})
+    p = ag.places(ag.add_series(pd.DataFrame(rows)), "R2", arms=("boost_full",))
+    got = dict(zip(p.competitor, p.place))
+    assert got["a=1"] == pytest.approx(2.0)
+    assert got["boost [ESM || mol]"] == pytest.approx(1.0)

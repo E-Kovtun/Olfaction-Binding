@@ -157,3 +157,50 @@ def test_an_empty_split_becomes_a_zero_row_matrix_not_an_exception():
     emb = {"a": np.zeros(7, np.float32), "b": np.ones(7, np.float32)}
     assert sw._mat(emb, np.array([], dtype=object)).shape == (0, 7)
     assert sw._mat(emb, ["a", "b"]).shape == (2, 7)
+
+
+# ------------------------------------------------------- extending a run with seeds
+
+def test_a_finished_seed_42_run_is_extended_not_recomputed(tmp_path):
+    """The exact move being made on v9_seeded: five folds at seed 42 are on disk, and
+    the rerun asks for five seeds. Only the four new ones may be planned -- recomputing
+    seed 42 would burn a fifth of the grid AND, with --seed-graph, quietly replace rows
+    other numbers already rest on."""
+    m, _, r = sw.sibling_paths("hc", "transductive", _args(tmp_path))
+    m.parent.mkdir(parents=True, exist_ok=True)
+    rows = []
+    for fold in (1, 2, 3, 4, 5):
+        for arm, alpha in (("boost_full", np.nan), ("naive", np.nan),
+                           ("graph_legacy", np.nan), ("gate", 0.0), ("gate", 1.0)):
+            for split in ("train", "val", "test"):
+                rows.append(dict(arm=arm, alpha=alpha, fold=fold, seed=42,
+                                 split=split, status="ok", R2=0.5))
+    pd.DataFrame(rows).to_csv(r, index=False)
+
+    _, done = sw.load_done(r, m, _args(tmp_path))
+    assert len(done) == 5 * 5                      # 5 folds x 5 arms, test rows only
+
+    A = argparse.Namespace(seeds=[42, 43, 44, 45, 46], alphas=[0.0, 1.0],
+                           legacy=True, gate=True, baselines_only=False)
+    jobs = sw.plan([1, 2, 3, 4, 5], A, done)
+    assert {j[3] for j in jobs} == {43, 44, 45, 46}, "seed 42 must not be replanned"
+    # per new seed x fold: one baselines job + legacy + two gate arms
+    assert len(jobs) == 4 * 5 * 4
+    # and seed-major, so a partial run leaves whole seeds rather than a ragged slice
+    assert [j[3] for j in jobs] == sorted(j[3] for j in jobs)
+
+
+def test_resuming_with_the_wrong_seeding_flag_is_refused(tmp_path):
+    """--seed-graph is the only axis NOT in the filename, so a resume with the flag
+    flipped would append rows whose seed column means something different from the ones
+    already there, under the same name, with nothing to tell them apart."""
+    m, _, r = sw.sibling_paths("hc", "transductive", _args(tmp_path))
+    m.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame([
+        dict(arm="gate", alpha=1.0, fold=1, seed=42, split="test", seeded_graph=True),
+        dict(arm="boost_full", alpha=np.nan, fold=1, seed=42, split="test"),
+    ]).to_csv(r, index=False)
+    with pytest.raises(SystemExit, match="two different series"):
+        sw.load_done(r, m, _args(tmp_path, seed_graph=False))
+    _, cells = sw.load_done(r, m, _args(tmp_path, seed_graph=True))
+    assert len(cells) == 2      # the reference arms carry no flag and must not trip it

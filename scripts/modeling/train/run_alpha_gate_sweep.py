@@ -646,6 +646,22 @@ def load_done(rec_out, out, args):
     prev = prev.assign(seed=prev["seed"].fillna(42).astype(int))
     if "split" not in prev.columns:
         prev = prev.assign(split="test")
+    # `--seed-graph` is the one axis that is NOT in the filename, so nothing but this
+    # check stands between a resume and a records file holding two different kinds of
+    # row under one name. Half a grid with a seeded graph init and half without is not
+    # a grid: the seed column would mean something different depending on when the row
+    # was computed, and no reader could tell.
+    if "seeded_graph" in prev.columns:
+        was = set(prev["seeded_graph"].dropna().astype(bool))
+        now = bool(args.seed_graph)
+        if was and was != {now}:
+            raise SystemExit(
+                f"{rec_out.name} holds rows with seeded_graph={sorted(was)} and this "
+                f"run has --seed-graph {'on' if now else 'off'}.\n"
+                f"  Those are two different series: with the flag the graph's init "
+                f"comes from --seeds, without it from torch's global RNG.\n"
+                f"  Add or drop --seed-graph to match, or point --out at a new "
+                f"directory.")
     cells = {key(r["arm"], None if pd.isna(r["alpha"]) else r["alpha"],
                  r["fold"], r["seed"])
              for _, r in prev[prev["split"].astype(str) == "test"].iterrows()}

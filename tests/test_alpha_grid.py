@@ -359,3 +359,38 @@ def test_places_average_seeds_before_ranking():
     got = dict(zip(p.competitor, p.place))
     assert got["a=1"] == pytest.approx(2.0)
     assert got["boost [ESM || mol]"] == pytest.approx(1.0)
+
+
+def test_the_headline_battery_is_a_short_list_of_the_full_one():
+    """A regression cell writes twelve metric columns and a figure that puts a panel on
+    each is a figure nobody reads across. `which="headline"` is what the notebook plots;
+    "all" stays the default so no existing caller silently loses a column."""
+    rows = []
+    for f in (1, 2):
+        base = dict(dataset="hc", regime="transductive", mol_source="chemberta",
+                    fold=f, seed=42, status="ok", nodes="nodedial",
+                    variant_tag="q0cov", arm="gate", alpha=1.0)
+        rows.append(base | {m: 0.5 for m in
+                            ["R2", "RMSE", "MAE", "Pearson", "Spearman", "Kendall",
+                             "rec0_AUROC", "rec0_F1"]})
+    df = ag.add_series(pd.DataFrame(rows))
+
+    full = ag.metrics_available(df, "hc")
+    short = ag.metrics_available(df, "hc", which="headline")
+    assert ag.metrics_available(df, "hc") == full          # "all" is the default
+    assert set(short) < set(full)
+    assert short[0] == "R2" == full[0]                     # the metric of record leads
+    assert "Kendall" in full and "Kendall" not in short
+    assert "rec0_AUROC" in full and "rec0_AUROC" not in short
+
+
+def test_a_metric_the_run_never_wrote_is_offered_by_neither_battery():
+    """The filter is what is ON DISK, not what the battery could emit -- a mid-run
+    directory is the normal case."""
+    rows = [dict(dataset="hc", regime="transductive", mol_source="chemberta", fold=1,
+                 seed=42, status="ok", nodes="nodedial", variant_tag="q0cov",
+                 arm="gate", alpha=1.0, R2=0.5, Pearson=np.nan)]
+    df = ag.add_series(pd.DataFrame(rows))
+    for which in ("all", "headline"):
+        got = ag.metrics_available(df, "hc", which=which)
+        assert got == ["R2"], (which, got)

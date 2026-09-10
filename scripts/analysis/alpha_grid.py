@@ -52,7 +52,7 @@ while not (_root / "pyproject.toml").exists():
 if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
-from orbind.dataset import METRIC_NAMES                              # noqa: E402
+from orbind.dataset import METRIC_HEADLINE, METRIC_NAMES            # noqa: E402
 
 DEFAULT_ROOT = "results/graph/v8_alpha_gate"
 GEOMS = ["rsa", "cca", "procrustes"]
@@ -194,13 +194,21 @@ def metric_for(df):
     return {d: OF_RECORD[TASK[d]] for d in df.dataset.unique()}
 
 
-def metrics_available(df, dataset=None):
+def metrics_available(df, dataset=None, which="all"):
     """Metric columns actually written for this task, in the order the battery emits
-    them, so a selector never offers a name that reads as NaN everywhere."""
+    them, so a selector never offers a name that reads as NaN everywhere.
+
+    `which="headline"` returns the short list instead -- five names on a regression
+    panel rather than twelve. The wide battery is the right thing to WRITE (deciding
+    later is free) and the wrong thing to PLOT: the regression names run
+    R2/RMSE/MAE/Pearson/Spearman/Kendall plus a whole binarised discrete set, and a
+    figure that puts one panel on each is a figure nobody reads across.
+    """
     q = df if dataset is None else df[df.dataset == dataset]
     task = TASK[dataset] if dataset else None
-    names = (METRIC_NAMES[task] if task else
-             METRIC_NAMES["regression"] + METRIC_NAMES["classification"])
+    table = {"all": METRIC_NAMES, "headline": METRIC_HEADLINE}[which]
+    names = (table[task] if task else
+             list(table["regression"]) + list(table["classification"]))
     return [c for c in names if c in q.columns and q[c].notna().any()]
 
 

@@ -113,17 +113,28 @@ Three blocks:
 * **Performance** -- the metric of record, the paired advantage over boost, the whole
   battery, and **mean place per metric** (`alpha_grid.places`) -- ranked within each split
   and averaged, which is the summary a single hard fold cannot move. Every panel carries
-  the **repeat bar**: `|alpha=1 - legacy|`, the same model trained twice, which is this
-  cell's run-to-run floor and the ruler for every difference on the dial. It is not the
-  shaded across-fold interval -- that one is 2-30x wider and shared by every row.
+  the **repeat bar**, this cell's run-to-run floor and the ruler for every difference on
+  the dial. On a seeded multi-seed run that bar is measured (the seed spread inside a
+  fold, over `sqrt(seeds)`, since every curve is a mean over those seeds); on an unseeded
+  one it falls back to `|alpha=1 - legacy|`, the same model trained twice. The cell that
+  prints it names which. It is not the shaded across-fold interval -- that one is 2-30x
+  wider and shared by every row.
+
+`ROOT_DIR` picks the run. `METRICS` picks how much of the battery the per-metric panels
+show: `"headline"` (the default, five names on a regression cell) or `"all"` (twelve,
+wrapped over four rows). `COLS_SERIES` / `COLS_METRIC` set how many panels go in a row
+before wrapping -- the regression battery in one row is unreadable.
 * **The choice of alpha, on VALIDATION.** alpha is a hyperparameter, so choosing it on the
   folds the paper reports is selection on the test set. The block runs the leader board on
   val, applies the 1-SE rule, and only then reads test once at the chosen alpha, printing
   the gap to the luckiest alpha there as the *optimism avoided*.
 
-### The sweep writes TEST only -- run the rescore first
+### Runs made before Sep 2026 write TEST only -- run the rescore on those
 
-`run_alpha_gate_sweep.py` computes `Zp_va` and uses it only to collect receptor vectors,
+The current `run_alpha_gate_sweep.py` scores train, val and test from one computation and
+writes `val_metrics_*.csv` itself, so a fresh run needs none of this. What follows is the
+repair path for the runs that came before it (`v9_node_dial` and older), where
+`run_alpha_gate_sweep.py` computed `Zp_va` and used it only to collect receptor vectors,
 so nothing on disk is a validation score. `scripts/analysis/val_rescore.py` fills that in
 **without retraining any graph**: it reloads each cell's dumped receptor cloud
 (`--dump-embeddings`, on by default), refits the boosting head on the same train rows with

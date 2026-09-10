@@ -111,9 +111,16 @@ Three blocks:
   RSA, CCA and Procrustes, the crossover, and the travel from end to end. If the cloud
   does not move, no score difference along the dial can be attributed to structure.
 * **Performance** -- the metric of record, the paired advantage over boost, the whole
-  battery, and **mean place per metric** (`alpha_grid.places`) -- ranked within each split
-  and averaged, which is the summary a single hard fold cannot move. Every panel carries
-  the **repeat bar**, this cell's run-to-run floor and the ruler for every difference on
+  battery, and **the place against boost per metric** (`alpha_grid.duel`) -- the two
+  models ranked on each split on its own, then averaged, which is the summary a single
+  hard fold cannot move. Two models means the place lands on a 1..2 scale in steps of
+  1/n_folds: 1.0 ahead on every split, 2.0 behind on every one, 1.5 an even division.
+  It reports only the comparison the story is about -- in the k-way league
+  (`alpha_grid.places`, still what the paper tables print) a position can slip a rank
+  because two OTHER positions moved. What it gives up is magnitude, which is what the
+  advantage panels carry -- and both are shown per split as well as averaged.
+  The curve panels carry the **repeat bar**, this cell's run-to-run floor and the ruler
+  for every difference on
   the dial. On a seeded multi-seed run that bar is measured (the seed spread inside a
   fold, over `sqrt(seeds)`, since every curve is a mean over those seeds); on an unseeded
   one it falls back to `|alpha=1 - legacy|`, the same model trained twice. The cell that

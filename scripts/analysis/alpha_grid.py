@@ -504,6 +504,57 @@ def places(df, metric, by=("series",), arms=("boost_full", "graph_legacy")):
     return out[cols]
 
 
+def duel_matrix(df, metric, by=("series",), ref_arm="boost_full", arm="gate"):
+    """Head-to-head place against ONE opponent, split by split: 1 = ahead on that
+    held-out set, 2 = behind, 1.5 = exactly level.
+
+    The k-way race in `place_matrix` answers "where does this dial position stand among
+    everything that ran". This answers the narrower question the story turns on -- does
+    the model beat the boosting baseline on THIS split -- and it is not the same
+    question: a position can slip from 3rd to 4th in the k-way race because two OTHER
+    positions moved, while its own verdict against boost never changed.
+
+    Built on `per_fold_delta`, so it inherits that reduction exactly: paired on
+    (fold, seed) first, seeds averaged inside the fold, then one verdict per fold. A
+    lucky initialisation therefore cannot win a split on its own.
+    """
+    by = list(by)
+    cols = by + ["alpha", "fold", "place", "d", "n_seeds"]
+    pf = per_fold_delta(df, metric, ref_arm=ref_arm, arm=arm, by=by)
+    if pf.empty:
+        return pd.DataFrame(columns=cols).astype({"place": float, "d": float})
+    # an error metric is won by being SMALLER -- ranking it like a score hands first
+    # place to the worse model, silently and on every panel
+    lead = -pf["d"] if metric in LOWER_IS_BETTER else pf["d"]
+    return pf.assign(place=np.where(lead > 0, 1.0,
+                                    np.where(lead < 0, 2.0, 1.5)))[cols]
+
+
+def duel(df, metric, by=("series",), ref_arm="boost_full", arm="gate"):
+    """`duel_matrix` averaged over folds: one row per (by..., alpha), place in [1, 2].
+
+    The scale is the point. With n folds the place moves in steps of 1/n -- 1.0 means
+    ahead of the opponent on every split, 2.0 behind on every one, 1.5 an even
+    division -- so the number says both how often the model wins and, by its distance
+    from 1.5, how consistently. `wins`/`losses` are the same count in raw form.
+
+    It carries no magnitude: a fold won by 0.001 and one won by 0.1 both score 1. Read
+    it against `delta_vs`, which carries magnitude and no consistency.
+    """
+    by = list(by)
+    cols = by + ["alpha", "place", "wins", "losses", "n", "seeds"]
+    dm = duel_matrix(df, metric, by, ref_arm=ref_arm, arm=arm)
+    if dm.empty:
+        return pd.DataFrame(columns=cols)
+    g = dm.groupby(by + ["alpha"], dropna=False, sort=True)
+    out = g.agg(place=("place", "mean"),
+                wins=("place", lambda s: int((s == 1.0).sum())),
+                losses=("place", lambda s: int((s == 2.0).sum())),
+                n=("fold", "nunique"),
+                seeds=("n_seeds", "mean")).reset_index()
+    return out[cols]
+
+
 def delta_vs(df, metric, ref_arm="boost_full", arm="gate", by=("series",), level=0.95):
     """The paired difference `arm - ref_arm`: per (fold, seed) first, then per FOLD.
 

@@ -394,3 +394,69 @@ def test_a_metric_the_run_never_wrote_is_offered_by_neither_battery():
     for which in ("all", "headline"):
         got = ag.metrics_available(df, "hc", which=which)
         assert got == ["R2"], (which, got)
+
+
+def _duel_rows(per_fold, metric="R2"):
+    """One series, one alpha, `per_fold` = the (dial, boost) pair on each fold."""
+    rows = []
+    for f, (dial, boost) in enumerate(per_fold, start=1):
+        base = dict(dataset="hc", regime="transductive", mol_source="chemberta",
+                    fold=f, seed=42, status="ok", nodes="nodedial",
+                    variant_tag="q0cov")
+        rows.append(base | {"arm": "gate", "alpha": 0.5, metric: dial})
+        rows.append(base | {"arm": "boost_full", "alpha": np.nan, metric: boost})
+    return ag.add_series(pd.DataFrame(rows))
+
+
+def test_the_duel_place_moves_in_steps_of_one_over_the_splits():
+    """Two models, ranked on each split on its own: the mean place can only land on
+    1.0, 1.2, ... 2.0 with five folds. Three splits ahead and two behind is 1.4."""
+    df = _duel_rows([(0.7, 0.6), (0.7, 0.6), (0.7, 0.6), (0.5, 0.6), (0.5, 0.6)])
+    d = ag.duel(df, "R2")
+    assert len(d) == 1
+    r = d.iloc[0]
+    assert float(r["place"]) == pytest.approx(1.4)
+    assert (int(r["wins"]), int(r["losses"]), int(r["n"])) == (3, 2, 5)
+
+
+def test_the_duel_ends_are_ahead_everywhere_and_behind_everywhere():
+    assert float(ag.duel(_duel_rows([(0.7, 0.6)] * 5), "R2").place.iloc[0]) == 1.0
+    assert float(ag.duel(_duel_rows([(0.5, 0.6)] * 5), "R2").place.iloc[0]) == 2.0
+
+
+def test_a_tied_split_is_half_a_place_each():
+    """A rank always splits a tie, and a duel is a rank of two."""
+    d = ag.duel(_duel_rows([(0.6, 0.6)] * 4), "R2")
+    assert float(d.place.iloc[0]) == pytest.approx(1.5)
+    assert int(d.wins.iloc[0]) == 0 and int(d.losses.iloc[0]) == 0
+
+
+def test_the_duel_inverts_for_an_error_metric():
+    """RMSE is won by being SMALLER. Ranking it like a score would hand first place to
+    the worse model on every panel, quietly."""
+    df = _duel_rows([(0.4, 0.6)] * 5, metric="RMSE")
+    assert float(ag.duel(df, "RMSE").place.iloc[0]) == 1.0
+    df = _duel_rows([(0.8, 0.6)] * 5, metric="RMSE")
+    assert float(ag.duel(df, "RMSE").place.iloc[0]) == 2.0
+
+
+def test_the_duel_averages_seeds_before_deciding_a_split():
+    """One lucky initialisation must not win a split. Two seeds on one fold: the dial
+    wins the first by 0.05 and loses the second by 0.09, so the FOLD is a loss."""
+    rows = []
+    for s, dial in ((42, 0.65), (43, 0.51)):
+        base = dict(dataset="hc", regime="transductive", mol_source="chemberta",
+                    fold=1, seed=s, status="ok", nodes="nodedial", variant_tag="q0cov")
+        rows.append(base | {"arm": "gate", "alpha": 0.5, "R2": dial})
+        rows.append(base | {"arm": "boost_full", "alpha": np.nan, "R2": 0.60})
+    d = ag.duel(ag.add_series(pd.DataFrame(rows)), "R2")
+    assert float(d.place.iloc[0]) == 2.0
+    assert float(d.seeds.iloc[0]) == 2.0
+
+
+def test_the_duel_is_the_win_count_delta_vs_reports():
+    """The two summaries must not be able to disagree: place = 2 - wins/n."""
+    df = _duel_rows([(0.7, 0.6), (0.7, 0.6), (0.5, 0.6), (0.7, 0.6), (0.5, 0.6)])
+    d, dv = ag.duel(df, "R2").iloc[0], ag.delta_vs(df, "R2").iloc[0]
+    assert int(d["wins"]) == int(dv["won"])
+    assert float(d["place"]) == pytest.approx(2 - int(dv["won"]) / int(dv["n"]))

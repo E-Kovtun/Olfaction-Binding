@@ -36,9 +36,18 @@ WHAT IS MEASURED. Every cell reports both halves at once:
               its own permutation null, so the dial can be watched moving. Train
               columns only -- the diagnostic must not see test odorants.
 
-`graph_legacy` (alpha=None, the pre-v8 model) is run as its own arm so the
-comparison to the previous implementation is a row in the same table under the same
-folds, not a number quoted from another run.
+`graph_legacy` (alpha=None, the pre-v8 model) is OPT-IN (`--legacy`), and the reason
+it stopped being automatic is `--seed-graph`. Legacy and the dial's alpha=1 end are the
+same computation on the same input -- rho=1 short-circuits to the embedding dict, the
+gate is off in both, `onehot_nodes` is off in both -- so their gap only ever measured the
+initialisation lottery. Seed the graph and that lottery is gone: legacy becomes a
+bit-for-bit rerun of a cell the sweep already has, at a sixth of the graph budget.
+
+It is still worth running where it still says something:
+  * the HEADLINE TABLE, where "legacy GNN" is a row of its own (`--no-gate --legacy`);
+  * once per new series as a smoke test that rho=1 really is the identity it claims
+    (`alpha_grid.anchor_check` compares exactly those two arms);
+  * any UNSEEDED series, where the pair is a free measurement of run-to-run noise.
 
 DATASETS. cc/hc are the complete continuous insect panels: regression, R2/RMSE/MAE/
 Pearson/Spearman, upstream's `rand` and our stratified `our_inductive` folds. m2or is
@@ -58,11 +67,11 @@ extend that row rather than replacing it.
 
     # the headline table: no gate, both node kinds, 5 seeds x 5 folds
     python scripts/modeling/train/run_alpha_gate_sweep.py --dataset cc hc m2or \\
-        --mol-source chemberta --seeds 42 43 44 45 46 --no-gate \\
+        --mol-source chemberta --seeds 42 43 44 45 46 --no-gate --legacy \\
         --max-parallel 4 --gpus 0 1 2 3
     # the dial: one seed, dense alpha, one-hot nodes (where alpha is honest)
     python scripts/modeling/train/run_alpha_gate_sweep.py --dataset cc hc m2or \\
-        --mol-source chemberta --nodes onehot --no-legacy \\
+        --mol-source chemberta --nodes onehot \\
         --alphas 0 0.05 0.1 0.15 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 1.0
 
 WHAT ONE RUN WRITES -- three files, one computation:
@@ -899,13 +908,17 @@ def main():
                          "several datasets are in one invocation")
     ap.add_argument("--pool-fold", type=int, default=1,
                     help="m2or only: which LORaX fold reconstructs the pool")
-    ap.add_argument("--no-legacy", dest="legacy", action="store_false",
-                    help="skip the pre-v8 graph arm (alpha=None)")
+    ap.add_argument("--legacy", action="store_true",
+                    help="also run the pre-v8 graph arm (alpha=None). Off by default: "
+                         "with --seed-graph it is the same computation as the dial's "
+                         "alpha=1 end and reruns it for nothing. Wanted for the "
+                         "headline table's `legacy GNN` row, and as a one-off check "
+                         "that rho=1 is the identity it claims")
     ap.add_argument("--no-gate", dest="gate", action="store_false",
-                    help="skip every gate arm, leaving baselines + legacy. The cheap "
-                         "shape for the headline table, where the only graph rows "
-                         "wanted are the pre-v8 model and (with --nodes onehot) a "
-                         "single alpha")
+                    help="skip every gate arm, leaving the baselines (plus legacy "
+                         "if --legacy). The cheap shape for the headline table, where "
+                         "the only graph rows wanted are the pre-v8 model and (with "
+                         "--nodes onehot) a single alpha")
     ap.add_argument("--mol-source", nargs="+", dest="mol_sources",
                     choices=list(MOL_SOURCES), default=["chemberta"],
                     help="molecule embeddings -- the boost's molecular half AND the "

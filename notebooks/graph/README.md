@@ -120,12 +120,17 @@ Three blocks:
   because two OTHER positions moved. What it gives up is magnitude, which is what the
   advantage panels carry -- and both are shown per split as well as averaged.
   The curve panels carry the **repeat bar**, this cell's run-to-run floor and the ruler
-  for every difference on
-  the dial. On a seeded multi-seed run that bar is measured (the seed spread inside a
-  fold, over `sqrt(seeds)`, since every curve is a mean over those seeds); on an unseeded
-  one it falls back to `|alpha=1 - legacy|`, the same model trained twice. The cell that
-  prints it names which. It is not the shaded across-fold interval -- that one is 2-30x
-  wider and shared by every row.
+  for every difference on the dial: the seed spread inside a fold over `sqrt(seeds)`,
+  which is the model noise still left in a fold mean. A single-seed run has none to
+  measure and the panels draw none. It is not the shaded across-fold interval -- that
+  one is 2-30x wider and shared by every row.
+
+`graph_legacy` is **not drawn**. alpha=1 IS that model (`rho=1` short-circuits to the
+embedding dict, the gate is off, the nodes are not swapped), so on a seeded run the two
+are one computation and the arm is now opt-in in the sweep (`--legacy`). It is still
+wanted for the headline table's own `legacy GNN` row, as a one-off check that `rho=1` is
+the identity it claims (`alpha_grid.anchor_check`), and on unseeded series, where the
+pair measures the initialisation lottery.
 
 `ROOT_DIR` picks the run. `METRICS` picks how much of the battery the per-metric panels
 show: `"headline"` (the default, five names on a regression cell) or `"all"` (twelve,

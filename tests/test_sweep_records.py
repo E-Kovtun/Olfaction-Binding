@@ -181,13 +181,22 @@ def test_a_finished_seed_42_run_is_extended_not_recomputed(tmp_path):
     assert len(done) == 5 * 5                      # 5 folds x 5 arms, test rows only
 
     A = argparse.Namespace(seeds=[42, 43, 44, 45, 46], alphas=[0.0, 1.0],
-                           legacy=True, gate=True, baselines_only=False)
+                           legacy=True, gate=True, baselines_only=False,
+                           combos=["cls+mol"])
     jobs = sw.plan([1, 2, 3, 4, 5], A, done)
     assert {j[3] for j in jobs} == {43, 44, 45, 46}, "seed 42 must not be replanned"
     # per new seed x fold: one baselines job + legacy + two gate arms
     assert len(jobs) == 4 * 5 * 4
     # and seed-major, so a partial run leaves whole seeds rather than a ragged slice
     assert [j[3] for j in jobs] == sorted(j[3] for j in jobs)
+
+    # The same directory asked for BOTH heads. Seed 42's graphs are on disk, so each of
+    # its graph cells gets the missing head backfilled -- never a full retrain, and no
+    # baselines, which have one construction and are done.
+    B = argparse.Namespace(**(vars(A) | {"combos": ["cls+mol", "cls+prot+mol"]}))
+    s42 = [j for j in sw.plan([1, 2, 3, 4, 5], B, done) if j[3] == 42]
+    assert len(s42) == 5 * 3                      # legacy + two gate cells, per fold
+    assert all(j[4]["fill"] and j[4]["combos"] == ("cls+prot+mol",) for j in s42)
 
 
 def test_resuming_with_the_wrong_seeding_flag_is_refused(tmp_path):

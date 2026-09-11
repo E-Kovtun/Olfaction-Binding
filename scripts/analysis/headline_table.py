@@ -93,6 +93,11 @@ MODELS = [("boost", "boost_full", None),
           ("alpha=0", "gate", 0.0),
           ("alpha=1", "gate", 1.0)]
 LEGACY_MODEL = ("legacy", "graph_legacy", None)
+# The sweep fits more than one boosting head on each trained graph and writes them
+# under the same arm/alpha/fold/seed, told apart only by `combo`. The reference arms
+# have one construction each and are always kept.
+REF_ARMS = ("boost_full", "naive")
+DEFAULT_GRAPH_COMBO = "cls+mol"
 
 
 def parse_name(stem):
@@ -146,6 +151,14 @@ def load(root, args, prefix="metrics_"):
     # dataset's own default -- not a second, nameless variant.
     df.loc[:, "variant_tag"] = [v or CANONICAL_VARIANT.get(d, "")
                                 for d, v in zip(df.dataset, df.variant_tag)]
+    # ONE HEAD PER FRAME. A frame that held both `cls+mol` and `cls+prot+mol` rows would
+    # average two different models into every mean below and look perfectly normal.
+    # Rows written before the column existed are `cls+mol`: nothing else was fitted.
+    want = getattr(args, "graph_combo", None) or DEFAULT_GRAPH_COMBO
+    combo = (df["combo"] if "combo" in df.columns
+             else pd.Series(np.nan, index=df.index, dtype=object))
+    combo = combo.where(combo.notna(), DEFAULT_GRAPH_COMBO).astype(str)
+    df = df[df["arm"].isin(REF_ARMS) | (combo == want)]
     if args.dataset:
         df = df[df.dataset.isin(args.dataset)]
     if args.mol_source:
@@ -451,6 +464,11 @@ def main():
                     help="edge variants to show. Default: each dataset's canonical one "
                          "(q99greedy on m2or)")
     ap.add_argument("--all-variants", action="store_true")
+    ap.add_argument("--graph-combo", default=DEFAULT_GRAPH_COMBO,
+                    choices=["cls+mol", "cls+prot+mol"],
+                    help="which boosting head the graph rows are read from. cls+mol = "
+                         "[z_prot || molecule], the graph replacing ESM; cls+prot+mol "
+                         "adds the raw ESM block. Never both in one table")
     ap.add_argument("--metric", default=None,
                     help="metric to rank on; default R2 for regression runs, AUROC for "
                          "classification, per group")

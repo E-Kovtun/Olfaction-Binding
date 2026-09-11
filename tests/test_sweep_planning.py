@@ -179,10 +179,18 @@ def test_no_gate_and_baselines_only_trim_the_grid(sweep):
 def test_a_finished_cell_is_skipped_but_a_new_seed_is_not(sweep):
     done = {sweep.key("gate", 1.0, 1, 42), sweep.key("graph_legacy", None, 1, 42),
             sweep.key("boost_full", None, 1, 42), sweep.key("naive", None, 1, 42)}
-    assert sweep.plan([1], A(seeds=[42], alphas=[1.0]), done) == []
-    jobs = sweep.plan([1], A(seeds=[42, 43], alphas=[1.0]), done)
+    # a run asking only for the head those rows carry has nothing left at seed 42
+    assert sweep.plan([1], A(seeds=[42], alphas=[1.0], combos=["cls+mol"]), done) == []
+    jobs = sweep.plan([1], A(seeds=[42, 43], alphas=[1.0], combos=["cls+mol"]), done)
     assert {j[3] for j in jobs} == {43}
     assert len(jobs) == 3
+    # asking for BOTH heads backfills seed 42 -- one job per graph cell, the missing
+    # head only, flagged as a fill -- and runs seed 43 in full
+    jobs = sweep.plan([1], A(seeds=[42, 43], alphas=[1.0]), done)
+    s42 = [j for j in jobs if j[3] == 42]
+    assert [(j[0], j[4]["combos"], j[4]["fill"]) for j in s42] == [
+        ("graph_legacy", ("cls+prot+mol",), True), ("gate", ("cls+prot+mol",), True)]
+    assert not any(j[4].get("fill") for j in jobs if j[3] == 43)
 
 
 def test_a_seedless_csv_is_read_as_seed_42(sweep, tmp_path):
@@ -206,8 +214,14 @@ def test_a_seedless_csv_is_read_as_seed_42(sweep, tmp_path):
     rows, done = sweep.load_done(r, m, A())
     assert len(rows) == 8
     assert all(k[3] == 42 for k in done)
-    assert sweep.plan([1, 2], A(seeds=[42], alphas=[1.0]), done) == []
-    jobs = sweep.plan([1, 2], A(seeds=[42, 43, 44], alphas=[1.0]), done)
+    assert sweep.plan([1, 2], A(seeds=[42], alphas=[1.0], combos=["cls+mol"]),
+                      done) == []
+    # the old rows are cls+mol, so a run that wants both heads only BACKFILLS them
+    old = sweep.plan([1, 2], A(seeds=[42], alphas=[1.0]), done)
+    assert old and all(j[4]["fill"] and j[4]["combos"] == ("cls+prot+mol",)
+                       for j in old)
+    jobs = sweep.plan([1, 2], A(seeds=[42, 43, 44], alphas=[1.0], combos=["cls+mol"]),
+                      done)
     assert {j[3] for j in jobs} == {43, 44}
     assert len(jobs) == 2 * 2 * 3          # 2 new seeds x 2 folds x (baselines+legacy+gate)
     # --force ignores the file entirely

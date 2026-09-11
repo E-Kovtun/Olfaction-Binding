@@ -132,7 +132,7 @@ wanted for the headline table's own `legacy GNN` row, as a one-off check that `r
 the identity it claims (`alpha_grid.anchor_check`), and on unseeded series, where the
 pair measures the initialisation lottery.
 
-`ROOT_DIR` picks the run. `METRICS` picks how much of the battery the per-metric panels
+`ROOT_DIR` picks the run. `GRAPH_COMBO` picks which boosting head the graph rows are read from -- `cls+mol` ([z_prot || molecule], the default) or `cls+prot+mol` ([z_prot || raw ESM || molecule]); the sweep fits both on one graph and a frame never holds both. `METRICS` picks how much of the battery the per-metric panels
 show: `"headline"` (the default, five names on a regression cell) or `"all"` (twelve,
 wrapped over four rows). `COLS_SERIES` / `COLS_METRIC` set how many panels go in a row
 before wrapping -- the regression battery in one row is unreadable.

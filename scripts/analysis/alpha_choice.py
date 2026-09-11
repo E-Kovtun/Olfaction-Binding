@@ -428,10 +428,13 @@ def main():
                     help="leave one table out: choose on two datasets, report where "
                          "that alpha lands on the third")
     ap.add_argument("--csv", default=None, help="write the per-cell scores here")
+    ap.add_argument("--graph-combo", default="cls+mol",
+                    choices=["cls+mol", "cls+prot+mol"],
+                    help="which boosting head the graph rows are read from")
     a = ap.parse_args()
 
     kw = dict(root=a.root, mol_source=a.mol_source, nodes=a.nodes,
-              dataset=a.dataset, regime=a.regime, seed=a.seed)
+              dataset=a.dataset, regime=a.regime, seed=a.seed, combo=a.graph_combo)
     try:
         df = ag.load(split=a.select_on, **kw)
     except SystemExit:

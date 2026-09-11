@@ -103,7 +103,8 @@ SPLIT_PREFIX = {"test": "metrics_", "val": "val_metrics_"}
 
 
 def load(root=DEFAULT_ROOT, mol_source=None, nodes="onehot", dataset=None, regime=None,
-         variant=None, seed=None, folds=None, drop_failed=True, split="test"):
+         variant=None, seed=None, folds=None, drop_failed=True, split="test",
+         combo="cls+mol"):
     """Every metrics CSV under `root` as one frame, filtered by the notebook's knobs.
 
     `nodes` defaults to "onehot" because that is the only setting in which the v8 gate's
@@ -126,6 +127,12 @@ def load(root=DEFAULT_ROOT, mol_source=None, nodes="onehot", dataset=None, regim
     frame alpha may be CHOSEN on -- choosing on "test" and then reporting "test" is
     choosing the number and its defence from the same rows. The two live in separate
     files with separate globs, so the frames cannot silently merge.
+
+    `combo` picks WHICH BOOSTING HEAD the graph rows come from. The sweep fits
+    `cls+mol` ([z_prot || molecule]) and `cls+prot+mol` ([z_prot || raw ESM ||
+    molecule]) on the same trained graph and writes both under one arm/alpha/fold/seed;
+    a frame holding both would average two models into one number, so a frame holds
+    exactly one. The reference arms are kept whichever is chosen.
     """
     import argparse
     ht = _parser()
@@ -135,7 +142,7 @@ def load(root=DEFAULT_ROOT, mol_source=None, nodes="onehot", dataset=None, regim
     ns = argparse.Namespace(dataset=_as_list(dataset), mol_source=_as_list(mol_source),
                             regime=_as_list(regime), nodes=_as_list(nodes),
                             variant=_as_list(variant), all_variants=False,
-                            all_seeds=True)
+                            all_seeds=True, graph_combo=combo)
     if split not in SPLIT_PREFIX:
         raise ValueError(f"split must be one of {sorted(SPLIT_PREFIX)}, got {split!r}")
     df = ht.load(root, ns, prefix=SPLIT_PREFIX[split])

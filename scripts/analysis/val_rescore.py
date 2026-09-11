@@ -149,9 +149,16 @@ def score_cell(row, P, V, dumps, task, verify):
         if "z_prot" not in z:
             return None, None, f"{f.name} holds no z_prot (run without --dump-embeddings?)"
         Z, recs = z["z_prot"], z["receptors"]
-        Xtr = features(Z, recs, P["rec_tr"], P["Xm_tr"])
-        Xva = features(Z, recs, V["rec"], V["Xm"])
-        Xte = features(Z, recs, P["rec_te"], P["Xm_te"]) if verify else None
+        # the head decides what follows z_prot: [molecule] for cls+mol, [raw ESM ||
+        # molecule] for cls+prot+mol -- the sweep's own block order
+        c = row.get("combo")
+        prot = isinstance(c, str) and c == "cls+prot+mol"
+        tail = ((lambda xp, xm: np.concatenate([xp, xm], 1)) if prot
+                else (lambda xp, xm: xm))
+        Xtr = features(Z, recs, P["rec_tr"], tail(P["Xp_tr"], P["Xm_tr"]))
+        Xva = features(Z, recs, V["rec"], tail(V["Xp"], V["Xm"]))
+        Xte = (features(Z, recs, P["rec_te"], tail(P["Xp_te"], P["Xm_te"]))
+               if verify else None)
         if Xtr is None or Xva is None:
             return None, None, f"{f.name}: a receptor in this fold is not in the dump"
 
@@ -160,6 +167,13 @@ def score_cell(row, P, V, dumps, task, verify):
     test = (sweep._score(P, predict_scores(est, Xte, task), task)
             if verify and Xte is not None else None)
     return val, test, ""
+
+
+def _cell(r):
+    """The sweep's own resume identity, head included -- two heads on one graph are two
+    rows to score, not one row seen twice."""
+    return sweep.key(r["arm"], None if pd.isna(r["alpha"]) else r["alpha"],
+                     r["fold"], r["seed"], r.get("combo"))
 
 
 def rescore_file(csv_path, args):
@@ -189,11 +203,8 @@ def rescore_file(csv_path, args):
     if out.exists() and not args.force:
         prev = pd.read_csv(out)
         rows = prev.to_dict("records")
-        done = {(r["arm"], "" if pd.isna(r["alpha"]) else round(float(r["alpha"]), 6),
-                 int(r["fold"]), int(r["seed"])) for _, r in prev.iterrows()}
-    todo = [r for _, r in src.iterrows()
-            if (r["arm"], "" if pd.isna(r["alpha"]) else round(float(r["alpha"]), 6),
-                int(r["fold"]), int(r["seed"])) not in done]
+        done = {_cell(r) for _, r in prev.iterrows()}
+    todo = [r for _, r in src.iterrows() if _cell(r) not in done]
     print(f"\n{csv_path.name}  [{ds}/{regime}, mol {mol}, nodes {nodes}]  "
           f"{len(todo)} cell(s) to score ({len(done)} already in {out.name})")
     if not todo or args.dry_run:

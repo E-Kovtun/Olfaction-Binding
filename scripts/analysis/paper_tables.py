@@ -838,6 +838,12 @@ def main():
                          "with what the selection rules chose and what they refused. "
                          "Use it when a baseline row moves and you want to know why")
     ap.add_argument("--latex", action="store_true")
+    ap.add_argument("--graph-combo", default="cls+mol",
+                    choices=["cls+mol", "cls+prot+mol"],
+                    help="which boosting head the GNN rows are read from. cls+mol = "
+                         "[z_prot || molecule] (the graph replacing ESM, what the tables "
+                         "have always shown); cls+prot+mol = [z_prot || raw ESM || "
+                         "molecule], the construction the borrowed baseline rows use")
     a = ap.parse_args()
     a.alphas = (None if any(str(x).lower() == "all" for x in a.alphas)
                 else [float(x) for x in a.alphas])
@@ -846,11 +852,12 @@ def main():
         audit(a)
         return
     df = ag.load(root=a.root, mol_source=a.mol_source, nodes=a.nodes,
-                 dataset=a.dataset, regime=a.regime, seed=a.seed)
+                 dataset=a.dataset, regime=a.regime, seed=a.seed, combo=a.graph_combo)
     tables = build(df, a)
     if not tables:
         raise SystemExit("nothing to print")
-    print(f"\nmolecule source: {a.mol_source}   nodes: {','.join(a.nodes)}")
+    print(f"\nmolecule source: {a.mol_source}   nodes: {','.join(a.nodes)}   "
+          f"GNN head: {a.graph_combo}")
     print("cells: mean +/- 95% t-CI over the splits.  "
           + ("last column: paired difference vs boost [won/n]" if a.delta else
              "mean place: rank among the rows WITHIN each split, averaged (1 = best)"))

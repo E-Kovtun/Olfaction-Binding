@@ -27,8 +27,9 @@ ablations into one dial with two known ends:
 WHAT IS MEASURED. Every cell reports both halves at once:
 
   PREDICTION  the pipeline's own head -- `train_boost` on [ z_prot || raw molecule ],
-              the `cls+mol` combo, R2/RMSE/MAE/Pearson/Spearman on the fold's test
-              rows. Alongside it two references that are not the graph at all:
+              the `cls+mol` combo, and on [ z_prot || raw ESM || molecule ], the
+              `cls+prot+mol` one -- both fitted on the SAME trained graph, see TWO
+              HEADS below. R2/RMSE/MAE/Pearson/Spearman on the fold's test rows. Alongside it two references that are not the graph at all:
               `boost_full` = [ raw ESM || molecule ] (what the graph must beat) and
               `naive` = the constant train mean (R2's honest zero).
   GEOMETRY    the three second-order readouts (RSA, CCA, Procrustes) of the receptor
@@ -90,6 +91,35 @@ WHAT ONE RUN WRITES -- three files, one computation:
 Scoring all three splits costs two extra predicts per cell and no extra training: the
 head is fit ONCE and asked three times. Refitting per split would make each column a
 different model and the val number would stop being about the reported one.
+
+TWO HEADS ON ONE GRAPH (`--combos`, both by default). Training the graph is the cost of
+a cell; a boosting head is seconds. So every head asked for is fitted on the SAME
+receptor cloud, and each is its own set of rows, told apart by the `combo` column:
+
+    cls+mol        [ z_prot || molecule ]              the graph REPLACES ESM
+    cls+prot+mol   [ z_prot || raw ESM || molecule ]   the graph ADDS to what boost reads
+
+One graph under both is also what makes their difference readable: with two trainings
+it would carry the graph's own draw on top of the ESM block.
+
+A directory that already holds some heads is BACKFILLED, not recomputed. A cell whose
+`cls+mol` rows are on disk and whose `cls+prot+mol` rows are not gets a job for the
+missing head only, and that job
+  1. rebuilds the receptor cloud from the cell's dump and refits the head that IS
+     recorded; if that reproduces the recorded test metric to 1e-4, the dump is the
+     cloud those rows came from, and the new head is fitted on it with no graph
+     trained -- `z_source=dump`, geometry inherited from the recorded row;
+  2. otherwise (no dump, no z_prot in it, a receptor missing, no reproduction, or
+     `--no-reuse-dumps`) trains the graph again and fits only the missing head --
+     `z_source=retrained`. With --seed-graph that is the same model up to CUDA scatter
+     order; on an unseeded series it is a different draw, and the column says so.
+The dump is only ever ADDED to: a backfill never replaces the cloud or the predictions
+the rows already on disk were computed from.
+
+Rows written before the column existed read as `cls+mol`, the only head there was, and
+every reader keeps to ONE head -- `alpha_grid.load(combo=...)`, `--graph-combo` on the
+table scripts, default `cls+mol`. A frame holding both would average two models into
+one number.
 
 SEEDING THE GRAPH (`--seed-graph`). Off by default, and the default is the historical
 behaviour: `_train_one` never applied `hp["seed"]`, so the graph's weights came from
@@ -200,6 +230,38 @@ SPLITS = ["train", "val", "test"]
 SPLIT_KEYS = {"train": ("y_tr", "rec_tr", "mol_tr"),
               "val": ("y_va", "rec_va", "mol_va"),
               "test": ("y_te", "rec_te", "mol_te")}
+SPLIT_SHORT = {"train": "tr", "val": "va", "test": "te"}
+
+# THE HEADS FITTED ON ONE GRAPH, in canonical order. See TWO HEADS in the docstring.
+GRAPH_COMBOS = ("cls+mol", "cls+prot+mol")
+# The reference arms have exactly one construction each; recorded so a row describes
+# itself, and so the resume key has the same shape for every arm.
+REF_COMBO = {"boost_full": "prot+mol", "naive": "const"}
+# What a graph row written before the column existed IS: the sweep fitted nothing else.
+LEGACY_COMBO = "cls+mol"
+# Where each head's per-pair test predictions go in the cell's npz. `pred` keeps its old
+# meaning, so every reader of a dump already on disk still gets what it expects.
+PRED_KEY = {"cls+mol": "pred", "cls+prot+mol": "pred_prot"}
+OF_RECORD = {"regression": "R2", "classification": "AUROC"}
+# How close a head refitted on a DUMPED cloud must land to the number recorded when the
+# graph was trained. XGBoost on the same float32 inputs with the same seed repeats
+# itself (val_rescore measured ~1e-6); past this the dump is not the cloud those rows
+# came from, and the backfill retrains instead of trusting it.
+DUMP_TOL = 1e-4
+
+
+def combos_wanted(args):
+    """The heads this run fits, in canonical order whatever order the flag listed."""
+    asked = getattr(args, "combos", None) or GRAPH_COMBOS
+    return tuple(c for c in GRAPH_COMBOS if c in asked)
+
+
+def _is_cell_col(name):
+    """Columns that belong to the CELL -- the trained graph -- and not to a head: the
+    geometry of the receptor cloud and the gate's anchor rank. A head backfilled from a
+    dump inherits them from the row it is added beside."""
+    return name == "k_pca" or any(name in (f"{g}_{r}", f"{g}_{r}_z")
+                                  for g in GEOMS for r in REFS)
 
 
 def _git_commit():
@@ -385,21 +447,38 @@ def _score_split(P, pred, task, split):
     return _score(Q, pred, task)
 
 
-def _dump(args, ds, regime, arm, alpha, fold, seed, **arrays):
+def dump_file(args, ds, regime, arm, alpha, fold, seed):
+    """Where one cell's npz lives. One definition for the writer and the backfill."""
+    a = "None" if alpha is None else f"{float(alpha):g}"
+    m = out_path(ds, regime, args)
+    return (m.parent / "dumps" / m.stem.replace("metrics_", "")
+            / f"{arm}_a{a}_f{fold}_s{seed}.npz")
+
+
+def _dump(args, ds, regime, arm, alpha, fold, seed, merge=False, **arrays):
     """One npz per cell, keyed by everything that changes what is in it.
 
     The key matters more than it looks. The extractor's own checkpointing writes
     `gnn_{name}_model{m}.pt`, and `name` is "cls" in every cell of this grid --
     one directory would have the first cell's weights silently reused by the
     other 719. Keying on (arm, alpha, fold, seed) under the run's own stem makes
-    that class of mistake impossible here."""
+    that class of mistake impossible here.
+
+    `merge=True` is the backfill's mode: keys already in the file are KEPT and only new
+    ones are added. A head fitted later must not replace the receptor cloud or the
+    predictions that the rows already on disk were computed from. Written to a temp
+    file and moved into place, so a kill mid-write cannot leave half an npz."""
     if not arrays:
         return
-    a = "None" if alpha is None else f"{float(alpha):g}"
-    d = (out_path(ds, regime, args).parent / "dumps"
-         / out_path(ds, regime, args).stem.replace("metrics_", ""))
-    d.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(d / f"{arm}_a{a}_f{fold}_s{seed}.npz", **arrays)
+    f = dump_file(args, ds, regime, arm, alpha, fold, seed)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    if merge and f.exists():
+        with np.load(f) as old:
+            kept = {k: old[k] for k in old.files}
+        arrays = kept | {k: v for k, v in arrays.items() if k not in kept}
+    tmp = f.with_name(f.stem + ".tmp.npz")
+    np.savez_compressed(tmp, **arrays)
+    tmp.replace(f)
 
 
 def _baseline_rows(fold, seed, P, args):
@@ -433,12 +512,14 @@ def _baseline_rows(fold, seed, P, args):
                 t_graph=0.0, t_head=t_head, **provenance(args))
     for s in want:
         rows.append(_row("boost_full", None, fold, seed, split=s,
+                         combo=REF_COMBO["boost_full"],
                          n_rows=len(P[SPLIT_KEYS[s][0]]), **base,
                          **_score_split(P, predict_scores(est, X[s], task), task, s)))
     for s in want:
         y = P[SPLIT_KEYS[s][0]]
         const = np.full(len(y), float(P["y_tr"].mean()), dtype=np.float32)
         rows.append(_row("naive", None, fold, seed, split=s, n_rows=len(y),
+                         combo=REF_COMBO["naive"],
                          **(base | dict(t_head=0.0)),
                          **_score_split(P, const, task, s)))
     pred = predict_scores(est, X["test"], task)
@@ -452,8 +533,8 @@ def _baseline_rows(fold, seed, P, args):
     return rows
 
 
-def _graph_row(arm, alpha, fold, seed, ds, P, args):
-    """One trained graph -> the cls+mol boost feature -> metrics + geometry."""
+def _train_graph(arm, alpha, fold, seed, ds, P, args):
+    """Train one graph. ({"tr","va","te"} -> per-pair receptor vectors, extractor, sec)."""
     task = TASK[ds]
     pp, mp = paths(ds, args)
     dial = getattr(args, "dial", "gate")
@@ -469,68 +550,182 @@ def _graph_row(arm, alpha, fold, seed, ds, P, args):
         deterministic_init=args.seed_graph, **knob)
     t0 = time.time()
     Zp_tr, Zp_va, Zp_te = ext.fit_transform(P["pairs"], P["tr"], P["va"], P["te"], seed)
-    t_graph = time.time() - t0
-    want = splits_wanted(args, P)
-    Z = {"train": Zp_tr, "val": Zp_va, "test": Zp_te}
-    X = {s: np.concatenate([Z[s], P[f"Xm_{k}"]], 1)
-         for s, k in (("train", "tr"), ("val", "va"), ("test", "te")) if s in want}
-    t1 = time.time()
-    # ONE fit, scored on every split. Refitting per split would be a different model
-    # per column and the val number would stop being about the reported one.
-    est = fit_boost(np.concatenate([Zp_tr, P["Xm_tr"]], 1), P["y_tr"],
-                    seed=seed, task=task)
-    t_head = time.time() - t1
-    pred = predict_scores(est, X["test"], task)
-    # One receptor, one row: the per-pair features repeat the receptor vector, so
-    # collapse back to the universe order the reference clouds are in. All three
-    # splits are walked -- a receptor that appears only in val would otherwise be
-    # missing and silently shift every row below it.
+    return {"tr": Zp_tr, "va": Zp_va, "te": Zp_te}, ext, time.time() - t0
+
+
+def _z_from_dump(path, P):
+    """Per-pair receptor vectors for every split, rebuilt from a cell's dumped cloud.
+    (dict or None, reason).
+
+    Lossless under `emit="prot"`: the per-pair feature IS the receptor's row of z_prot,
+    and the dump holds exactly one row per receptor. That is an argument rather than a
+    proof, which is why `_verify_dump` runs before anything is fitted on it."""
+    if not path.exists():
+        return None, f"no dump at {path.name}"
+    with np.load(path) as z:
+        if "z_prot" not in z.files or "receptors" not in z.files:
+            return None, f"{path.name} holds no z_prot (a --no-dump-embeddings run?)"
+        Z, recs = z["z_prot"], [str(r) for r in z["receptors"]]
+    row = {r: i for i, r in enumerate(recs)}
+    out = {}
+    for k in ("tr", "va", "te"):
+        idx = [row.get(str(r)) for r in P[f"rec_{k}"]]
+        if any(i is None for i in idx):
+            return None, f"{path.name}: a receptor of this fold's {k} split is not in it"
+        out[k] = Z[np.asarray(idx, dtype=np.int64)].astype(np.float32)
+    return out, ""
+
+
+def _head_features(combo, Z, P, k):
+    """One head's input on one split, blocks in the order the combo names them."""
+    if combo == "cls+mol":
+        blocks = (Z, P[f"Xm_{k}"])
+    elif combo == "cls+prot+mol":
+        blocks = (Z, P[f"Xp_{k}"], P[f"Xm_{k}"])
+    else:
+        raise ValueError(f"unknown graph combo {combo!r}; the sweep fits {GRAPH_COMBOS}")
+    return np.concatenate(blocks, 1)
+
+
+def _cloud(P, Zs):
+    """One receptor, one row, in the universe order the reference clouds are in.
+
+    The per-pair features repeat the receptor vector, so this collapses them. All three
+    splits are walked -- a receptor that appears only in val would otherwise be missing
+    and silently shift every row below it."""
     seen = {}
-    for idx, part in ((P["tr"], Zp_tr), (P["va"], Zp_va), (P["te"], Zp_te)):
-        rc = P["pairs"]["receptor"].to_numpy()[idx]
-        for i, r in enumerate(rc):
-            seen.setdefault(r, part[i])
+    for k in ("tr", "va", "te"):
+        for r, v in zip(P[f"rec_{k}"], Zs[k]):
+            seen.setdefault(r, v)
     missing = [r for r in P["order"] if r not in seen]
     Z = np.stack([seen[r] for r in P["order"] if r in seen]).astype(np.float64)
-    geo = {} if missing else _geometry(Z, P, args.n_perm)
-    dump = {}
-    if args.dump_embeddings and not missing:
-        # the receptor cloud the geometry was measured on, in universe order. 1.3 MB
-        # on m2or, 50 KB on the insects -- against ~6 MB for the weights, and this is
-        # what every downstream geometry question actually consumes
-        dump |= dict(z_prot=Z.astype(np.float32),
-                     receptors=np.asarray(P["order"], dtype=object).astype("U"))
-    if args.dump_predictions:
-        dump |= dict(pred=np.asarray(pred, np.float32),
-                     y_true=np.asarray(P["y_te"], np.float32),
-                     receptor=np.asarray(P["rec_te"], dtype=object).astype("U"),
-                     inchikey=np.asarray(P["mol_te"], dtype=object).astype("U"))
-    _dump(args, ds, args._regime, arm, alpha, fold, seed, **dump)
-    base = dict(n_receptors=len(P["order"]),
-                k_pca=int(getattr(ext, "_k_pca", 0)), variant=args._variant,
+    return Z, missing
+
+
+def _verify_dump(Zs, P, seed, task, expect):
+    """Refit a head that is ALREADY recorded, on the dumped cloud, and compare its test
+    metric of record with the recorded one. (ok, note).
+
+    No recorded head means nothing to check against, and an unchecked dump is not used:
+    the backfill then retrains, which costs time and never costs correctness."""
+    if not expect:
+        return False, "no recorded head to verify the dump against"
+    combo, rec = next(iter(expect.items()))
+    m = OF_RECORD[task]
+    if m not in rec or not np.isfinite(rec[m]):
+        return False, f"the recorded {combo} row carries no {m}"
+    est = fit_boost(_head_features(combo, Zs["tr"], P, "tr"), P["y_tr"],
+                    seed=seed, task=task)
+    got = _score_split(P, predict_scores(est, _head_features(combo, Zs["te"], P, "te"),
+                                         task), task, "test")[m]
+    gap = abs(float(got) - float(rec[m]))
+    return gap <= DUMP_TOL, f"the dump reproduces the recorded {combo} test {m} to {gap:.1e}"
+
+
+def _graph_rows(arm, alpha, fold, seed, ds, P, args, spec=None):
+    """One graph -> every head asked for -> metrics + geometry, a row per (head, split).
+
+    A NORMAL job (`spec["fill"]` false) trains the graph and fits every head in
+    `spec["combos"]` on it. A BACKFILL job is a cell whose graph was trained before and
+    which already has some head on disk; it is asked only for the missing heads, and
+    tries the dump first -- see TWO HEADS in the module docstring for the order and the
+    `z_source` values."""
+    spec = spec or {}
+    task = TASK[ds]
+    regime = args._regime
+    combos = tuple(spec.get("combos") or combos_wanted(args))
+    fill = bool(spec.get("fill"))
+    want = splits_wanted(args, P)
+
+    Zs, ext, t_graph, source = None, None, 0.0, "trained"
+    if fill and getattr(args, "reuse_dumps", True):
+        Zs, note = _z_from_dump(dump_file(args, ds, regime, arm, alpha, fold, seed), P)
+        if Zs is not None:
+            ok, note = _verify_dump(Zs, P, seed, task, spec.get("expect"))
+            if ok:
+                source = "dump"
+            else:
+                Zs = None
+        if Zs is None:
+            print(f"  backfill {arm} a={alpha} f{fold} s{seed}: {note} -- training the "
+                  f"graph again", flush=True)
+    if Zs is None:
+        Zs, ext, t_graph = _train_graph(arm, alpha, fold, seed, ds, P, args)
+        source = "retrained" if fill else "trained"
+
+    Z, missing = _cloud(P, Zs)
+    inherit = spec.get("inherit") or {}
+    inherited_geo = {k: v for k, v in inherit.items() if k != "k_pca"}
+    if source == "dump" and inherited_geo:
+        geo = inherited_geo
+    else:
+        geo = {} if missing else _geometry(Z, P, args.n_perm)
+    k = getattr(ext, "_k_pca", None) if ext is not None else inherit.get("k_pca")
+    k_pca = int(k) if k is not None and np.isfinite(float(k)) else 0
+
+    dial = getattr(args, "dial", "gate")
+    base = dict(n_receptors=len(P["order"]), k_pca=k_pca, variant=args._variant,
                 mol_source=args.mol_source, nodes=args.nodes, dial=dial,
                 mix_seed=(args.mix_seed if dial == "nodes" else ""),
-                seeded_graph=bool(args.seed_graph),
-                t_graph=t_graph, t_head=t_head, **provenance(args), **geo)
-    # The geometry is a property of the CELL, not of a split -- it is measured on the
-    # receptor cloud, which no held-out set changes. Repeated on every row so one line
-    # of the dump is self-contained.
-    return [_row(arm, alpha, fold, seed, split=s, n_rows=len(P[SPLIT_KEYS[s][0]]),
-                 **base, **_score_split(P, predict_scores(est, X[s], task), task, s))
-            for s in want]
+                seeded_graph=bool(args.seed_graph), z_source=source,
+                t_graph=t_graph, **provenance(args), **geo)
+    rows, dump = [], {}
+    for combo in combos:
+        t1 = time.time()
+        # ONE fit per head, scored on every split. Refitting per split would be a
+        # different model per column and the val number would stop being about the
+        # reported one.
+        est = fit_boost(_head_features(combo, Zs["tr"], P, "tr"), P["y_tr"],
+                        seed=seed, task=task)
+        t_head = time.time() - t1
+        pred = {s: predict_scores(est, _head_features(combo, Zs[SPLIT_SHORT[s]], P,
+                                                      SPLIT_SHORT[s]), task)
+                for s in want}
+        # The geometry is a property of the CELL, not of a split or a head -- it is
+        # measured on the receptor cloud. Repeated on every row so one line of the dump
+        # is self-contained.
+        rows += [_row(arm, alpha, fold, seed, split=s, combo=combo,
+                      n_rows=len(P[SPLIT_KEYS[s][0]]), t_head=t_head, **base,
+                      **_score_split(P, pred[s], task, s))
+                 for s in want]
+        if args.dump_predictions:
+            dump[PRED_KEY[combo]] = np.asarray(pred["test"], np.float32)
+
+    if args.dump_predictions:
+        dump |= dict(y_true=np.asarray(P["y_te"], np.float32),
+                     receptor=np.asarray(P["rec_te"], dtype=object).astype("U"),
+                     inchikey=np.asarray(P["mol_te"], dtype=object).astype("U"))
+    if args.dump_embeddings and not missing and source != "dump":
+        # the receptor cloud the geometry was measured on, in universe order. 1.3 MB
+        # on m2or, 50 KB on the insects -- against ~6 MB for the weights, and this is
+        # what every downstream geometry question and every backfill consumes
+        dump |= dict(z_prot=Z.astype(np.float32),
+                     receptors=np.asarray(P["order"], dtype=object).astype("U"))
+    _dump(args, ds, regime, arm, alpha, fold, seed, merge=fill, **dump)
+    return rows
 
 
 def _failed(job, err):
-    arm, alpha, fold, seed = job
-    r = _row(arm, alpha, fold, seed, split="test",
-             **{k: float("nan") for k in TASK_METRICS["regression"]},
-             **{k: float("nan") for k in TASK_METRICS["classification"]})
-    r["status"] = f"failed: {err}"
-    return r
+    """One failed TEST row per head the job owed, so the resume and the progress count
+    see every head that did not land -- not one row standing in for two."""
+    arm, alpha, fold, seed = job[:4]
+    spec = job[4] if len(job) > 4 else {}
+    heads = [None] if arm == "baselines" else list(spec.get("combos") or GRAPH_COMBOS)
+    out = []
+    for c in heads:
+        r = _row(arm, alpha, fold, seed, split="test",
+                 **{k: float("nan") for k in TASK_METRICS["regression"]},
+                 **{k: float("nan") for k in TASK_METRICS["classification"]})
+        if c is not None:
+            r["combo"] = c
+        r["status"] = f"failed: {err}"
+        out.append(r)
+    return out
 
 
 def _run_job(job, ds, regime, args, cache, data):
-    arm, alpha, fold, seed = job
+    arm, alpha, fold, seed = job[:4]
+    spec = job[4] if len(job) > 4 else {}
     # The fold prep is seed-independent (splits, embeddings, the response matrix), so
     # it is cached by fold alone and shared by every seed a worker happens to draw.
     if fold not in cache:
@@ -538,7 +733,7 @@ def _run_job(job, ds, regime, args, cache, data):
     P = cache[fold]
     if arm == "baselines":
         return _baseline_rows(fold, seed, P, args)
-    return _graph_row(arm, alpha, fold, seed, ds, P, args)
+    return _graph_rows(arm, alpha, fold, seed, ds, P, args, spec)
 
 
 def _worker(job_q, res_q, ds, regime, args, wid=0, log_dir=None):
@@ -566,16 +761,23 @@ def _worker(job_q, res_q, ds, regime, args, wid=0, log_dir=None):
                 for row in _run_job(job, ds, regime, args, cache, data):
                     res_q.put(("row", (wid, row)))
             except Exception as e:                  # noqa: BLE001 -- one cell must not kill the sweep
-                res_q.put(("row", (wid, _failed(job, e))))
+                for row in _failed(job, e):
+                    res_q.put(("row", (wid, row)))
     finally:
         res_q.put(("worker_done", wid))
 
 
-def key(arm, alpha, fold, seed):
-    """The resume identity of one cell. Everything that changes what is computed and
-    is NOT already fixed by the filename has to be in here, or a second invocation
-    reads a finished file and silently reports the first one's numbers."""
-    return (arm, "" if alpha is None else round(float(alpha), 6), int(fold), int(seed))
+def key(arm, alpha, fold, seed, combo=None):
+    """The resume identity of one head on one cell. Everything that changes what is
+    computed and is NOT already fixed by the filename has to be in here, or a second
+    invocation reads a finished file and silently reports the first one's numbers.
+
+    A missing or blank `combo` is what every row written before the column looks like,
+    and it means the one construction that arm had then."""
+    if combo is None or (not isinstance(combo, str) and pd.isna(combo)) or combo == "":
+        combo = REF_COMBO.get(arm, LEGACY_COMBO)
+    return (arm, "" if alpha is None else round(float(alpha), 6), int(fold), int(seed),
+            str(combo))
 
 
 def out_path(ds, regime, args):
@@ -672,27 +874,69 @@ def load_done(rec_out, out, args):
                 f"  Add or drop --seed-graph to match, or point --out at a new "
                 f"directory.")
     cells = {key(r["arm"], None if pd.isna(r["alpha"]) else r["alpha"],
-                 r["fold"], r["seed"])
+                 r["fold"], r["seed"], r.get("combo"))
              for _, r in prev[prev["split"].astype(str) == "test"].iterrows()}
     return prev.to_dict("records"), cells
 
 
-def plan(reps, args, done):
-    """The cells still to run, seed-major so a partial sweep is a whole seed rather
-    than a ragged slice of every one."""
+def known_cells(rows):
+    """What is already recorded about each graph CELL, per head: its test row.
+
+    A backfill reads two things from it -- the metric a dump has to reproduce before it
+    is trusted, and the geometry, which belongs to the cloud and not to the head."""
+    out = {}
+    for r in rows:
+        if str(r.get("split", "test")) != "test" or r.get("arm") in REF_COMBO:
+            continue
+        if str(r.get("status", "ok")).startswith("failed"):
+            continue
+        a = r.get("alpha")
+        k = key(r["arm"], None if a is None or pd.isna(a) else a, r["fold"], r["seed"],
+                r.get("combo"))
+        out.setdefault(k[:4], {})[k[4]] = r
+    return out
+
+
+def plan(reps, args, done, known=None):
+    """The work still to do, seed-major so a partial sweep is a whole seed rather than a
+    ragged slice of every one.
+
+    A job is (arm, alpha, fold, seed, spec). For a graph cell `spec["combos"]` holds the
+    heads still missing. If some OTHER head of the cell is already on disk the job is a
+    BACKFILL (`spec["fill"]`), and `known` -- from `known_cells` -- supplies the recorded
+    row a dump must reproduce (`expect`) and the geometry it may inherit (`inherit`)."""
+    want = combos_wanted(args)
+    known = known or {}
     jobs = []
     for s in args.seeds:
         for f in reps:
             if not all(key(a, None, f, s) in done for a in ("boost_full", "naive")):
-                jobs.append(("baselines", None, f, s))
+                jobs.append(("baselines", None, f, s, {}))
             if args.baselines_only:
                 continue
-            if args.legacy and key("graph_legacy", None, f, s) not in done:
-                jobs.append(("graph_legacy", None, f, s))
-            for a in (args.alphas if args.gate else []):
-                if key("gate", a, f, s) not in done:
-                    jobs.append(("gate", float(a), f, s))
+            cells = ([("graph_legacy", None)] if args.legacy else []) + \
+                [("gate", float(a)) for a in (args.alphas if args.gate else [])]
+            for arm, a in cells:
+                missing = tuple(c for c in want if key(arm, a, f, s, c) not in done)
+                if not missing:
+                    continue
+                have = [c for c in GRAPH_COMBOS if key(arm, a, f, s, c) in done]
+                spec = {"combos": missing, "fill": bool(have)}
+                rec = known.get(key(arm, a, f, s)[:4], {})
+                ref = next((c for c in have if c in rec), None)
+                if ref is not None:
+                    spec["expect"] = {ref: {m: float(v) for m, v in rec[ref].items()
+                                            if m in OF_RECORD.values() and pd.notna(v)}}
+                    spec["inherit"] = {c: v for c, v in rec[ref].items()
+                                       if _is_cell_col(c)}
+                jobs.append((arm, a, f, s, spec))
     return jobs
+
+
+def n_heads(jobs):
+    """Progress is counted in HEADS, not jobs: one graph training can land two."""
+    return sum(len(j[4].get("combos", ())) if len(j) > 4 else 1
+               for j in jobs if j[0] != "baselines")
 
 
 def workers_wanted(args, gpus):
@@ -714,7 +958,8 @@ def sweep(ds, regime, args, dash=None):
     out, val_out, rec_out = sibling_paths(ds, regime, args)
     out.parent.mkdir(parents=True, exist_ok=True)
     rows, done = load_done(rec_out, out, args)
-    jobs = plan(reps, args, done)
+    jobs = plan(reps, args, done, known_cells(rows))
+    n_fill = sum(1 for j in jobs if j[0] != "baselines" and j[4].get("fill"))
 
     def flush():
         """One stream, three views. Written whenever a cell completes, so a kill loses
@@ -751,24 +996,27 @@ def sweep(ds, regime, args, dash=None):
           f"prot: {pp.rsplit('/', 1)[-1]}\n"
           f"    graph init {'SEEDED from --seeds' if args.seed_graph else 'unseeded (global RNG)'}"
           f"   splits scored: {'train+' if args.score_train else ''}val+test\n"
-          f"    {len(jobs)} jobs ({len(done)} cells already done)  ->  {out.name}, "
+          f"    heads {', '.join(combos_wanted(args))}   backfill "
+          f"{'from dumps, verified' if getattr(args, 'reuse_dumps', True) else 'by retraining'}\n"
+          f"    {len(jobs)} jobs, {n_fill} of them adding a head to a graph already on "
+          f"disk ({len(done)} heads done)  ->  {out.name}, "
           f"{val_out.name}, {rec_out.name}", flush=True)
     if not jobs:
         flush()
         return out
 
-    heavy = sum(1 for j in jobs if j[0] != "baselines")
+    heavy = n_heads(jobs)
     t0, state = time.time(), {"n": 0}
     seen_rows = {(key(r["arm"], None if pd.isna(r.get("alpha")) else r.get("alpha"),
-                     r["fold"], r["seed"]), str(r.get("split", "test")))
+                     r["fold"], r["seed"], r.get("combo")), str(r.get("split", "test")))
                  for r in rows}
     if dash is not None:
         dash.set_stage(f"{ds}/{regime} {args.mol_source}/{args.nodes} -- "
-                       f"{heavy} cells, {len(done)} already on disk")
+                       f"{heavy} heads, {len(done)} already on disk")
 
     def record(row):
         k = key(row["arm"], None if pd.isna(row["alpha"]) else row["alpha"],
-                row["fold"], row["seed"])
+                row["fold"], row["seed"], row.get("combo"))
         split = str(row.get("split", "test"))
         if (k, split) in seen_rows:
             return
@@ -779,7 +1027,7 @@ def sweep(ds, regime, args, dash=None):
             return
         done.add(k)
         flush()
-        if row["arm"] in ("boost_full", "naive"):
+        if row["arm"] in ("boost_full", "naive", "baselines"):
             tag = f"[{row['arm']}]"
         else:
             state["n"] += 1
@@ -793,7 +1041,12 @@ def sweep(ds, regime, args, dash=None):
                 + "".join(f"  {g}/{r}={row.get(f'{g}_{r}_z', float('nan')):+.1f}"
                           for r in REFS for g in ("rsa",)))
         a = "" if pd.isna(row["alpha"]) else f"a={row['alpha']:.2f}"
-        label = f"s{row['seed']} f{row['fold']} {row['arm']}{(' ' + a) if a else ''}"
+        src = row.get("z_source", "trained")
+        head = ("" if row["arm"] in REF_COMBO or row["arm"] == "baselines" else
+                f" [{row.get('combo', LEGACY_COMBO)}"
+                f"{'' if src in (None, 'trained') else ', ' + str(src)}]")
+        label = (f"s{row['seed']} f{row['fold']} {row['arm']}"
+                 f"{(' ' + a) if a else ''}{head}")
         if dash is None:
             print(f"  {label:<32} {body}  {tag}", flush=True)
         elif failed:
@@ -801,7 +1054,7 @@ def sweep(ds, regime, args, dash=None):
         else:
             dash.last = f"{label}  {body}"
             dash.render()
-        if dash is not None and row["arm"] not in ("boost_full", "naive"):
+        if dash is not None and row["arm"] not in ("boost_full", "naive", "baselines"):
             dash.done += 1              # owned here, so the serial path counts too
 
     if workers_wanted(args, args.gpus or visible_gpus() or [0]) <= 1:
@@ -811,7 +1064,8 @@ def sweep(ds, regime, args, dash=None):
                 for row in _run_job(job, ds, regime, args, cache, data):
                     record(row)
             except Exception as e:                  # noqa: BLE001
-                record(_failed(job, e))
+                for row in _failed(job, e):
+                    record(row)
     else:
         import multiprocessing as mp
         ctx = mp.get_context("spawn")
@@ -864,9 +1118,11 @@ def sweep(ds, regime, args, dash=None):
                 alive -= 1
             elif kind == "start":
                 wid, job = payload
-                arm, alpha, fold, seed = job
+                arm, alpha, fold, seed = job[:4]
                 lab = ("base" if arm == "baselines" else
                        (f"a{alpha:.2f}" if alpha is not None else "legacy"))
+                if len(job) > 4 and job[4].get("fill"):
+                    lab += " +head"
                 if dash is not None:
                     dash.start_job(wid, f"{lab} f{fold}")
             else:
@@ -1019,6 +1275,19 @@ def main():
                     help="GPU indices to use. Default: every card nvidia-smi reports. "
                          "Workers are dealt out in proportion to the memory FREE on "
                          "each, so a card someone else is using gets fewer")
+    ap.add_argument("--combos", nargs="+", choices=list(GRAPH_COMBOS),
+                    default=list(GRAPH_COMBOS),
+                    help="which boosting heads to fit on every trained graph. Both by "
+                         "default, and at the cost of one head fit each, since they share "
+                         "the graph: cls+mol = [z_prot || molecule] (the graph REPLACES "
+                         "ESM), cls+prot+mol = [z_prot || raw ESM || molecule] (it ADDS "
+                         "to what boost reads). A head missing from a finished directory "
+                         "is BACKFILLED onto the graph already there")
+    ap.add_argument("--no-reuse-dumps", dest="reuse_dumps", action="store_false",
+                    help="backfill a missing head by training the graph again instead of "
+                         "fitting it on the cell's dumped receptor cloud. The dump is "
+                         "only used after refitting a recorded head on it reproduces the "
+                         "recorded number, so this is for when you want no reuse at all")
     ap.add_argument("--out", default=None)
     ap.add_argument("--force", action="store_true", help="recompute cells already in the CSV")
     args = ap.parse_args()
@@ -1043,18 +1312,18 @@ def main():
         args.mol_source = mol
         args._variant = args.variant or DEFAULT_VARIANT[ds]
         m, _, rec = sibling_paths(ds, regime, args)
-        _, done = load_done(rec, m, args)
-        total += sum(1 for j in plan(repeats(ds, regime, args), args, done)
-                     if j[0] != "baselines")
+        prev, done = load_done(rec, m, args)
+        total += n_heads(plan(repeats(ds, regime, args), args, done,
+                              known_cells(prev)))
 
     gpus = args.gpus or visible_gpus() or [0]
     n_workers = workers_wanted(args, gpus)
     dash = None
     if not args.no_dashboard and total:
         dash = Dashboard(total, gpus if gpus != [0] or visible_gpus() else [],
-                         title=f"v8 alpha grid -- {total} cells, {n_workers} workers "
+                         title=f"v8 alpha grid -- {total} heads, {n_workers} workers "
                                f"over {len(gpus)} gpu(s)")
-    print(f"\n{total} cells to run, {n_workers} concurrent "
+    print(f"\n{total} heads to fit, {n_workers} concurrent "
           f"({'--per-gpu ' + str(args.per_gpu) if args.per_gpu else '--max-parallel ' + str(args.max_parallel)})"
           f" on gpu(s) {gpus}", flush=True)
 

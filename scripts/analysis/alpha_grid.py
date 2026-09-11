@@ -299,7 +299,8 @@ def _agg(df, value, by, level=0.95, unit="fold"):
         # when a notebook is most likely to be opened.
         empty = pd.DataFrame(columns=by + ["mean", "hw", "lo", "hi", "n", "seeds"])
         return empty.astype({c: float for c in ["mean", "hw", "lo", "hi", "seeds"]}
-                            | {"n": "int64"})
+                            | {"n": "int64"}
+                            | ({"alpha": float} if "alpha" in by else {}))
     return pd.DataFrame(rows).sort_values(by).reset_index(drop=True)
 
 

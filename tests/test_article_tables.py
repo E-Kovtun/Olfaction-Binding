@@ -264,7 +264,9 @@ def m2or(tmp_path):
     tk.clear_cache()
 
 
-def test_the_threshold_is_chosen_on_validation_when_every_row_has_scores(m2or):
+def test_the_val_cut_is_an_extra_column_and_never_replaces_the_0_5_one(m2or):
+    """Every published baseline thresholds at 0.5, so that column has to survive intact;
+    the val-chosen cut is shown beside it, not instead of it."""
     s, e, tmp = m2or
     rng = np.random.default_rng(0)
     _m2or_sweep(s, rng)
@@ -275,16 +277,22 @@ def test_the_threshold_is_chosen_on_validation_when_every_row_has_scores(m2or):
                     "--ensemble-root", str(e), "--out", str(out)])
     st = pd.concat(longs)
     assert set(st.cut) == {"val"}
-    mcc = st[st.metric == "MCC"].set_index("key")["mean"]
-    # stored at the 0.5 cut they are all 0; re-scored at the val cut they separate
-    assert (mcc.dropna() > 0.9).all()
-    assert (st[st.metric == "F1"].set_index("key")["mean"].dropna() > 0.9).all()
+    # the 0.5 columns are untouched -- at that cut this fixture separates nothing
+    assert (st[st.metric == "MCC"]["mean"].dropna() == 0.0).all()
+    assert (st[st.metric == "F1"]["mean"].dropna() == 0.0).all()
+    # and the added ones say what the operating point is worth
+    assert (st[st.metric == "MCC@val"]["mean"].dropna() > 0.9).all()
+    assert (st[st.metric == "F1@val"]["mean"].dropna() > 0.9).all()
     # AUROC is threshold-free and must come through untouched
     assert st[(st.metric == "AUROC") & (st.key == "boost")]["mean"].iloc[0] == pytest.approx(0.82)
-    assert "VALIDATION split" in (out / "m2or.tex").read_text()
+    # the rank column must not count MCC twice
+    ours = st[(st.key == "ours:cls+mol") & (st.regime == "transductive")]
+    assert set(ours.metric) == {"AUROC", "AUPRC", "MCC", "MCC@val", "F1", "F1@val"}
+    tex = (out / "m2or.tex").read_text()
+    assert r"$^{\mathrm{val}}$" in tex and "fixed 0.5 cut" in tex
 
 
-def test_one_row_without_scores_puts_every_row_back_on_the_fixed_cut(m2or):
+def test_one_row_without_scores_leaves_every_row_on_the_0_5_cut_alone(m2or):
     s, e, tmp = m2or
     rng = np.random.default_rng(1)
     _m2or_sweep(s, rng)
@@ -295,10 +303,11 @@ def test_one_row_without_scores_puts_every_row_back_on_the_fixed_cut(m2or):
                     "--ensemble-root", str(e), "--out", str(out)])
     st = pd.concat(longs)
     assert set(st.cut) == {"fixed"}
-    assert (st[st.metric == "MCC"]["mean"].dropna() == 0.0).all(), \
-        "our rows must NOT keep a val-chosen cut the baseline could not have"
+    assert not any(str(m).endswith("@val") for m in st.metric), \
+        "our rows must not get a cut the baseline beside them could not have"
+    assert (st[st.metric == "MCC"]["mean"].dropna() == 0.0).all()
     tex = (out / "m2or.tex").read_text()
-    assert "FIXED 0.5 threshold" in tex and "VALIDATION split" not in tex
+    assert "not shown" in tex and r"$^{\mathrm{val}}$" not in tex
 
 
 def test_the_ensemble_writes_per_row_scores_next_to_its_metrics(tmp_path):

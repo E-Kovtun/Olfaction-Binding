@@ -60,29 +60,43 @@ def combo_spec(items):
 
 
 def build(ds, a):
-    metrics = a.metrics or tk.SHOW[tk.TASK[ds]]
-    blocks = {}
+    base = list(a.metrics or tk.SHOW[tk.TASK[ds]])
+    per, extras, cuts = {}, {}, {}
     for regime in tk.REGIMES:
-        rows = tk.cell_rows(ds, regime, a.mol_source, metrics, ours=a.ours,
+        rows = tk.cell_rows(ds, regime, a.mol_source, base, ours=a.ours,
                             baselines=a.baselines, baseline_combo=a.baseline_combo,
                             alpha=a.alpha, seeds=a.seeds, sweep_root=a.sweep_root,
                             ensemble_root=a.ensemble_root,
                             allow_mol_mismatch=a.allow_mol_mismatch)
         if not any(r.present for r in rows):
             continue
-        # MCC and F1 depend on where the decision boundary falls. Prefer a cut chosen on
-        # validation; fall back to the fixed 0.5 for EVERY row if even one of them has no
-        # per-row scores on disk -- see `tablekit.apply_val_threshold`.
-        cut = tk.apply_val_threshold(rows, metrics, tk.TASK[ds])
+        per[regime] = rows
+        # MCC and F1 at a cut chosen on validation, ADDED beside the 0.5 ones that every
+        # published baseline reports -- see `tablekit.add_val_threshold_metrics`.
+        extras[regime], cuts[regime] = tk.add_val_threshold_metrics(rows, base,
+                                                                   tk.TASK[ds])
+    if not per:
+        return {}, base
+    if not a.val_cut or not all(extras.values()):
+        # one block could not be re-scored, so no block gets the extra columns: two
+        # regimes of one table must not be read at different operating points
+        extras = {r: [] for r in per}
+    metrics = tk.with_val_columns(base, sorted({c for v in extras.values() for c in v}))
+    blocks = {}
+    for regime, rows in per.items():
         st = tk.block_stats(rows, metrics, ref_mode="best_other", test_kinds=TEST_KINDS)
         blocks[regime] = (rows, st.assign(dataset=ds, regime=regime,
                                           mol_source=a.mol_source, alpha=a.alpha,
-                                          cut=cut))
+                                          cut=(cuts[regime] if extras[regime] else
+                                               ("fixed" if cuts[regime] != "n/a" else "n/a"))))
     return blocks, metrics
 
 
 def _mean_ranks(st):
-    return st[st.usable.astype(bool)].groupby("key")["rank"].mean()
+    """Averaged over the 0.5 columns only: a val-cut column is the SAME metric seen
+    a second way, and counting both would weight MCC and F1 twice."""
+    q = st[st.usable.astype(bool) & ~st.metric.str.endswith(tk.VAL_SUFFIX)]
+    return q.groupby("key")["rank"].mean()
 
 
 def _combo_split(blocks):
@@ -133,15 +147,20 @@ def caption(ds, blocks, metrics, a):
     thresholded = [m for m in metrics if m in tk.THRESHOLDED]
     if thresholded and cuts != {"n/a"}:
         names = " and ".join(tk.metric_tex(m) for m in thresholded)
+        text += (f" {names} are scored at the fixed 0.5 cut, which is what every method "
+                 r"compared here reports (LORAX, ProSmith and Hladi\v{s} all threshold "
+                 r"their own probabilities at 0.5), so those columns are comparable with "
+                 r"the published numbers.")
         if cuts == {"val"}:
-            text += (f" {names} are scored at a decision threshold chosen on the "
-                     r"VALIDATION split of each fold, separately for every method.")
+            text += (r" The $^{\mathrm{val}}$ columns are the same two metrics at a cut "
+                     r"chosen on the VALIDATION rows of each fold, separately for every "
+                     r"method -- an additional view, not a replacement; the rank column "
+                     r"ignores them. AUROC and AUPRC depend on no threshold.")
         else:
-            text += (f" {names} are scored at the FIXED 0.5 threshold for every method: "
-                     r"per-row validation scores are not on disk for at least one row "
-                     r"here, and a threshold given to some methods and not others would "
-                     r"favour them for a reason unrelated to the model. AUROC and AUPRC "
-                     r"do not depend on a threshold.")
+            text += (r" The validation-chosen cut is not shown: per-row scores are not on "
+                     r"disk for at least one row here, and giving that cut to some methods "
+                     r"and not others would favour them for a reason unrelated to the "
+                     r"model. AUROC and AUPRC depend on no threshold.")
     if _combo_split(blocks):
         text += r" $^{\ddagger}$ = the feature set differs between the two regimes."
     return text
@@ -264,6 +283,9 @@ def parser():
                     help="keep a baseline row fed another molecule embedding")
     ap.add_argument("--sig", type=float, default=0.05,
                     help="only marks the console view; the table prints both p-values")
+    ap.add_argument("--no-val-cut", dest="val_cut", action="store_false",
+                    help="do not add the MCC/F1 columns at a validation-chosen "
+                         "threshold, even where the per-row scores are on disk")
     ap.add_argument("--sweep-root", default=tk.SWEEP_ROOT)
     ap.add_argument("--ensemble-root", default=tk.ENSEMBLE_ROOT)
     ap.add_argument("--out", default=f"{tk.OUT_ROOT}/main")

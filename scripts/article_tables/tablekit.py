@@ -254,6 +254,8 @@ def cell_rows(ds, regime, mol, metrics, ours=GRAPH_COMBOS, baselines=BASELINES,
 # The metrics that depend on WHERE the decision boundary falls. AUROC and AUPRC do not
 # and are never touched here.
 THRESHOLDED = ("MCC", "F1")
+# What a column scored at a validation-chosen cut is called, next to the 0.5 one.
+VAL_SUFFIX = "@val"
 # How the sweep's dump names each head's scores (`run_alpha_gate_sweep.PRED_KEY` and
 # `VAL_PRED_KEY`). Spelled out rather than imported: importing the sweep pulls in
 # torch_geometric, and this module is read by notebooks and a laptop.
@@ -372,40 +374,60 @@ def _best_threshold(metric, y, p, grid=200):
     return float(max(cands, key=lambda t: _hard_metric(metric, y, p, t)))
 
 
-def apply_val_threshold(rows, metrics, task):
-    """Rescore the threshold-dependent metrics at a cut chosen on validation.
+def add_val_threshold_metrics(rows, metrics, task):
+    """Add `MCC@val` / `F1@val` BESIDE MCC and F1 -- the same metric at a cut chosen on
+    the validation rows of that fold, for that method, instead of the fixed 0.5.
 
-    ALL OR NOTHING, on purpose. The cut is a free parameter, and giving it to some rows
-    and not others would hand those rows an advantage that has nothing to do with the
-    model. So unless every usable row in the block can be re-scored, nothing is, and the
-    caller says in the caption that the fixed 0.5 cut is what the table shows.
+    An addition, never a replacement, and that is the whole design. Every method we
+    compare against reports its thresholded metrics at 0.5 -- LORAX (`train_lorax.py`,
+    `train_GB.py`), ProSmith (`training_GB.py`, via `np.round`), Hladis
+    (`make_compute_metrics.py`, likewise `round`; his 200-threshold sweep feeds only the
+    PR/ROC curves) -- so the 0.5 column is what keeps this table comparable with their
+    published numbers. The val-chosen column answers the other question, which is who
+    wins once the operating point is picked honestly. Printing both is the only way to
+    say both things without one quietly standing in for the other.
 
-    Returns "val" (every MCC/F1 here is at a val-chosen cut), "fixed" (all at 0.5), or
-    "n/a" (this table has no threshold-dependent metric).
+    ALL OR NOTHING: unless EVERY usable row can be re-scored, no row gets the extra
+    columns. A column mixing the two cuts would rank models by their operating points.
+
+    Returns (names added, mode), mode being "val", "fixed" or "n/a".
     """
-    want = [m for m in metrics if m in THRESHOLDED]
-    if task != "classification" or not want:
-        return "n/a"
+    base = [m for m in metrics if m in THRESHOLDED]
+    if task != "classification" or not base:
+        return [], "n/a"
     live = [r for r in rows if r.present and r.usable]
     if not live:
-        return "fixed"
+        return [], "fixed"
     scores = {}
     for r in live:
         got = row_scores(r)
         if got is None:
-            return "fixed"
+            return [], "fixed"
         scores[r.key] = got
     for r in live:
         per = scores[r.key]
-        for m in want:
+        for m in base:
+            col = f"{m}{VAL_SUFFIX}"
             vals = {}
             for (fold, seed), s in per.items():
                 t = _best_threshold(m, s["y_val"], s["val"])
                 vals.setdefault(fold, []).append(_hard_metric(m, s["y_test"], s["test"], t))
+            if col not in r.folds.columns:
+                r.folds[col] = np.nan
             for fold, v in vals.items():
                 if fold in r.folds.index:
-                    r.folds.loc[fold, m] = float(np.mean(v))
-    return "val"
+                    r.folds.loc[fold, col] = float(np.mean(v))
+    return [f"{m}{VAL_SUFFIX}" for m in base], "val"
+
+
+def with_val_columns(metrics, extra):
+    """The column order: each val-cut metric immediately after the 0.5 one it mirrors."""
+    out = []
+    for m in metrics:
+        out.append(m)
+        if f"{m}{VAL_SUFFIX}" in extra:
+            out.append(f"{m}{VAL_SUFFIX}")
+    return out
 
 
 # ----------------------------------------------------------------------------- stats
@@ -555,6 +577,9 @@ def txt_num(mean, std, nd=3):
 
 
 def metric_tex(m):
+    if m.endswith(VAL_SUFFIX):
+        base = m[:-len(VAL_SUFFIX)]
+        return METRIC_TEX.get(base, base) + r"$^{\mathrm{val}}$"
     return METRIC_TEX.get(m, m)
 
 

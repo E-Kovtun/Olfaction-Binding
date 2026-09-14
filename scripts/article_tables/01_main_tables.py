@@ -70,9 +70,14 @@ def build(ds, a):
                             allow_mol_mismatch=a.allow_mol_mismatch)
         if not any(r.present for r in rows):
             continue
+        # MCC and F1 depend on where the decision boundary falls. Prefer a cut chosen on
+        # validation; fall back to the fixed 0.5 for EVERY row if even one of them has no
+        # per-row scores on disk -- see `tablekit.apply_val_threshold`.
+        cut = tk.apply_val_threshold(rows, metrics, tk.TASK[ds])
         st = tk.block_stats(rows, metrics, ref_mode="best_other", test_kinds=TEST_KINDS)
         blocks[regime] = (rows, st.assign(dataset=ds, regime=regime,
-                                          mol_source=a.mol_source, alpha=a.alpha))
+                                          mol_source=a.mol_source, alpha=a.alpha,
+                                          cut=cut))
     return blocks, metrics
 
 
@@ -124,6 +129,19 @@ def caption(ds, blocks, metrics, a):
             r"column, printed raw/Holm (Holm corrects within the column, over our two "
             r"rows). Rank = place within each split among all rows, averaged over splits "
             f"and the {len(metrics)} metrics. -- = not available.")
+    cuts = {b[1]["cut"].iloc[0] for b in blocks.values() if len(b[1])}
+    thresholded = [m for m in metrics if m in tk.THRESHOLDED]
+    if thresholded and cuts != {"n/a"}:
+        names = " and ".join(tk.metric_tex(m) for m in thresholded)
+        if cuts == {"val"}:
+            text += (f" {names} are scored at a decision threshold chosen on the "
+                     r"VALIDATION split of each fold, separately for every method.")
+        else:
+            text += (f" {names} are scored at the FIXED 0.5 threshold for every method: "
+                     r"per-row validation scores are not on disk for at least one row "
+                     r"here, and a threshold given to some methods and not others would "
+                     r"favour them for a reason unrelated to the model. AUROC and AUPRC "
+                     r"do not depend on a threshold.")
     if _combo_split(blocks):
         text += r" $^{\ddagger}$ = the feature set differs between the two regimes."
     return text

@@ -40,6 +40,12 @@ OUTPUT. `val_metrics_<same tag>.csv` next to each `metrics_<tag>.csv`, same colu
 `alpha_grid.load(..., split="val")`. The glob prefixes differ, so no reader can pick up
 one thinking it is the other.
 
+`--dump-val-predictions` additionally writes the val predictions THEMSELVES back into
+each cell's npz (`pred_va` / `pred_va_prot`, plus `y_val` and the val row ids), which is
+what a decision threshold chosen on validation needs. Runs made from Sep 2026 write them
+during the sweep; this is the backfill for the grids already on disk, and it is free here
+because the refit has just been done anyway. Keys already present are never replaced.
+
 Resumable: a cell already in the val file is skipped, and the file is rewritten after
 every fold.
 """
@@ -123,8 +129,51 @@ def features(Z, receptors, rec_ids, Xm):
     return np.concatenate([Z[np.asarray(idx, dtype=np.int64)], Xm], axis=1)
 
 
+def _merge_npz(path, **arrays):
+    """Add keys to a cell's npz, KEEPING every key already in it.
+
+    The recorded rows were computed from what is in that file; a backfill that replaced
+    a cloud or a prediction would silently detach them from their own numbers. Written to
+    a temp file and moved into place, so a kill mid-write cannot leave half an npz."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        with np.load(path, allow_pickle=False) as old:
+            kept = {k: old[k] for k in old.files}
+        arrays = kept | {k: v for k, v in arrays.items() if k not in kept}
+    tmp = path.with_name(path.stem + ".tmp.npz")
+    np.savez_compressed(tmp, **arrays)
+    tmp.replace(path)
+    return path
+
+
+def dump_val(dumps, row, pred, V):
+    """Put this cell's VAL predictions into its npz, under the sweep's own key names.
+
+    `naive` is skipped: a constant has no operating point to choose. The head decides the
+    key -- `pred_va` for the reference arm and for `cls+mol`, `pred_va_prot` for
+    `cls+prot+mol` -- so a reader asking for one head can never be handed the other."""
+    arm = str(row["arm"])
+    if arm == "naive" or pred is None:
+        return None
+    combo = row.get("combo")
+    if not (isinstance(combo, str) and combo in sweep.VAL_PRED_KEY):
+        combo = sweep.LEGACY_COMBO          # written before the column existed
+    key = "pred_va" if arm == "boost_full" else sweep.VAL_PRED_KEY[combo]
+    alpha = None if pd.isna(row["alpha"]) else float(row["alpha"])
+    f = dump_path(dumps, arm, alpha, int(row["fold"]), int(row["seed"]))
+    return _merge_npz(f, **{key: np.asarray(pred, np.float32)},
+                      y_val=np.asarray(V["y"], np.float32),
+                      receptor_val=np.asarray(V["rec"], dtype=object).astype("U"),
+                      inchikey_val=np.asarray(V["mol"], dtype=object).astype("U"))
+
+
 def score_cell(row, P, V, dumps, task, verify):
-    """(val metrics, test metrics or None, note). `row` is one line of the metrics CSV."""
+    """(val metrics, test metrics or None, note, val predictions).
+
+    The predictions come back alongside the metrics because the caller may want to store
+    them (`--dump-val-predictions`) and refitting the head a second time to get them
+    would double the cost of this script for nothing. `row` is one line of the metrics
+    CSV."""
     arm = str(row["arm"])
     alpha = None if pd.isna(row["alpha"]) else float(row["alpha"])
     fold, seed = int(row["fold"]), int(row["seed"])
@@ -135,7 +184,7 @@ def score_cell(row, P, V, dumps, task, verify):
     if arm == "naive":
         # a constant has no model to refit; the honest val number is the same constant
         const = np.full(len(V["y"]), float(P["y_tr"].mean()), dtype=np.float32)
-        return sweep._score(Pv, const, task), None, ""
+        return sweep._score(Pv, const, task), None, "", None
 
     if arm == "boost_full":
         Xtr = np.concatenate([P["Xp_tr"], P["Xm_tr"]], 1)
@@ -144,10 +193,11 @@ def score_cell(row, P, V, dumps, task, verify):
     else:
         f = dump_path(dumps, arm, alpha, fold, seed)
         if not f.exists():
-            return None, None, f"no embedding dump at {f.name}"
+            return None, None, f"no embedding dump at {f.name}", None
         z = np.load(f, allow_pickle=False)
         if "z_prot" not in z:
-            return None, None, f"{f.name} holds no z_prot (run without --dump-embeddings?)"
+            return (None, None,
+                    f"{f.name} holds no z_prot (run without --dump-embeddings?)", None)
         Z, recs = z["z_prot"], z["receptors"]
         # the head decides what follows z_prot: [molecule] for cls+mol, [raw ESM ||
         # molecule] for cls+prot+mol -- the sweep's own block order
@@ -160,13 +210,15 @@ def score_cell(row, P, V, dumps, task, verify):
         Xte = (features(Z, recs, P["rec_te"], tail(P["Xp_te"], P["Xm_te"]))
                if verify else None)
         if Xtr is None or Xva is None:
-            return None, None, f"{f.name}: a receptor in this fold is not in the dump"
+            return (None, None,
+                    f"{f.name}: a receptor in this fold is not in the dump", None)
 
     est = fit_boost(Xtr, P["y_tr"], seed=seed, task=task)
-    val = sweep._score(Pv, predict_scores(est, Xva, task), task)
+    p_va = predict_scores(est, Xva, task)
+    val = sweep._score(Pv, p_va, task)
     test = (sweep._score(P, predict_scores(est, Xte, task), task)
             if verify and Xte is not None else None)
-    return val, test, ""
+    return val, test, "", p_va
 
 
 def _cell(r):
@@ -229,10 +281,12 @@ def rescore_file(csv_path, args):
             print(f"  fold {fold}: the val split is EMPTY -- nothing to choose on")
             continue
         for r in [x for x in todo if int(x["fold"]) == fold]:
-            val, test, note = score_cell(r, P, V, dumps, task, args.verify)
+            val, test, note, p_va = score_cell(r, P, V, dumps, task, args.verify)
             if val is None:
                 print(f"  skip {r['arm']} a={r['alpha']} f{fold} s{r['seed']}: {note}")
                 continue
+            if getattr(args, "dump_val_predictions", False):
+                dump_val(dumps, r, p_va, V)
             rec = dict(r)
             rec.update(val)
             rec["split"] = "val"
@@ -280,6 +334,12 @@ def main():
                     help="say what would be scored and stop. Run this FIRST: it is how "
                          "you find out whether the embedding dumps are actually there")
     ap.add_argument("--force", action="store_true", help="rescore cells already written")
+    ap.add_argument("--dump-val-predictions", action="store_true",
+                    help="also write the val predictions back into each cell's npz "
+                         "(pred_va / pred_va_prot, y_val, and the val row ids). That is "
+                         "what choosing a DECISION THRESHOLD on validation needs, and it "
+                         "is free here because the head has just been refit. Keys already "
+                         "in the file are kept, never replaced")
     args = ap.parse_args()
 
     root = pathlib.Path(args.root)

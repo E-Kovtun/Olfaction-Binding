@@ -97,6 +97,9 @@ class Row:
     origin: str = ""
     flags: list = field(default_factory=list)
     usable: bool = True
+    # where this row's PER-ROW scores live, if they were written at all. Filled by the
+    # builders below and consumed only by the threshold machinery.
+    locator: dict | None = None
 
     @property
     def present(self):
@@ -163,6 +166,8 @@ def ours_row(ds, regime, mol, metrics, combo="cls+mol", alpha=ALPHA, seeds=None,
         return row
     row.folds, row.seeds = _per_split(q, metrics)
     row.origin = f"{root} alpha={alpha:g} head {combo}"
+    row.locator = dict(kind="sweep", root=root, ds=ds, regime=regime, mol=mol,
+                       arm="gate", alpha=alpha, combo=combo)
     return row
 
 
@@ -174,6 +179,8 @@ def boost_row(ds, regime, mol, metrics, seeds=None, root=SWEEP_ROOT):
         if not q.empty:
             row.folds, row.seeds = _per_split(q, metrics)
             row.origin = f"{root} boost_full"
+            row.locator = dict(kind="sweep", root=root, ds=ds, regime=regime, mol=mol,
+                               arm="boost_full", alpha=None, combo="cls+mol")
             return row
     row.flags.append("no boost_full rows")
     return row
@@ -200,6 +207,7 @@ def baseline_row(name, ds, regime, mol, metrics, combo=BASELINE_COMBO,
     row.tex = f"{BASELINE_TEX.get(name, lab)} ({row.combo})"
     r = got["run"]
     row.origin = f"{r['pool']}/{r['run'].name}"
+    row.locator = dict(kind="ensemble", run=r["run"], combo=row.combo)
     if got["missed"]:
         row.flags.append(f"asked for {combo}, the run offers {', '.join(got['offered'])}")
     if got["mol_mismatch"]:
@@ -239,6 +247,165 @@ def cell_rows(ds, regime, mol, metrics, ours=GRAPH_COMBOS, baselines=BASELINES,
     rows += [ours_row(ds, regime, mol, metrics, c, alpha, seeds, sweep_root) for c in ours]
     flag_split_mismatch(rows)
     return rows
+
+
+# ------------------------------------------------------------------ the decision cut
+
+# The metrics that depend on WHERE the decision boundary falls. AUROC and AUPRC do not
+# and are never touched here.
+THRESHOLDED = ("MCC", "F1")
+# How the sweep's dump names each head's scores (`run_alpha_gate_sweep.PRED_KEY` and
+# `VAL_PRED_KEY`). Spelled out rather than imported: importing the sweep pulls in
+# torch_geometric, and this module is read by notebooks and a laptop.
+DUMP_TEST_KEY = {"cls+mol": "pred", "cls+prot+mol": "pred_prot"}
+DUMP_VAL_KEY = {"cls+mol": "pred_va", "cls+prot+mol": "pred_va_prot"}
+
+
+def _ht():
+    """headline_table, for its filename parser -- no heavy dependencies."""
+    global _HT
+    try:
+        return _HT
+    except NameError:
+        _HT = ag._parser()
+        return _HT
+
+
+def _dump_dir(root, ds, regime, mol):
+    """The sweep's dump folder for one cell, found by parsing folder names the same way
+    the readers parse the CSV names."""
+    d = resolve(root) / "dumps"
+    if not d.exists():
+        return None
+    ht = _ht()
+    for p in sorted(d.iterdir()):
+        if not p.is_dir():
+            continue
+        ds_, fam, nodes, mol_, var = ht.parse_name(p.name)
+        if (ds_ == ds and ht.REGIME_OF.get(fam) == regime and mol_ == mol
+                and nodes == "nodedial"
+                and (not var or var == ht.CANONICAL_VARIANT.get(ds_, var))):
+            return p
+    return None
+
+
+def _sweep_cells(loc, splits):
+    """{(split, seed): npz path} for a sweep row, by globbing the cells on disk."""
+    d = _dump_dir(loc["root"], loc["ds"], loc["regime"], loc["mol"])
+    if d is None:
+        return {}
+    a = "None" if loc["alpha"] is None else f"{float(loc['alpha']):g}"
+    out = {}
+    for f in sorted(d.glob(f"{loc['arm']}_a{a}_f*_s*.npz")):
+        stem = f.stem.rsplit("_f", 1)[1]
+        fold, _, seed = stem.partition("_s")
+        try:
+            fold, seed = int(fold), int(seed)
+        except ValueError:
+            continue
+        if fold in splits:
+            out[(fold, seed)] = f
+    return out
+
+
+def _read_sweep_cell(path, combo):
+    vk, tkey = DUMP_VAL_KEY.get(combo), DUMP_TEST_KEY.get(combo)
+    if vk is None:
+        return None
+    with np.load(path, allow_pickle=False) as z:
+        if not {vk, tkey, "y_val", "y_true"} <= set(z.files):
+            return None
+        return dict(val=z[vk], y_val=z["y_val"], test=z[tkey], y_test=z["y_true"])
+
+
+def _read_ensemble_cell(run, combo, repeat):
+    f = pathlib.Path(run) / "scores" / f"repeat_{repeat}.npz"
+    if not f.exists():
+        return None
+    with np.load(f, allow_pickle=False) as z:
+        vk, tkey = f"val__{combo}", f"test__{combo}"
+        if not {vk, tkey, "y_val", "y_test"} <= set(z.files):
+            return None
+        return dict(val=z[vk], y_val=z["y_val"], test=z[tkey], y_test=z["y_test"])
+
+
+def row_scores(row):
+    """{(split, seed): {val, y_val, test, y_test}} for one row, or None if this row's
+    per-row scores were not written. A run made before the producers saved them returns
+    None, which is what makes the fallback below all-or-nothing rather than silent."""
+    loc, splits = row.locator, set(row.splits())
+    if not loc or not splits:
+        return None
+    out = {}
+    if loc["kind"] == "sweep":
+        for (fold, seed), f in _sweep_cells(loc, splits).items():
+            got = _read_sweep_cell(f, loc["combo"])
+            if got is not None:
+                out[(fold, seed)] = got
+    else:
+        for fold in splits:
+            got = _read_ensemble_cell(loc["run"], loc["combo"], fold)
+            if got is not None:
+                out[(fold, 0)] = got
+    return out or None
+
+
+def _hard_metric(metric, y, p, t):
+    from sklearn.metrics import f1_score, matthews_corrcoef
+    yb = (np.asarray(y) > 0.5).astype(int)
+    hard = (np.asarray(p) >= t).astype(int)
+    if metric == "MCC":
+        return float(matthews_corrcoef(yb, hard))
+    return float(f1_score(yb, hard, zero_division=0))
+
+
+def _best_threshold(metric, y, p, grid=200):
+    """The cut that maximises `metric` on the VALIDATION rows.
+
+    Searched over quantiles of the scores rather than every midpoint: the winner is
+    indistinguishable and the cost stops depending on how many rows the split has."""
+    p = np.asarray(p, float)
+    if p.size == 0:
+        return 0.5
+    qs = np.unique(np.quantile(p, np.linspace(0.005, 0.995, grid)))
+    cands = np.unique(np.concatenate([[0.5], qs]))
+    return float(max(cands, key=lambda t: _hard_metric(metric, y, p, t)))
+
+
+def apply_val_threshold(rows, metrics, task):
+    """Rescore the threshold-dependent metrics at a cut chosen on validation.
+
+    ALL OR NOTHING, on purpose. The cut is a free parameter, and giving it to some rows
+    and not others would hand those rows an advantage that has nothing to do with the
+    model. So unless every usable row in the block can be re-scored, nothing is, and the
+    caller says in the caption that the fixed 0.5 cut is what the table shows.
+
+    Returns "val" (every MCC/F1 here is at a val-chosen cut), "fixed" (all at 0.5), or
+    "n/a" (this table has no threshold-dependent metric).
+    """
+    want = [m for m in metrics if m in THRESHOLDED]
+    if task != "classification" or not want:
+        return "n/a"
+    live = [r for r in rows if r.present and r.usable]
+    if not live:
+        return "fixed"
+    scores = {}
+    for r in live:
+        got = row_scores(r)
+        if got is None:
+            return "fixed"
+        scores[r.key] = got
+    for r in live:
+        per = scores[r.key]
+        for m in want:
+            vals = {}
+            for (fold, seed), s in per.items():
+                t = _best_threshold(m, s["y_val"], s["val"])
+                vals.setdefault(fold, []).append(_hard_metric(m, s["y_test"], s["test"], t))
+            for fold, v in vals.items():
+                if fold in r.folds.index:
+                    r.folds.loc[fold, m] = float(np.mean(v))
+    return "val"
 
 
 # ----------------------------------------------------------------------------- stats
@@ -410,31 +577,43 @@ def tex_p_pair(raw, adj):
     return f"{tex_p(raw)}/{tex_p(adj)}"
 
 
-def text_block(st, metrics, title, sig=0.05, w=34):
-    """The block as a console table: value +/- std (place), then the tested rows' two
-    p-values against that column's reference, raw/Holm."""
+def text_block(st, metrics, title, sig=0.05, w=22, wp=14):
+    """The block as a console table.
+
+    Two columns per metric -- the value with its place, and (for the rows that were
+    tested) the pair of p-values against that column's own reference, raw/Holm. They are
+    separate columns on purpose: glued into one, a long cell runs into its neighbour and
+    the table stops being readable exactly where the numbers matter."""
     keys = list(dict.fromkeys(st.key))
-    head = f"  {'method':<28}" + "".join(f"{m:>{w}}" for m in metrics) + f"{'rank':>7}"
+    tested = bool(st["p_vs_ref"].notna().any() or st["p_holm"].notna().any())
+    wm = max([len(str(x)) for x in st.method] + [16]) + 2
+    head = f"  {'method':<{wm}}"
+    for m in metrics:
+        head += f"{m:>{w}}" + (f"{'p t/Holm':>{wp}}" if tested else "")
+    head += f"{'rank':>7}"
     lines = [title, head, "  " + "-" * (len(head) - 2)]
     for k in keys:
         s = st[st.key == k].set_index("metric")
         cells = ""
         for m in metrics:
             if m not in s.index or not np.isfinite(s.loc[m, "mean"]):
-                cells += f"{'--':>{w}}"
+                cells += f"{'--':>{w}}" + (f"{'':>{wp}}" if tested else "")
                 continue
             r = s.loc[m]
             txt = txt_num(r["mean"], r["std"])
             if np.isfinite(r["rank"]):
                 txt += f" ({r['rank']:.2f})"
-            if np.isfinite(r["p_vs_ref"]) or np.isfinite(r["p_holm"]):
-                txt += f" p{pstr(r['p_vs_ref'])}/{pstr(r['p_holm'])}"
-                if np.isfinite(r["p_holm"]) and r["p_holm"] < sig:
-                    txt += "*"
-            elif k == r["ref"]:
-                txt += " ref"
             cells += f"{txt:>{w}}"
+            if not tested:
+                continue
+            if np.isfinite(r["p_vs_ref"]) or np.isfinite(r["p_holm"]):
+                p = f"{pstr(r['p_vs_ref'])}/{pstr(r['p_holm'])}"
+                if np.isfinite(r["p_holm"]) and r["p_holm"] < sig:
+                    p += "*"
+            else:
+                p = "ref" if k == r["ref"] else ""
+            cells += f"{p:>{wp}}"
         mr = s["rank"].mean()
         use = "" if bool(s["usable"].iloc[0]) else "  [not usable]"
-        lines.append(f"  {s['method'].iloc[0]:<28}{cells}{fnum(mr, 2):>7}{use}")
+        lines.append(f"  {s['method'].iloc[0]:<{wm}}{cells}{fnum(mr, 2):>7}{use}")
     return "\n".join(lines)

@@ -261,6 +261,30 @@ def _coverage_intersection(pairs: pd.DataFrame, extractors: dict[str, object],
     return mask
 
 
+def _save_scores(scores_dir, repeat_tag, val_preds, test_preds, y_va, y_te,
+                  val_idx, test_idx):
+    """One npz per repeat: every combo's per-row val and test scores, plus the labels.
+
+    Keys are `val__{combo}` / `test__{combo}` (combo spelled the way metrics.csv spells
+    it), alongside `y_val`, `y_test` and the row indices the split used, so a score can
+    be traced back to its pair. Written to a temp file and moved into place, so a kill
+    mid-write cannot leave half an npz behind.
+    """
+    d = pathlib.Path(scores_dir)
+    d.mkdir(parents=True, exist_ok=True)
+    arrays = {"y_val": np.asarray(y_va, np.float32),
+              "y_test": np.asarray(y_te, np.float32),
+              "val_idx": np.asarray(val_idx, np.int64),
+              "test_idx": np.asarray(test_idx, np.int64)}
+    for combo, p in val_preds.items():
+        arrays[f"val__{'+'.join(combo)}"] = np.asarray(p, np.float32)
+    for combo, p in test_preds.items():
+        arrays[f"test__{'+'.join(combo)}"] = np.asarray(p, np.float32)
+    tmp = d / f"repeat_{repeat_tag}.tmp.npz"
+    np.savez_compressed(tmp, **arrays)
+    tmp.replace(d / f"repeat_{repeat_tag}.npz")
+
+
 def run_ensemble(pairs: pd.DataFrame, extractors: dict[str, object], combo_spec: str,
                   split_kind: str = "stratified", seed: int = 42,
                   test_size: float = 0.2, val_size: float = 0.2,
@@ -269,6 +293,7 @@ def run_ensemble(pairs: pd.DataFrame, extractors: dict[str, object], combo_spec:
                   test_idx: np.ndarray | None = None,
                   on_missing: str = "raise",
                   checkpoint_dir: "pathlib.Path | str | None" = None,
+                  scores_dir: "pathlib.Path | str | None" = None,
                   tune_boost_hp: bool = False, n_trials: int = 30,
                   optuna_storage: str | None = None, run_id: str | None = None,
                   task: str = "classification") -> dict:
@@ -291,6 +316,16 @@ def run_ensemble(pairs: pd.DataFrame, extractors: dict[str, object], combo_spec:
     omitted) instead of keeping it in-process only -- lets `optuna-dashboard`
     show live progress across every repeat/combo, even with several repeats
     running concurrently in separate processes and writing to the same file.
+
+    `scores_dir`, if given, gets `repeat_{run_id}.npz`: the per-ROW validation and test
+    scores of every combo, with the labels beside them. Nothing downstream of this
+    function changes -- it is written in addition to everything else. It exists because
+    `metrics.csv` holds only aggregates, and an aggregate cannot be re-thresholded: MCC
+    and F1 are computed at a fixed 0.5 cut (`orbind.dataset.metrics`), so choosing an
+    operating point on validation -- the ordinary thing to do on an imbalanced pool --
+    is impossible after the fact without these arrays. They cost one float per row per
+    combo, and are written independently of `checkpoint_dir`, which is about model
+    weights and is a different question.
 
     `checkpoint_dir`, if given, gets one XGBoost booster per combo
     (`boost_{combo}.json`, via the sklearn wrapper's own `save_model`) plus
@@ -448,6 +483,10 @@ def run_ensemble(pairs: pd.DataFrame, extractors: dict[str, object], combo_spec:
         combo_metrics[combo] = metric_fn(y_te, p_te)
         print(f"  [repeat {repeat_tag}] combo {'+'.join(combo):>20s}: dim={Xtr.shape[1]:4d} "
               + " ".join(f"{k}={v:.3f}" for k, v in combo_metrics[combo].items()), flush=True)
+
+    if scores_dir is not None:
+        _save_scores(scores_dir, repeat_tag, val_preds, test_preds, y_va, y_te,
+                      val_idx, test_idx)
 
     combiners = fit_ensemble_weights(val_preds, y_va, method=weight_method, task=task)
     ensemble_metrics, weights = {}, {}

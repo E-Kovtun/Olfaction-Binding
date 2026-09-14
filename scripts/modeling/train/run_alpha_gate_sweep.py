@@ -242,6 +242,11 @@ LEGACY_COMBO = "cls+mol"
 # Where each head's per-pair test predictions go in the cell's npz. `pred` keeps its old
 # meaning, so every reader of a dump already on disk still gets what it expects.
 PRED_KEY = {"cls+mol": "pred", "cls+prot+mol": "pred_prot"}
+# The same two heads on the VALIDATION rows. Separate keys, so a reader of a dump written
+# before this existed sees exactly what it saw before. They are here for one reason: MCC
+# and F1 are scored at a fixed 0.5 cut, and choosing that cut on validation instead --
+# the ordinary thing to do on an imbalanced pool -- cannot be done from an aggregate.
+VAL_PRED_KEY = {"cls+mol": "pred_va", "cls+prot+mol": "pred_va_prot"}
 OF_RECORD = {"regression": "R2", "classification": "AUROC"}
 # How close a head refitted on a DUMPED cloud must land to the number recorded when the
 # graph was trained. XGBoost on the same float32 inputs with the same seed repeats
@@ -526,10 +531,19 @@ def _baseline_rows(fold, seed, P, args):
     # boost has no receptor cloud, but its per-pair predictions are half of every
     # stratified comparison against the graph, so they are dumped alongside
     if args.dump_predictions:
+        extra = {}
+        if "val" in X:
+            # the same head on the val rows: without them the reference arm cannot take
+            # part in a threshold chosen on validation, and a threshold that only some
+            # arms get is worse than none at all
+            extra = dict(pred_va=np.asarray(predict_scores(est, X["val"], task), np.float32),
+                         y_val=np.asarray(P["y_va"], np.float32),
+                         receptor_val=np.asarray(P["rec_va"], dtype=object).astype("U"),
+                         inchikey_val=np.asarray(P["mol_va"], dtype=object).astype("U"))
         _dump(args, args._ds, args._regime, "boost_full", None, fold, seed,
               pred=np.asarray(pred, np.float32), y_true=np.asarray(P["y_te"], np.float32),
               receptor=np.asarray(P["rec_te"], dtype=object).astype("U"),
-              inchikey=np.asarray(P["mol_te"], dtype=object).astype("U"))
+              inchikey=np.asarray(P["mol_te"], dtype=object).astype("U"), **extra)
     return rows
 
 
@@ -690,11 +704,17 @@ def _graph_rows(arm, alpha, fold, seed, ds, P, args, spec=None):
                  for s in want]
         if args.dump_predictions:
             dump[PRED_KEY[combo]] = np.asarray(pred["test"], np.float32)
+            if "val" in pred:
+                dump[VAL_PRED_KEY[combo]] = np.asarray(pred["val"], np.float32)
 
     if args.dump_predictions:
         dump |= dict(y_true=np.asarray(P["y_te"], np.float32),
                      receptor=np.asarray(P["rec_te"], dtype=object).astype("U"),
                      inchikey=np.asarray(P["mol_te"], dtype=object).astype("U"))
+        if "val" in want:
+            dump |= dict(y_val=np.asarray(P["y_va"], np.float32),
+                         receptor_val=np.asarray(P["rec_va"], dtype=object).astype("U"),
+                         inchikey_val=np.asarray(P["mol_va"], dtype=object).astype("U"))
     if args.dump_embeddings and not missing and source != "dump":
         # the receptor cloud the geometry was measured on, in universe order. 1.3 MB
         # on m2or, 50 KB on the insects -- against ~6 MB for the weights, and this is

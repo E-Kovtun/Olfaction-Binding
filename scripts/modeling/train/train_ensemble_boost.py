@@ -72,6 +72,11 @@ results/ensemble_logs/<run_id>/:
   logs/repeat_{R}.log     -- one per repeat, captures its combo/ensemble lines
                             even when --max-parallel runs it in another process
   metrics.csv             -- one row per (repeat, combo) + (repeat, ensemble method)
+  scores/repeat_{R}.npz   -- per-ROW validation and test scores of every combo, with the
+                            labels beside them. metrics.csv holds only aggregates, and an
+                            aggregate cannot be re-thresholded: MCC/F1 are scored at a
+                            fixed 0.5 cut, so an operating point chosen on validation
+                            needs these. Written even under --skip-checkpoints.
   checkpoints/repeat_{R}/
     boost_{combo}.json           -- one XGBoost booster per combo (unless --skip-checkpoints)
     attn_{source}_model{k}.pt     -- one torch state_dict per model, per pair-level source
@@ -478,6 +483,10 @@ def _run_one_repeat(regime, pairs, extractors, combos, split, repeat, test_size,
     checkpoint_dir = None
     if save_checkpoints:
         checkpoint_dir = run_dir / "checkpoints" / f"repeat_{repeat}"
+    # Per-row val/test scores, always -- they are a few KB and they are the only way to
+    # choose a decision threshold on validation after the run. `--skip-checkpoints`
+    # suppresses model WEIGHTS, which is a different question, so it does not apply here.
+    scores_dir = run_dir / "scores"
 
     with open(log_dir / f"repeat_{repeat}.log", "w", encoding="utf-8") as logf:
         old_stdout = sys.stdout
@@ -490,7 +499,7 @@ def _run_one_repeat(regime, pairs, extractors, combos, split, repeat, test_size,
                 result = run_ensemble(pairs, extractors, combos, split_kind=split, seed=repeat,
                                        test_size=test_size, val_size=val_size,
                                        weight_method=weight_method, on_missing=on_missing,
-                                       checkpoint_dir=checkpoint_dir,
+                                       checkpoint_dir=checkpoint_dir, scores_dir=scores_dir,
                                        tune_boost_hp=tune_boost_hp, n_trials=n_trials,
                                        optuna_storage=optuna_storage, run_id=str(repeat),
                                        task=task)
@@ -502,7 +511,7 @@ def _run_one_repeat(regime, pairs, extractors, combos, split, repeat, test_size,
                 result = run_ensemble(pairs, extractors, combos,
                                        train_idx=train_idx, val_idx=val_idx, test_idx=test_idx,
                                        weight_method=weight_method, on_missing=on_missing,
-                                       checkpoint_dir=checkpoint_dir,
+                                       checkpoint_dir=checkpoint_dir, scores_dir=scores_dir,
                                        tune_boost_hp=tune_boost_hp, n_trials=n_trials,
                                        optuna_storage=optuna_storage, run_id=str(repeat),
                                        task=task)

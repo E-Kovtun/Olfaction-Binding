@@ -193,6 +193,131 @@ def test_geometry_table_reads_the_sweep_and_the_frozen_embeddings(trees):
     assert "ESM-1b" in tex and r"$^{\circ}$" in tex         # procrustes z below 1.96
 
 
+# ------------------------------------------------------- the decision threshold
+
+def _bin(rng, n=60, prevalence=0.25, lo=0.10, hi=0.40):
+    """Scores that are perfectly separable -- but ONLY below 0.5, which is where every
+    imbalanced pool with a probability head lands. At the fixed cut both MCC and F1 are
+    0; at a cut chosen on validation they are 1. The gap is the whole point of the
+    machinery under test."""
+    y = (rng.random(n) < prevalence).astype(np.float32)
+    p = np.where(y > 0, rng.normal(hi, 0.01, n), rng.normal(lo, 0.01, n))
+    return y, np.clip(p, 0.0, 1.0).astype(np.float32)
+
+
+def _m2or_sweep(root, rng, with_scores=True):
+    stem = "m2or_transductive_q99greedy_chemberta_nodedial"
+    rows = []
+    for f in FOLDS:
+        for s in SEEDS:
+            def cell(auroc):
+                # MCC/F1 are stored as the 0.5 cut sees them: nothing above it
+                return dict(AUROC=auroc, AUPRC=auroc - 0.1, MCC=0.0, F1=0.0)
+            rows.append(dict(arm="boost_full", alpha=np.nan, fold=f, seed=s, status="ok",
+                             combo="prot+mol", **cell(0.82)))
+            for c in ("cls+mol", "cls+prot+mol"):
+                rows.append(dict(arm="gate", alpha=1.0, fold=f, seed=s, status="ok",
+                                 combo=c, **cell(0.84)))
+            if not with_scores:
+                continue
+            d = root / "dumps" / stem
+            d.mkdir(parents=True, exist_ok=True)
+            yv, pv = _bin(rng)
+            yt, pt = _bin(rng)
+            np.savez_compressed(d / f"gate_a1_f{f}_s{s}.npz", pred=pt, pred_prot=pt,
+                                pred_va=pv, pred_va_prot=pv, y_val=yv, y_true=yt)
+            yv, pv = _bin(rng)
+            yt, pt = _bin(rng)
+            np.savez_compressed(d / f"boost_full_aNone_f{f}_s{s}.npz", pred=pt,
+                                pred_va=pv, y_val=yv, y_true=yt)
+    pd.DataFrame(rows).to_csv(root / f"metrics_{stem}.csv", index=False)
+
+
+def _m2or_baseline(eroot, rng, with_scores=True):
+    d = eroot / "m2or-transductive-chemberta-fixed" / "transductive_hladis_esm1b"
+    d.mkdir(parents=True)
+    (d / "config.json").write_text(json.dumps(dict(
+        regime="full_full", full_full_mode="transductive", task="classification",
+        tune_boost=False,
+        sources=["cls=hladis", "mol=gin:data/embeddings/molecules/chemberta_77m_m2or.npz"])))
+    pd.DataFrame([dict(kind="combo", name="cls+prot+mol", repeat=f, AUROC=0.83,
+                       AUPRC=0.73, MCC=0.0, F1=0.0) for f in FOLDS]
+                 ).to_csv(d / "metrics.csv", index=False)
+    if with_scores:
+        (d / "scores").mkdir()
+        for f in FOLDS:
+            yv, pv = _bin(rng)
+            yt, pt = _bin(rng)
+            np.savez_compressed(d / "scores" / f"repeat_{f}.npz",
+                                **{"val__cls+prot+mol": pv, "test__cls+prot+mol": pt,
+                                   "y_val": yv, "y_test": yt})
+    return d
+
+
+@pytest.fixture
+def m2or(tmp_path):
+    tk.clear_cache()
+    s, e = tmp_path / "sweep", tmp_path / "ens"
+    s.mkdir()
+    e.mkdir()
+    yield s, e, tmp_path
+    tk.clear_cache()
+
+
+def test_the_threshold_is_chosen_on_validation_when_every_row_has_scores(m2or):
+    s, e, tmp = m2or
+    rng = np.random.default_rng(0)
+    _m2or_sweep(s, rng)
+    _m2or_baseline(e, rng)
+    m = _script("01_main_tables")
+    out = tmp / "main"
+    longs = m.main(["--dataset", "m2or", "--baselines", "hladis", "--sweep-root", str(s),
+                    "--ensemble-root", str(e), "--out", str(out)])
+    st = pd.concat(longs)
+    assert set(st.cut) == {"val"}
+    mcc = st[st.metric == "MCC"].set_index("key")["mean"]
+    # stored at the 0.5 cut they are all 0; re-scored at the val cut they separate
+    assert (mcc.dropna() > 0.9).all()
+    assert (st[st.metric == "F1"].set_index("key")["mean"].dropna() > 0.9).all()
+    # AUROC is threshold-free and must come through untouched
+    assert st[(st.metric == "AUROC") & (st.key == "boost")]["mean"].iloc[0] == pytest.approx(0.82)
+    assert "VALIDATION split" in (out / "m2or.tex").read_text()
+
+
+def test_one_row_without_scores_puts_every_row_back_on_the_fixed_cut(m2or):
+    s, e, tmp = m2or
+    rng = np.random.default_rng(1)
+    _m2or_sweep(s, rng)
+    _m2or_baseline(e, rng, with_scores=False)      # the borrowed row has none
+    m = _script("01_main_tables")
+    out = tmp / "main"
+    longs = m.main(["--dataset", "m2or", "--baselines", "hladis", "--sweep-root", str(s),
+                    "--ensemble-root", str(e), "--out", str(out)])
+    st = pd.concat(longs)
+    assert set(st.cut) == {"fixed"}
+    assert (st[st.metric == "MCC"]["mean"].dropna() == 0.0).all(), \
+        "our rows must NOT keep a val-chosen cut the baseline could not have"
+    tex = (out / "m2or.tex").read_text()
+    assert "FIXED 0.5 threshold" in tex and "VALIDATION split" not in tex
+
+
+def test_the_ensemble_writes_per_row_scores_next_to_its_metrics(tmp_path):
+    """The producer half: `metrics.csv` holds aggregates, and an aggregate cannot be
+    re-thresholded -- so the run has to leave the scores themselves behind."""
+    from orbind.ensemble import _save_scores
+    _save_scores(tmp_path / "scores", "3", {("cls", "mol"): np.array([0.1, 0.9])},
+                 {("cls", "mol"): np.array([0.2, 0.8])},
+                 np.array([0.0, 1.0]), np.array([1.0, 0.0]),
+                 np.array([7, 8]), np.array([9, 10]))
+    f = tmp_path / "scores" / "repeat_3.npz"
+    with np.load(f) as z:
+        assert set(z.files) == {"y_val", "y_test", "val_idx", "test_idx",
+                                "val__cls+mol", "test__cls+mol"}
+        assert z["val__cls+mol"].tolist() == pytest.approx([0.1, 0.9])
+        assert z["test_idx"].tolist() == [9, 10]
+    assert not list(f.parent.glob("*.tmp.npz"))
+
+
 def test_inventory_runs_on_a_partial_tree(trees):
     s, e, tmp = trees
     m = _script("00_inventory")

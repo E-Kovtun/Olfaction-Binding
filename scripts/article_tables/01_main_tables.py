@@ -2,7 +2,7 @@
 """Main tables: every method on every (dataset, regime), our graph at one dial position.
 
     python scripts/article_tables/01_main_tables.py
-    python scripts/article_tables/01_main_tables.py --dataset cc hc --ref cls+prot+mol
+    python scripts/article_tables/01_main_tables.py --dataset cc hc
     python scripts/article_tables/01_main_tables.py --baseline-combo cls hladis=cls+prot+mol
 
 One table per dataset, the two regimes side by side (transductive | cold molecule):
@@ -14,11 +14,17 @@ One table per dataset, the two regimes side by side (transductive | cold molecul
     Our graph (cls+mol)                 [z_prot || molecule]             } one trained
     Our graph (cls+prot+mol)            [z_prot || raw ESM || molecule]  } graph, two heads
 
-A cell is mean +/- std over the held-out splits; sweep rows average their model seeds
-inside each split first. `*` = a paired two-sided t-test over splits against `--ref`,
-Holm-corrected within the column. Rank = place within each split among all rows,
-averaged over splits and the metrics shown. The Friedman p per metric is in the long CSV
-and in the caption for the metric of record.
+A value cell is mean +/- std over the held-out splits; sweep rows average their model
+seeds inside each split first.
+
+EVERY METRIC IS FOLLOWED BY A `p` COLUMN, and only OUR two rows carry one. The opponent
+is the best NON-OURS row in that same column -- per metric, since the leader changes
+between them -- and the two numbers are the two-sided paired t-test over splits, raw and
+Holm-corrected within the column (a family of two). Nothing is tested baseline against
+baseline: that is not a claim this paper makes, and it would only spend the correction.
+
+The Friedman omnibus (are the methods distinguishable at all in that regime) is one line
+under the table, per metric.
 
 Writes to results/article_tables/main/:
     main_long.csv       one row per (dataset, regime, method, metric): every number above
@@ -36,6 +42,8 @@ import pandas as pd
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import tablekit as tk  # noqa: E402
+
+TEST_KINDS = ("ours",)
 
 
 def combo_spec(items):
@@ -62,7 +70,7 @@ def build(ds, a):
                             allow_mol_mismatch=a.allow_mol_mismatch)
         if not any(r.present for r in rows):
             continue
-        st = tk.block_stats(rows, metrics, f"ours:{a.ref}")
+        st = tk.block_stats(rows, metrics, ref_mode="best_other", test_kinds=TEST_KINDS)
         blocks[regime] = (rows, st.assign(dataset=ds, regime=regime,
                                           mol_source=a.mol_source, alpha=a.alpha))
     return blocks, metrics
@@ -70,33 +78,6 @@ def build(ds, a):
 
 def _mean_ranks(st):
     return st[st.usable.astype(bool)].groupby("key")["rank"].mean()
-
-
-def caption(ds, blocks, metrics, a):
-    sts = pd.concat([b[1] for b in blocks.values()], ignore_index=True)
-    use = sts[sts.usable.astype(bool) & (sts.n > 0)]
-    n = int(use.n.max()) if len(use) else 0
-    sw = use[use.source == "sweep"]
-    seeds = f"{sw.seeds.max():g}" if len(sw) else "the"
-    rec = tk.OF_RECORD[tk.TASK[ds]]
-    fried = "; ".join(
-        f"{tk.REGIME_LABEL[r].lower()} $p={tk.pstr(st.loc[st.metric == rec, 'friedman_p'].iloc[0])}$"
-        for r, (_, st) in blocks.items() if (st.metric == rec).any())
-    splits = ("the LORAX folds and the cold-molecule seeds 42--46" if ds == "m2or"
-              else "the upstream random folds and our cold-molecule folds")
-    text = (f"{tk.DATASET_TEX[ds]}, molecule embedding {tk.MOL_LABEL[a.mol_source]}, "
-            f"our graph at $\\alpha={a.alpha:g}$. Mean $\\pm$ std over {n} held-out splits "
-            f"({splits}); rows from our sweep are first averaged over {seeds} model seeds "
-            f"within each split, external baselines have one per split. "
-            r"\textbf{Bold} = best in column, \underline{underline} = second. "
-            f"$^{{*}}$ = differs from Our graph ({a.ref}) at $p<{a.sig:g}$, paired two-sided "
-            f"$t$-test over splits, Holm-corrected within the column. Rank = place within "
-            f"each split among all rows, averaged over splits and the {len(metrics)} "
-            f"metrics. Friedman test on {tk.metric_tex(rec)}: {fried}. "
-            r"-- = not available.")
-    if _combo_split(blocks):
-        text += r" $^{\ddagger}$ = the feature set differs between the two regimes."
-    return text
 
 
 def _combo_split(blocks):
@@ -109,9 +90,49 @@ def _combo_split(blocks):
     return {k for k, v in seen.items() if len(v) > 1}
 
 
+def friedman_line(blocks, metrics):
+    parts = []
+    for reg, (_, st) in blocks.items():
+        bits = []
+        for m in metrics:
+            q = st[st.metric == m]
+            if len(q) and np.isfinite(q["friedman_p"].iloc[0]):
+                bits.append(f"{tk.metric_tex(m)} {tk.tex_p(q['friedman_p'].iloc[0])}")
+        if bits:
+            k = int(st.k_ranked.max())
+            n = int(st.n_ranked.max())
+            parts.append(f"{tk.REGIME_LABEL[reg].lower()} ({k} methods, {n} splits): "
+                         + ", ".join(bits))
+    return "Friedman -- " + "; ".join(parts) if parts else ""
+
+
+def caption(ds, blocks, metrics, a):
+    sts = pd.concat([b[1] for b in blocks.values()], ignore_index=True)
+    use = sts[sts.usable.astype(bool) & (sts.n > 0)]
+    n = int(use.n.max()) if len(use) else 0
+    sw = use[use.source == "sweep"]
+    seeds = f"{sw.seeds.max():g}" if len(sw) else "the"
+    splits = ("the LORAX folds and the cold-molecule seeds 42--46" if ds == "m2or"
+              else "the upstream random folds and our cold-molecule folds")
+    text = (f"{tk.DATASET_TEX[ds]}, molecule embedding {tk.MOL_LABEL[a.mol_source]}, "
+            f"our graph at $\\alpha={a.alpha:g}$. Mean $\\pm$ std over {n} held-out splits "
+            f"({splits}); rows from our sweep are first averaged over {seeds} model seeds "
+            f"within each split, external baselines have one per split. "
+            r"\textbf{Bold} = best in column, \underline{underline} = second. "
+            r"The $p$ column after each metric is given for OUR rows only: a two-sided "
+            r"paired $t$-test over splits against the best non-ours row in that same "
+            r"column, printed raw/Holm (Holm corrects within the column, over our two "
+            r"rows). Rank = place within each split among all rows, averaged over splits "
+            f"and the {len(metrics)} metrics. -- = not available.")
+    if _combo_split(blocks):
+        text += r" $^{\ddagger}$ = the feature set differs between the two regimes."
+    return text
+
+
 def latex(ds, blocks, metrics, a):
     regs = [r for r in tk.REGIMES if r in blocks]
-    ncol = len(metrics) + 1
+    ncol = 2 * len(metrics) + 1                  # value + p per metric, then Rank
+    total = 1 + ncol * len(regs)
     keys = list(dict.fromkeys(k for r in regs for k in blocks[r][1].key))
     split_combo = _combo_split(blocks)
     out = [r"\begin{table}[t]", r"\centering",
@@ -123,7 +144,7 @@ def latex(ds, blocks, metrics, a):
                              for r in regs) + r" \\",
            "".join(rf"\cmidrule(lr){{{2 + i * ncol}-{1 + (i + 1) * ncol}}}"
                    for i in range(len(regs)))]
-    sub = " & ".join(tk.metric_tex(m) for m in metrics) + " & Rank"
+    sub = " & ".join(sum([[tk.metric_tex(m), "$p$"] for m in metrics], []) + ["Rank"])
     out.append(r"\textbf{Method (features)} & " + " & ".join(sub for _ in regs) + r" \\")
     prev = None
     for key in keys:
@@ -142,18 +163,16 @@ def latex(ds, blocks, metrics, a):
                 col = st[st.metric == m]
                 r = col[col.key == key]
                 if r.empty or not bool(r.usable.iloc[0]) or not np.isfinite(r["mean"].iloc[0]):
-                    cells.append("--")
+                    cells += ["--", ""]
                     continue
                 r = r.iloc[0]
                 txt = tk.tex_num(r["mean"], r["std"])
-                if key != r["ref"] and np.isfinite(r["p_holm"]) and r["p_holm"] < a.sig:
-                    txt += r"$^{*}$"
                 best, second = tk.top_two(col, m)
                 if key == best:
                     txt = rf"\cbest{{{txt}}}"
                 elif key == second:
                     txt = rf"\gbest{{{txt}}}"
-                cells.append(txt)
+                cells += [txt, tk.tex_p_pair(r["p_vs_ref"], r["p_holm"])]
             ranks = _mean_ranks(st)
             mr = ranks.get(key, np.nan)
             if not np.isfinite(mr):
@@ -163,15 +182,18 @@ def latex(ds, blocks, metrics, a):
             else:
                 cells.append(f"{mr:.2f}")
         out.append(f"{label} & " + " & ".join(cells) + r" \\")
+    fried = friedman_line(blocks, metrics)
+    if fried:
+        out.append(r"\midrule")
+        out.append(rf"\multicolumn{{{total}}}{{@{{}}l}}{{\footnotesize {fried}}} \\")
     out += [r"\bottomrule", r"\end{tabular}}", r"\end{table}"]
     return "\n".join(out)
 
 
 def summary(ds, blocks, metrics, a):
     rec = tk.OF_RECORD[tk.TASK[ds]]
-    ref_key = f"ours:{a.ref}"
     L = [f"{tk.DATASET_LABEL[ds]} | molecules {a.mol_source} | graph alpha={a.alpha:g} | "
-         f"reference Our graph ({a.ref})"]
+         f"our rows tested against the best non-ours row in each column"]
     for reg, (rows, st) in blocks.items():
         L.append(f"\n[{tk.REGIME_LABEL[reg]}]")
         use = st[st.usable.astype(bool)]
@@ -179,21 +201,25 @@ def summary(ds, blocks, metrics, a):
         if len(mr):
             L.append(f"  mean rank over {len(metrics)} metrics (1 = best): "
                      + ", ".join(f"{k} {v:.2f}" for k, v in mr.items()))
-        col = st[st.metric == rec]
-        ref = col[col.key == ref_key]
-        if not ref.empty and np.isfinite(ref["mean"].iloc[0]):
-            r = ref.iloc[0]
-            L.append(f"  Our graph ({a.ref}) {rec} {tk.txt_num(r['mean'], r['std'])} on "
-                     f"{int(r['n'])} splits x {r['seeds']:g} seeds")
-            for _, o in col[(col.key != ref_key) & col.usable.astype(bool)].iterrows():
+        label_of = {r.key: r.label for r in rows}
+        for m in metrics:
+            col = st[st.metric == m]
+            if col.empty:
+                continue
+            ref_key = col["ref"].iloc[0]
+            L.append(f"  {m}: opponent = {label_of.get(ref_key, ref_key or 'none')}, "
+                     f"Friedman p={tk.pstr(col['friedman_p'].iloc[0])}")
+            for _, o in col[col.kind.isin(TEST_KINDS) & col.usable.astype(bool)].iterrows():
                 if not np.isfinite(o["delta_vs_ref"]):
                     continue
-                L.append(f"    vs {o['method']}: ours {-o['delta_vs_ref']:+.3f} {rec}, "
-                         f"ahead on {int(o['behind_ref'])}/{int(o['n_pair'])} splits, "
-                         f"t-test p={tk.pstr(o['p_vs_ref'])} (Holm {tk.pstr(o['p_holm'])})")
-        if len(col):
-            L.append(f"  Friedman on {rec}: p={tk.pstr(col['friedman_p'].iloc[0])} over "
-                     f"{int(col.k_ranked.max())} methods and {int(col.n_ranked.max())} splits")
+                L.append(f"    {o['method']}: {o['delta_vs_ref']:+.3f} vs opponent, "
+                         f"ahead on {int(o['ahead_of_ref'])}/{int(o['n_pair'])} splits, "
+                         f"t-test p={tk.pstr(o['p_vs_ref'])} (Holm {tk.pstr(o['p_holm'])}), "
+                         f"own value {tk.txt_num(o['mean'], o['std'])}")
+        if rec in set(st.metric):
+            q = st[st.metric == rec]
+            L.append(f"  metric of record {rec}: Friedman p={tk.pstr(q['friedman_p'].iloc[0])} "
+                     f"over {int(q.k_ranked.max())} methods and {int(q.n_ranked.max())} splits")
         for r in rows:
             if not r.present:
                 L.append(f"  ! {r.label}: not available ({'; '.join(r.flags)})")
@@ -210,8 +236,6 @@ def parser():
     ap.add_argument("--alpha", type=float, default=tk.ALPHA)
     ap.add_argument("--ours", nargs="+", default=list(tk.GRAPH_COMBOS),
                     choices=tk.GRAPH_COMBOS, help="which heads of our graph get a row")
-    ap.add_argument("--ref", default="cls+mol", choices=tk.GRAPH_COMBOS,
-                    help="the row every other row is tested against")
     ap.add_argument("--baselines", nargs="+", default=list(tk.BASELINES))
     ap.add_argument("--baseline-combo", nargs="+", default=[tk.BASELINE_COMBO],
                     help="one combo for all, or name=combo items")
@@ -220,7 +244,8 @@ def parser():
                     help="restrict the sweep rows to these model seeds")
     ap.add_argument("--allow-mol-mismatch", action="store_true",
                     help="keep a baseline row fed another molecule embedding")
-    ap.add_argument("--sig", type=float, default=0.05)
+    ap.add_argument("--sig", type=float, default=0.05,
+                    help="only marks the console view; the table prints both p-values")
     ap.add_argument("--sweep-root", default=tk.SWEEP_ROOT)
     ap.add_argument("--ensemble-root", default=tk.ENSEMBLE_ROOT)
     ap.add_argument("--out", default=f"{tk.OUT_ROOT}/main")
@@ -230,7 +255,7 @@ def parser():
 def main(argv=None):
     a = parser().parse_args(argv)
     a.baseline_combo = combo_spec(a.baseline_combo)
-    a.ours = [c for c in tk.GRAPH_COMBOS if c in set(a.ours) | {a.ref}]
+    a.ours = [c for c in tk.GRAPH_COMBOS if c in set(a.ours)]
     out = tk.out_dir(a.out)
     longs = []
     for ds in a.dataset:

@@ -301,20 +301,43 @@ def friedman_p(M):
         return np.nan
 
 
-def block_stats(rows, metrics, ref_key):
-    """One record per (method, metric): mean/std over splits, place, test vs `ref_key`.
+def best_other(rows, metric, exclude=("ours",)):
+    """The key of the strongest row in this column that is NOT ours -- the opponent our
+    models are tested against. Per metric, because the leader changes between them."""
+    cand = [(r.key, float(r.values(metric).mean())) for r in rows
+            if r.usable and r.kind not in exclude and len(r.values(metric))]
+    if not cand:
+        return None
+    pick = min if metric in LOWER_IS_BETTER else max
+    return pick(cand, key=lambda kv: kv[1])[0]
 
-    The test is Holm-corrected across the methods compared with the reference in that
-    metric -- one family per table column."""
-    ref = next((r for r in rows if r.key == ref_key), None)
+
+def block_stats(rows, metrics, ref_key=None, ref_mode="fixed", test_kinds=("ours",)):
+    """One record per (method, metric): mean/std over splits, place, and a paired test.
+
+    `ref_mode="fixed"` tests every row against `ref_key` -- the older tables' shape.
+    `ref_mode="best_other"` is what the main table does: the reference is chosen PER
+    METRIC as the best row that is not ours (`best_other`), and only rows whose kind is
+    in `test_kinds` are tested at all. A baseline is then never tested against another
+    baseline, which is not a claim this paper makes and would only spend the correction.
+
+    The test is Holm-corrected across whatever was tested in that metric -- one family
+    per table column, so with two of our rows the correction is over two p-values."""
     recs = []
     for m in metrics:
         M = matrix(rows, m)
         R = split_ranks(M, m)
+        if ref_mode == "best_other":
+            rk = best_other(rows, m, exclude=tuple(test_kinds))
+            targets = [r for r in rows if r.kind in test_kinds]
+        else:
+            rk = ref_key
+            targets = [r for r in rows if r.key != rk]
+        ref = next((r for r in rows if r.key == rk), None)
         tests = {}
         if ref is not None and len(ref.values(m)):
-            for r in rows:
-                if r.key != ref_key and r.usable and len(r.values(m)):
+            for r in targets:
+                if r.key != rk and r.usable and len(r.values(m)):
                     tests[r.key] = paired_test(r.values(m), ref.values(m), m)
         adj = holm({k: t["p"] for k, t in tests.items()})
         fp = friedman_p(M)
@@ -328,7 +351,7 @@ def block_stats(rows, metrics, ref_key):
                 std=float(v.std(ddof=1)) if len(v) > 1 else np.nan,
                 rank=(float(R[r.key].mean()) if r.key in R.columns and len(R)
                       else np.nan),
-                n_ranked=len(R), k_ranked=R.shape[1], friedman_p=fp, ref=ref_key,
+                n_ranked=len(R), k_ranked=R.shape[1], friedman_p=fp, ref=rk or "",
                 delta_vs_ref=t.get("delta", np.nan), p_vs_ref=t.get("p", np.nan),
                 p_holm=float(adj.get(r.key, np.nan)) if r.key in adj else np.nan,
                 ahead_of_ref=t.get("ahead", np.nan), behind_ref=t.get("behind", np.nan),
@@ -374,8 +397,22 @@ def pstr(p):
     return "<0.001" if p < 1e-3 else f"{p:.3f}"
 
 
-def text_block(st, metrics, title, sig=0.05, w=26):
-    """The block as a console table: value +/- std (place), * = Holm p < sig vs ref."""
+def tex_p(p):
+    if p is None or not np.isfinite(p):
+        return "--"
+    return r"$<$0.001" if p < 1e-3 else f"{p:.3f}"
+
+
+def tex_p_pair(raw, adj):
+    """The two p-values of one cell, raw/Holm, as the table prints them."""
+    if (raw is None or not np.isfinite(raw)) and (adj is None or not np.isfinite(adj)):
+        return ""
+    return f"{tex_p(raw)}/{tex_p(adj)}"
+
+
+def text_block(st, metrics, title, sig=0.05, w=34):
+    """The block as a console table: value +/- std (place), then the tested rows' two
+    p-values against that column's reference, raw/Holm."""
     keys = list(dict.fromkeys(st.key))
     head = f"  {'method':<28}" + "".join(f"{m:>{w}}" for m in metrics) + f"{'rank':>7}"
     lines = [title, head, "  " + "-" * (len(head) - 2)]
@@ -390,10 +427,12 @@ def text_block(st, metrics, title, sig=0.05, w=26):
             txt = txt_num(r["mean"], r["std"])
             if np.isfinite(r["rank"]):
                 txt += f" ({r['rank']:.2f})"
-            if k == r["ref"]:
-                txt += " r"
-            elif np.isfinite(r["p_holm"]) and r["p_holm"] < sig:
-                txt += " *"
+            if np.isfinite(r["p_vs_ref"]) or np.isfinite(r["p_holm"]):
+                txt += f" p{pstr(r['p_vs_ref'])}/{pstr(r['p_holm'])}"
+                if np.isfinite(r["p_holm"]) and r["p_holm"] < sig:
+                    txt += "*"
+            elif k == r["ref"]:
+                txt += " ref"
             cells += f"{txt:>{w}}"
         mr = s["rank"].mean()
         use = "" if bool(s["usable"].iloc[0]) else "  [not usable]"

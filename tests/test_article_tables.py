@@ -142,11 +142,20 @@ def test_main_table_end_to_end(trees):
     st = pd.concat(longs)
     r2 = st[st.metric == "R2"].set_index("key")
     assert r2.loc["ours:cls+prot+mol", "rank"] == 1.0
-    assert r2.loc["boost", "p_holm"] < 0.05          # 0.04 ahead on every split
+    # only OUR rows are tested, and the opponent is the best row that is not ours --
+    # here the boosting base, which leads Hladis in this fixture
+    assert (r2.loc["ours:cls+mol", "ref"] == "boost"
+            and r2.loc["ours:cls+prot+mol", "ref"] == "boost")
+    assert r2.loc["ours:cls+mol", "p_holm"] < 0.05   # 0.04 ahead on every split
+    assert np.isnan(r2.loc["boost", "p_vs_ref"]) and np.isnan(r2.loc["hladis", "p_vs_ref"])
     assert np.isnan(r2.loc["lorax", "mean"])         # not run -> a blank row, not a gap
     tex = (out / "cc.tex").read_text()
     assert r"\cbest{" in tex and "LORAX" in tex and "--" in tex
     assert r"\label{tab:main_cc}" in tex and "Friedman" in tex
+    # the p column exists once per metric in the HEADER (the caption also says "$p$"),
+    # and the Friedman line sits under the table
+    header = next(l for l in tex.splitlines() if l.startswith(r"\textbf{Method"))
+    assert header.count("$p$") == 4 and r"\multicolumn{10}{@{}l}" in tex
     assert "not available" in (out / "cc_summary.txt").read_text()
 
 

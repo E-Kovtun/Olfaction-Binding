@@ -34,6 +34,7 @@ combos (e.g. cls appearing in both "1" and "123") is computed once per run.
 """
 from __future__ import annotations
 
+import gc
 import pathlib
 from dataclasses import dataclass, field
 from typing import Callable
@@ -285,6 +286,22 @@ def _save_scores(scores_dir, repeat_tag, val_preds, test_preds, y_va, y_te,
     tmp.replace(d / f"repeat_{repeat_tag}.npz")
 
 
+def _release_gpu():
+    """Hand torch's cached device memory back to the driver.
+
+    torch's caching allocator keeps freed blocks *reserved*, so a GPU that is idle
+    as far as Python is concerned is still fully claimed as far as any other
+    library is concerned. XGBoost's `device="cuda"` head then can't allocate on the
+    very card it was given. No-op without torch or without CUDA."""
+    try:
+        import torch
+    except ImportError:
+        return
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
 def run_ensemble(pairs: pd.DataFrame, extractors: dict[str, object], combo_spec: str,
                   split_kind: str = "stratified", seed: int = 42,
                   test_size: float = 0.2, val_size: float = 0.2,
@@ -446,6 +463,19 @@ def run_ensemble(pairs: pd.DataFrame, extractors: dict[str, object], combo_spec:
             cache[name] = extractors[name].fit_transform(pairs, train_idx, val_idx, test_idx, seed,
                                                            checkpoint_dir=checkpoint_dir)
         return cache[name]
+
+    # Every extractor first, then every boosting head -- deliberately NOT lazy per
+    # combo. `cache` never evicts, so nothing is held any longer than it was before
+    # this reordering, and the arithmetic is untouched; what it buys is that torch is
+    # finished with the GPU before XGBoost asks for it. Sharing a device between a
+    # live torch caching allocator and XGBoost's device vectors cost us a run on the
+    # server: the boost head fell back to CPU mid-run ("XGBoost CUDA unavailable"),
+    # and the process then died with `terminate called ... cuMemUnmap ...
+    # CUDA_ERROR_INVALID_VALUE` thrown from a DESTRUCTOR, which no Python `except`
+    # can catch.
+    for name in dict.fromkeys(n for combo in combos for n in combo):
+        get(name)
+    _release_gpu()
 
     repeat_tag = run_id if run_id is not None else seed
     combo_metrics, val_preds, test_preds = {}, {}, {}

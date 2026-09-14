@@ -152,6 +152,7 @@ import json
 import multiprocessing
 import os
 import pathlib
+import queue
 import shutil
 import sys
 from datetime import datetime
@@ -528,6 +529,36 @@ def _run_one_repeat_to_queue(q, *call_args):
     q.put(_run_one_repeat(*call_args))
 
 
+def _await_repeat(repeat, p, q, poll=30.0, grace=10.0):
+    """`q.get()` that notices a worker which died without answering.
+
+    A bare `q.get()` blocks forever on a dead child, and a CUDA teardown can kill one
+    outright: a C++ exception escaping a destructor calls std::terminate, so the
+    worker takes SIGABRT with no Python traceback and no queue entry. That turned a
+    crashed repeat into a parent that looked busy while metrics.csv silently stayed
+    short -- and a short metrics.csv reads downstream as a legitimate run with fewer
+    folds. Fail loudly instead.
+
+    A worker can exit between `put` and our `is_alive()` check while its feeder
+    thread is still flushing, so death is only believed after one more `grace`-long
+    read comes up empty."""
+    while True:
+        try:
+            return q.get(timeout=poll)
+        except queue.Empty:
+            if p.is_alive():
+                continue
+            try:
+                return q.get(timeout=grace)
+            except queue.Empty:
+                raise RuntimeError(
+                    f"repeat {repeat} died (exit code {p.exitcode}) without returning "
+                    f"metrics -- see logs/repeat_{repeat}.log for how far it got. An "
+                    f"abort inside a CUDA teardown looks exactly like this and cannot "
+                    f"be caught in the worker."
+                ) from None
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--regime", default="curated_full", choices=["curated_full", "full_full", "ofm"])
@@ -773,7 +804,7 @@ def _run(args, run_dir) -> None:
                 p.start()
                 procs.append((repeat, p, q))
             for repeat, p, q in procs:
-                r_repeat, result = q.get()
+                r_repeat, result = _await_repeat(repeat, p, q)
                 p.join()
                 print(f"--- repeat {r_repeat} done (see logs/repeat_{r_repeat}.log) ---", flush=True)
                 collect(r_repeat, result)

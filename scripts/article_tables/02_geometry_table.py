@@ -106,9 +106,11 @@ def latex(cells, a):
            "averaged over model seeds within each split first). Our graph = the refined "
            "receptor vector; the other rows are frozen protein features. "
            r"\textbf{Bold} = best in column, \underline{underline} = second. "
-           f"$^{{\\circ}}$ = mean $z$ against a row-permutation null below {a.z:g}. "
-           f"$^{{*}}$ = differs from our graph ($\\alpha={a.alphas[0]:g}$) at $p<{a.sig:g}$, "
-           r"paired two-sided $t$-test over splits, Holm-corrected within the column.")
+           f"$^{{\\circ}}$ = mean $z$ against a row-permutation null below {a.z:g}.")
+    if a.tests:
+        cap += (f" $^{{*}}$ = differs from our graph ($\\alpha={a.alphas[0]:g}$) at "
+                f"$p<{a.sig:g}$, paired two-sided $t$-test over splits, Holm-corrected "
+                "within the column.")
     if "m2or" in dss:
         cap += (" On M2OR the profile is sparse and the assayed-pair mask alone reproduces "
                 "most of the graph's alignment; read that block with caution.")
@@ -141,7 +143,8 @@ def latex(cells, a):
                 txt = tk.tex_num(r["mean"], r["std"])
                 if np.isfinite(r["z"]) and r["z"] < a.z:
                     txt += r"$^{\circ}$"
-                if key != r["ref"] and np.isfinite(r["p_holm"]) and r["p_holm"] < a.sig:
+                if (a.tests and key != r["ref"] and np.isfinite(r["p_holm"])
+                        and r["p_holm"] < a.sig):
                     txt += r"$^{*}$"
                 best, second = tk.top_two(col, f"{g}_fun")
                 txt = (rf"\cbest{{{txt}}}" if key == best else
@@ -188,6 +191,11 @@ def parser():
     ap.add_argument("--seeds", type=int, nargs="+", default=None)
     ap.add_argument("--z", type=float, default=1.96)
     ap.add_argument("--sig", type=float, default=0.05)
+    ap.add_argument("--no-tests", dest="tests", action="store_false",
+                    help="drop the paired-t/Holm markers from the LaTeX table. The console "
+                         "view and geometry_long.csv keep every p-value either way, so this "
+                         "only changes what the paper prints. The permutation-null mark "
+                         "($^\\circ$) is a different statement and stays.")
     ap.add_argument("--sweep-root", default=tk.SWEEP_ROOT)
     ap.add_argument("--protein-geometry", default=f"{tk.OUT_ROOT}/protein_geometry")
     ap.add_argument("--out", default=f"{tk.OUT_ROOT}/geometry")

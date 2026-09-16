@@ -93,8 +93,12 @@ if str(_root) not in sys.path:
 
 from scripts.analysis import alpha_grid as ag                      # noqa: E402
 
-DATASET_LABEL = {"m2or": "M2OR", "cc": "Carey", "hc": "Hallem-Carlson"}
-DATASET_ORDER = ["m2or", "cc", "hc"]
+DATASET_LABEL = {"m2or": "M2OR", "cc": "Carey", "hc": "Hallem-Carlson",
+                 "cc_shrinked": "Carey (shrunk)",
+                 "hc_shrinked": "Hallem-Carlson (shrunk)"}
+# The shrunk panels sit LAST: every table's --dataset defaults to this list, so putting
+# them anywhere else would silently reorder tables that already exist in the paper.
+DATASET_ORDER = ["m2or", "cc", "hc", "cc_shrinked", "hc_shrinked"]
 REGIME_ORDER = ["transductive", "inductive"]
 # The columns each table prints. Fewer than the battery on purpose: this is the table,
 # not the archive -- `headline_table.py --all-metrics` is where everything lives.
@@ -109,6 +113,14 @@ ENSEMBLE_SCOPE = {
     ("cc", "inductive"): dict(regime="ofm", dataset="cc", split_family="our_inductive"),
     ("hc", "transductive"): dict(regime="ofm", dataset="hc", split_family="rand"),
     ("hc", "inductive"): dict(regime="ofm", dataset="hc", split_family="our_inductive"),
+    ("cc_shrinked", "transductive"): dict(regime="ofm", dataset="cc_shrinked",
+                                          split_family="rand"),
+    ("cc_shrinked", "inductive"): dict(regime="ofm", dataset="cc_shrinked",
+                                       split_family="our_inductive"),
+    ("hc_shrinked", "transductive"): dict(regime="ofm", dataset="hc_shrinked",
+                                          split_family="rand"),
+    ("hc_shrinked", "inductive"): dict(regime="ofm", dataset="hc_shrinked",
+                                       split_family="our_inductive"),
     ("m2or", "transductive"): dict(regime="full_full", full_full_mode="transductive"),
     ("m2or", "inductive"): dict(regime="full_full",
                                 full_full_mode="inductive_molecule_v5"),

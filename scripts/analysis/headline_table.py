@@ -71,7 +71,10 @@ REGIME_OF = {"rand": "transductive", "transductive": "transductive",
 # and only q99greedy is of record, so the other is hidden unless asked for -- hidden,
 # not deleted: q0cov is the evidence that what breaks m2or transductive is the EDGE SET
 # and not the protein embedding.
-CANONICAL_VARIANT = {"cc": "q0cov", "hc": "q0cov", "m2or": "q99greedy"}
+CANONICAL_VARIANT = {"cc": "q0cov", "hc": "q0cov", "m2or": "q99greedy",
+                     # held at their base panel's variant on purpose: the mask is the
+                     # only thing that may differ between a shrunk run and its parent
+                     "cc_shrinked": "q0cov", "hc_shrinked": "q0cov"}
 # Every reported number was produced at seed 42, the ensembler's own default under
 # ofm/full_full. Extra seeds widen the interval honestly, but a 25-cell row is not
 # comparable line for line with a 5-cell one from an older series, and mixing the two

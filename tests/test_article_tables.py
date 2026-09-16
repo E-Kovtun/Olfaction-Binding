@@ -193,6 +193,36 @@ def test_geometry_table_reads_the_sweep_and_the_frozen_embeddings(trees):
     assert "ESM-1b" in tex and r"$^{\circ}$" in tex         # procrustes z below 1.96
 
 
+def test_no_tests_drops_the_significance_marks_but_not_the_null_marks(trees):
+    """Two different statements share a superscript slot. `--no-tests` is about the
+    paired comparison AGAINST OUR GRAPH; the permutation null says whether a row is
+    distinguishable from chance at all, which stays either way. Dropping both would
+    quietly turn an unaligned row into one the reader takes at face value."""
+    s, _, tmp = trees
+    pg = tmp / "pg2"
+    pg.mkdir()
+    pd.DataFrame([dict(dataset="cc", regime="transductive", fold=f, embedding=e,
+                       rsa_fun=v + 0.01 * f, rsa_fun_z=z, cca_fun=0.3, cca_fun_z=2.5,
+                       procrustes_fun=0.1, procrustes_fun_z=0.5)
+                  for f in FOLDS for e, v, z in (("esm1b", 0.1, 3.0),)]
+                 ).to_csv(pg / "cc_transductive.csv", index=False)
+    m = _script("02_geometry_table")
+    args = ["--dataset", "cc", "--sweep-root", str(s), "--protein-geometry", str(pg)]
+
+    on = tmp / "geo_on"
+    m.main(args + ["--out", str(on)])
+    tex_on = (on / "geometry_transductive.tex").read_text()
+    assert r"$^{*}$" in tex_on and "Holm-corrected" in tex_on
+
+    off = tmp / "geo_off"
+    m.main(args + ["--out", str(off), "--no-tests"])
+    tex_off = (off / "geometry_transductive.tex").read_text()
+    assert r"$^{*}$" not in tex_off, "the significance mark survived --no-tests"
+    assert "Holm-corrected" not in tex_off, "the caption still explains a mark that is gone"
+    assert r"$^{\circ}$" in tex_off, "the permutation-null mark is a different statement"
+    assert "ESM-1b" in tex_off and "0.1" in tex_off
+
+
 # ------------------------------------------------------- the decision threshold
 
 def _bin(rng, n=60, prevalence=0.25, lo=0.10, hi=0.40):

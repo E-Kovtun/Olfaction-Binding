@@ -61,7 +61,8 @@ REFS = ["esm", "fun"]
 SPLIT = ["fold", "seed"]
 # Everything that makes two rows different experiments rather than two repeats of one.
 IDENTITY = ["dataset", "regime", "mol_source", "variant_tag", "nodes"]
-TASK = {"cc": "regression", "hc": "regression", "m2or": "classification"}
+TASK = {"cc": "regression", "hc": "regression", "m2or": "classification",
+        "cc_shrinked": "regression", "hc_shrinked": "regression"}
 OF_RECORD = {"regression": "R2", "classification": "AUROC"}
 # The arms with no alpha: horizontal references a curve is read against, never points
 # on it. `naive` is the constant train mean -- R2's honest zero, and AUROC 0.5.

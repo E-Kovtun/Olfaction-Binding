@@ -182,13 +182,16 @@ from scripts.modeling.analysis.mechanism_holdout import (          # noqa: E402
 # different script: scripts/modeling/analysis/mechanism_holdout.py
 FAMILY = {"cc": {"transductive": "rand", "inductive": "our_inductive"},
           "hc": {"transductive": "rand", "inductive": "our_inductive"},
+          "cc_shrinked": {"transductive": "rand", "inductive": "our_inductive"},
+          "hc_shrinked": {"transductive": "rand", "inductive": "our_inductive"},
           "m2or": {"transductive": "transductive",
                    "inductive": "inductive_molecule_v5"}}
 # M2OR's repeats are cold-molecule SEEDS, not folds, for the inductive regime.
-REPEATS = {"cc": {}, "hc": {},
+REPEATS = {"cc": {}, "hc": {}, "cc_shrinked": {}, "hc_shrinked": {},
            "m2or": {"transductive": [1, 2, 3, 4, 5],
                     "inductive": [42, 43, 44, 45, 46]}}
-TASK = {"cc": "regression", "hc": "regression", "m2or": "classification"}
+TASK = {"cc": "regression", "hc": "regression", "m2or": "classification",
+        "cc_shrinked": "regression", "hc_shrinked": "regression"}
 TASK_METRICS = {"regression": ["R2", "RMSE", "MAE", "Pearson", "Spearman"],
                 "classification": ["AUROC", "AUPRC", "MCC", "F1"]}
 # The MP-edge variants. On M2OR coverage is heavy-tailed and q99+greedy picks a hub
@@ -197,7 +200,11 @@ TASK_METRICS = {"regression": ["R2", "RMSE", "MAE", "Pearson", "Spearman"],
 VARIANTS = {"q99greedy": dict(q=0.99, criterion="greedy_pair_cover",
                               k_mode="coverage_quantile"),
             "q0cov": dict(q=0.0, criterion="coverage", k_mode="coverage_quantile")}
-DEFAULT_VARIANT = {"cc": "q0cov", "hc": "q0cov", "m2or": "q99greedy"}
+# A shrunk panel keeps its PARENT's variant, not M2OR's. The mask is the one thing that
+# differs from the complete run; switching the edge variant at the same time would
+# confound "sparsity did it" with "hub selection did it".
+DEFAULT_VARIANT = {"cc": "q0cov", "hc": "q0cov", "m2or": "q99greedy",
+                   "cc_shrinked": "q0cov", "hc_shrinked": "q0cov"}
 GEOMS = ["rsa", "cca", "procrustes"]
 REFS = ["esm", "fun"]
 # The molecule source is BOTH the boost's molecular half and the graph's molecule node
@@ -220,6 +227,11 @@ MOL_SOURCES = {"chemberta": {None: "data/embeddings/molecules/chemberta_77m_{ds}
 PROT_SOURCE = {None: "data/embeddings/proteins/esm1b_650m_mean_{ds}.npz",
                "m2or": "data/embeddings/proteins/esm1b_650m_mean.npz"}
 UNTAGGED_MOL = "gin"
+# Which panel's EMBEDDING FILES a dataset reads. A shrunk panel changed only which cells
+# count as measured -- its receptors and odorants are its parent's, so it shares every
+# npz with it and none has to be regenerated. Keyed here rather than by adding an entry
+# per molecule source, so `gin` and `ecfp` follow without a second edit.
+EMBEDDING_BASE = {"cc_shrinked": "cc", "hc_shrinked": "hc"}
 
 
 # Which held-out set a row is scored on. `train` is in the dump because an overfit
@@ -304,10 +316,11 @@ def splits_wanted(args, P):
 
 
 def paths(ds, args):
+    emb = EMBEDDING_BASE.get(ds, ds)
     src = MOL_SOURCES[args.mol_source]
-    mp = args.mol_embeddings or src.get(ds, src[None])
-    pp = args.prot_embeddings or PROT_SOURCE.get(ds, PROT_SOURCE[None])
-    return pp.format(ds=ds), mp.format(ds=ds)
+    mp = args.mol_embeddings or src.get(emb, src[None])
+    pp = args.prot_embeddings or PROT_SOURCE.get(emb, PROT_SOURCE[None])
+    return pp.format(ds=emb), mp.format(ds=emb)
 
 
 def repeats(ds, regime, args):
@@ -1160,7 +1173,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dataset", nargs="+", default=["hc", "cc"],
-                    choices=["hc", "cc", "m2or"],
+                    choices=["hc", "cc", "m2or", "cc_shrinked", "hc_shrinked"],
                     help="cc/hc are the continuous insect panels (regression); m2or is "
                          "the sparse binary pool (classification, AUROC/AUPRC/MCC/F1)")
     ap.add_argument("--variant", choices=list(VARIANTS), default=None,

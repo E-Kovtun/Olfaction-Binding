@@ -81,6 +81,30 @@ DATASETS: dict[str, dict] = {
         "molecules": "molecule_smiles_hc.csv",
         "label": "Hallem-Carlson",
     },
+    # The same two panels with most cells declared NOT MEASURED, so that what is left
+    # carries M2OR's sparsity profile instead of a complete matrix. Built by
+    # scripts/preprocessing/04_build_shrunk_ofm.py; the receptors, the odorants and the
+    # responses are untouched, only which (receptor, odorant) cells survive. They exist
+    # to separate "M2OR behaves differently because it is sparse" from "because it is a
+    # different assay", which no comparison between the complete insect panels and M2OR
+    # can do. `base` is the panel each one was cut from -- embeddings and the molecule
+    # bridge are shared with it, since neither receptors nor odorants changed.
+    "cc_shrinked": {
+        "dir": "CC_shrinked",
+        "raw": pathlib.Path("CC_shrinked") / "raw" / "cc_shrinked_z.csv",
+        "families": ("rand", "our_inductive"),
+        "molecules": "molecule_smiles_cc_shrinked.csv",
+        "label": "Carey (shrunk)",
+        "base": "cc",
+    },
+    "hc_shrinked": {
+        "dir": "HC_shrinked",
+        "raw": pathlib.Path("HC_shrinked") / "raw" / "hc_shrinked_z.csv",
+        "families": ("rand", "our_inductive"),
+        "molecules": "molecule_smiles_hc_shrinked.csv",
+        "label": "Hallem-Carlson (shrunk)",
+        "base": "hc",
+    },
 }
 FOLDS = (1, 2, 3, 4, 5)
 

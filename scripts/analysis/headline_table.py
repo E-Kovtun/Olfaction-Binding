@@ -103,12 +103,26 @@ REF_ARMS = ("boost_full", "naive")
 DEFAULT_GRAPH_COMBO = "cls+mol"
 
 
+# Dataset names are matched LONGEST FIRST, because a name may itself contain the
+# separator: `cc_shrinked_rand_...` has to read as (cc_shrinked, rand) and not as
+# (cc, shrinked_rand), which is not a family and drops the whole file. That is not
+# hypothetical -- it is how a finished v10 sweep first read as an empty directory.
+KNOWN_DATASETS = tuple(sorted(CANONICAL_VARIANT, key=len, reverse=True))
+
+
 def parse_name(stem):
     """(dataset, family, nodes, mol_source, variant) from a metrics filename. Absent
     tags mean the defaults the sweep used before that axis existed: ESM nodes, GIN
     molecules, and the dataset's own canonical edge variant."""
-    parts = stem.replace("metrics_", "").split("_")
-    ds, rest = parts[0], parts[1:]
+    body = stem.replace("metrics_", "")
+    for d in KNOWN_DATASETS:
+        if body == d or body.startswith(f"{d}_"):
+            ds, tail = d, body[len(d):].lstrip("_")
+            rest = tail.split("_") if tail else []
+            break
+    else:                                   # an unknown dataset: the old reading
+        parts = body.split("_")
+        ds, rest = parts[0], parts[1:]
     nodes, mol, variant = "esm", "gin", ""
     if rest and rest[-1] in KNOWN_NODES:
         nodes = rest.pop()

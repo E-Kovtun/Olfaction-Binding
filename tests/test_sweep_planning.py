@@ -95,23 +95,33 @@ def test_every_emitted_name_is_readable_back(sweep, table):
     """The reader's parser must invert the writer. A name it cannot parse is not an
     error anywhere -- the file is just quietly absent from the table."""
     seen = set()
-    for ds, regimes in (("cc", ["transductive", "inductive"]),
-                        ("hc", ["transductive", "inductive"]),
-                        ("m2or", ["transductive", "inductive"])):
-        for regime in regimes:
+    for ds in sweep.FAMILY:                        # every dataset the writer knows: a
+                                                   # new one must extend this test, and
+                                                   # `cc_shrinked` is why -- its name
+                                                   # carries the separator, so the old
+                                                   # parser read it as ds=cc and family
+                                                   # "shrinked_rand" and dropped a
+                                                   # finished sweep on the floor
+        for regime in ("transductive", "inductive"):
             for mol in sweep.MOL_SOURCES:          # not a hardcoded pair: a new
                                                    # source must extend this test
-                for nodes in ("esm", "onehot"):
-                    for variant in (None, "q0cov", "q99greedy"):
-                        args = A(mol_source=mol, nodes=nodes, variant=variant)
-                        name = sweep.out_path(ds, regime, args).stem
-                        got_ds, family, got_nodes, got_mol, _ = table.parse_name(name)
-                        assert got_ds == ds, name
-                        assert got_nodes == nodes, name
-                        assert got_mol == mol, name
-                        assert family in table.REGIME_OF, name
-                        assert table.REGIME_OF[family] == regime, name
-                        seen.add(name)
+                for dial in ("gate", "nodes"):     # `nodes` is what writes _nodedial,
+                                                   # the tag every v9/v10 run carries
+                    for nodes in ("esm", "onehot"):
+                        for variant in (None, "q0cov", "q99greedy"):
+                            args = A(mol_source=mol, nodes=nodes, variant=variant,
+                                     dial=dial)
+                            name = sweep.out_path(ds, regime, args).stem
+                            got_ds, family, got_nodes, got_mol, _ = table.parse_name(name)
+                            assert got_ds == ds, name
+                            assert got_mol == mol, name
+                            assert family in table.REGIME_OF, name
+                            assert table.REGIME_OF[family] == regime, name
+                            if dial == "gate":
+                                assert got_nodes == nodes, name
+                            else:
+                                assert got_nodes == "nodedial", name
+                            seen.add(name)
     assert len(seen) > 30
 
 

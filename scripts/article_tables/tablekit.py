@@ -119,11 +119,13 @@ class Row:
 
 
 _SWEEP = {}
+_SWEEP_WHY = {}
 _RUNS = {}
 
 
 def clear_cache():
     _SWEEP.clear()
+    _SWEEP_WHY.clear()
     _RUNS.clear()
 
 
@@ -133,9 +135,21 @@ def sweep_frame(root=SWEEP_ROOT, combo="cls+mol"):
     if key not in _SWEEP:
         try:
             _SWEEP[key] = ag.load(root=str(resolve(root)), nodes="nodedial", combo=combo)
-        except SystemExit:
+            _SWEEP_WHY[key] = ""
+        except SystemExit as exc:
+            # `ag.load` exits when its filters leave nothing -- which includes the case
+            # where every file under the root was DROPPED as unparseable, a very
+            # different thing from "not run yet". Discarding that message is how a
+            # finished sweep read as an empty directory for a whole debugging round:
+            # the table printed `--` for every graph row and volunteered no reason.
             _SWEEP[key] = pd.DataFrame()
+            _SWEEP_WHY[key] = str(exc).strip() or "alpha_grid.load returned nothing"
     return _SWEEP[key]
+
+
+def sweep_reason(root=SWEEP_ROOT, combo="cls+mol"):
+    """Why `sweep_frame` came back empty, verbatim from the reader that gave up."""
+    return _SWEEP_WHY.get((str(root), combo), "")
 
 
 def _per_split(q, metrics):
@@ -159,9 +173,11 @@ def ours_row(ds, regime, mol, metrics, combo="cls+mol", alpha=ALPHA, seeds=None,
              root=SWEEP_ROOT):
     label = f"Our graph ({combo})"
     row = Row(f"ours:{combo}", label, label, "ours", combo, "sweep")
-    g = _cell(sweep_frame(root, combo), ds, regime, mol, seeds)
+    frame = sweep_frame(root, combo)
+    g = _cell(frame, ds, regime, mol, seeds)
     if g.empty:
-        row.flags.append("no sweep file for this cell")
+        row.flags.append(sweep_reason(root, combo) if frame.empty
+                         else "no rows for this dataset/regime/molecule source")
         return row
     q = g[(g.arm == "gate")
           & np.isclose(pd.to_numeric(g.alpha, errors="coerce").astype(float), alpha)]
@@ -186,7 +202,7 @@ def boost_row(ds, regime, mol, metrics, seeds=None, root=SWEEP_ROOT):
             row.locator = dict(kind="sweep", root=root, ds=ds, regime=regime, mol=mol,
                                arm="boost_full", alpha=None, combo="cls+mol")
             return row
-    row.flags.append("no boost_full rows")
+    row.flags.append(sweep_reason(root, GRAPH_COMBOS[0]) or "no boost_full rows")
     return row
 
 

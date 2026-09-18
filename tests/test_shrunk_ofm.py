@@ -17,6 +17,7 @@ import pathlib
 import sys
 
 import numpy as np
+import pandas as pd
 import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -114,3 +115,138 @@ def test_ipf_stays_a_probability_when_the_margins_are_not_reachable():
     assert np.isfinite(P).all()
     assert P.min() >= 0.0 and P.max() <= 1.0
     assert np.isclose(P.max(), 1.0), "this fixture is meant to saturate; it no longer does"
+
+
+# ------------------------------------------------- the mask constrains training only
+
+class _Args:
+    def __init__(self, **kw):
+        self.density, self.mask, self.seed = 0.3, "marginal", 0
+        self.min_per_receptor = self.min_per_molecule = 1
+        self.dry_run, self.overwrite = False, True
+        self.__dict__.update(kw)
+
+
+@pytest.fixture
+def panel(tmp_path, monkeypatch):
+    """A complete 6x10 parent panel with both split families, wired so `build` writes
+    into tmp_path instead of the repo."""
+    recs, mols = [f"R{i}" for i in range(6)], [f"M{j}" for j in range(10)]
+    pool = pd.DataFrame([{"SMILES": m, "Protein sequence": r, "output": float(10 * i + j)}
+                         for i, r in enumerate(recs) for j, m in enumerate(mols)])
+    ofm, mol_dir = tmp_path / "ofm", tmp_path / "mols"
+    (ofm / "PARENT" / "raw").mkdir(parents=True)
+    mol_dir.mkdir()
+    pd.DataFrame({"smiles": mols, "inchikey": [f"K{j}" for j in range(10)]}).to_csv(
+        mol_dir / "molecule_smiles_parent.csv", index=False)
+
+    rng = np.random.default_rng(0)
+    for f in sh.FOLDS:
+        perm = rng.permutation(len(pool))
+        d = ofm / "PARENT" / "rand_splits" / f"rand_split_{f}"
+        d.mkdir(parents=True)
+        for s, idx in (("train", perm[:36]), ("val", perm[36:48]), ("test", perm[48:])):
+            pool.iloc[sorted(idx)].to_csv(d / f"{s}_df.csv", index=False)
+        te = {mols[(2 * f) % 10], mols[(2 * f + 1) % 10]}
+        va = {mols[(2 * f + 2) % 10]}
+        d = ofm / "PARENT" / "our_inductive_splits" / f"our_inductive_split_{f}"
+        d.mkdir(parents=True)
+        m_te, m_va = pool["SMILES"].isin(te), pool["SMILES"].isin(va)
+        pool[~m_te & ~m_va].to_csv(d / "train_df.csv", index=False)
+        pool[m_va].to_csv(d / "val_df.csv", index=False)
+        pool[m_te].to_csv(d / "test_df.csv", index=False)
+
+    monkeypatch.setattr(sh, "OFM_DIR", ofm)
+    monkeypatch.setattr(sh, "MOL_DIR", mol_dir)
+    monkeypatch.setattr(sh, "_root", tmp_path)
+    monkeypatch.setattr(sh, "ofm_pool", lambda d: pool.copy())
+    monkeypatch.setattr(sh, "DATASETS", {
+        "parent": {"dir": "PARENT", "families": ("rand", "our_inductive"),
+                   "molecules": "molecule_smiles_parent.csv"},
+        "kid": {"dir": "KID", "raw": pathlib.Path("KID") / "raw" / "kid_z.csv",
+                "families": ("rand", "our_inductive"),
+                "molecules": "molecule_smiles_kid.csv", "base": "parent"}})
+    return pool, ofm
+
+
+def _splits(ofm, family, f):
+    d = ofm / "KID" / f"{family}_splits" / f"{family}_split_{f}"
+    return {s: pd.read_csv(d / f"{s}_df.csv") for s in ("train", "val", "test")}
+
+
+def _keys(df):
+    return set(map(tuple, df[["SMILES", "Protein sequence"]].to_numpy()))
+
+
+def test_the_written_pool_is_the_parent_complete(panel, prof):
+    """The shrunk pool must keep every cell and every response. Writing only the
+    measured rows is what made the test set 70 rows instead of 5200."""
+    pool, ofm = panel
+    sh.build("kid", _Args(), prof)
+    got = pd.read_csv(ofm / "KID" / "raw" / "kid_z.csv")
+    assert len(got) == len(pool)
+    assert _keys(got) == _keys(pool)
+
+
+@pytest.mark.parametrize("family", ["rand", "our_inductive"])
+def test_training_sees_only_measured_cells_and_test_is_everything_else(panel, prof, family):
+    pool, ofm = panel
+    sh.build("kid", _Args(), prof)
+    measured = _keys(pd.read_csv(ofm / "KID" / "raw" / "kid_measured.csv"))
+    for f in sh.FOLDS:
+        s = _splits(ofm, family, f)
+        tr, va, te = (_keys(s[k]) for k in ("train", "val", "test"))
+        assert tr <= measured, f"{family}/{f}: a training cell was never measured"
+        assert va <= measured, f"{family}/{f}: a validation cell was never measured"
+        assert not (tr & va) and not (tr & te) and not (va & te), "splits overlap"
+        assert tr | va | te == _keys(pool), (
+            f"{family}/{f}: the three splits do not partition the pool -- "
+            f"ofm_indices checks exactly this")
+
+
+@pytest.mark.parametrize("family", ["rand", "our_inductive"])
+def test_the_parents_own_test_block_stays_recoverable(panel, prof, family):
+    """What makes shrunk-vs-parent a PAIRED comparison. The big test is mostly cells the
+    parent trained on; `origin == "upstream_test"` has to be the parent's test block row
+    for row, or the two panels are scored on different material and no delta between
+    them means anything."""
+    pool, ofm = panel
+    sh.build("kid", _Args(), prof)
+    for f in sh.FOLDS:
+        o = pd.read_csv(ofm / "KID" / f"{family}_splits" / f"{family}_split_{f}"
+                        / "test_origin.csv")
+        parent = _keys(pd.read_csv(ofm / "PARENT" / f"{family}_splits"
+                                   / f"{family}_split_{f}" / "test_df.csv"))
+        assert _keys(o[o.origin == "upstream_test"]) == parent, (
+            f"{family}/{f}: the parent's test block drifted")
+
+
+def test_effective_coldness_is_wider_than_the_split_and_that_is_deliberate(panel, prof):
+    """Two different notions, and conflating them would misread the table. A molecule
+    the split held out is cold; so is one whose every measurement the mask happened to
+    delete, and the model cannot tell them apart. The second set is strictly larger --
+    at M2OR's density on Carey it is 1933 cells against the split's 1100."""
+    pool, ofm = panel
+    sh.build("kid", _Args(), prof)
+    for f in sh.FOLDS:
+        o = pd.read_csv(ofm / "KID" / "our_inductive_splits"
+                        / f"our_inductive_split_{f}" / "test_origin.csv")
+        held_out = _keys(o[o.origin == "upstream_test"])
+        cold = _keys(o[o.cold_molecule])
+        assert held_out <= cold, (
+            f"fold {f}: a held-out odorant was not marked cold -- the flag is computed "
+            f"against the MASKED train split and must cover the split's own holdout")
+
+
+def test_every_test_row_is_labelled_with_where_it_came_from(panel, prof):
+    pool, ofm = panel
+    sh.build("kid", _Args(), prof)
+    for family in ("rand", "our_inductive"):
+        for f in sh.FOLDS:
+            s = _splits(ofm, family, f)
+            o = pd.read_csv(ofm / "KID" / f"{family}_splits" / f"{family}_split_{f}"
+                            / "test_origin.csv")
+            assert len(o) == len(s["test"])
+            assert _keys(o) == _keys(s["test"])
+            assert set(o.origin) <= {"upstream_test", "unmeasured_train",
+                                     "unmeasured_val"}

@@ -161,7 +161,16 @@ def load(root, args, prefix="metrics_"):
     if skipped:
         print(f"  ({len(skipped)} file(s) from no recognised split family, ignored)")
     if not frames:
-        raise SystemExit(f"no {prefix}*.csv under {root}")
+        # "nothing here" and "everything here was unreadable" are different problems
+        # with the same symptom, and the second one is a bug in the READER, not a
+        # missing run. Naming the dropped files in the message is what turns a table
+        # full of `--` into a one-line diagnosis.
+        why = f"no {prefix}*.csv under {root}"
+        if skipped:
+            shown = ", ".join(skipped[:3]) + (" ..." if len(skipped) > 3 else "")
+            why += (f" -- {len(skipped)} file(s) were dropped as belonging to no "
+                    f"recognised split family: {shown}")
+        raise SystemExit(why)
     df = pd.concat(frames, ignore_index=True)
     df.loc[:, "variant_tag"] = df["variant_tag"].fillna("").astype(str)
     # A blank variant means "written before the column existed", which is always the

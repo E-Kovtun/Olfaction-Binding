@@ -367,3 +367,23 @@ def test_inventory_runs_on_a_partial_tree(trees):
     assert st["Our graph (cls+mol)"] == "READY"
     assert st["LORAX"] == "MISSING" and st["Hladis"] == "READY"
     assert (df[df.table == "architecture"].status == "MISSING").all()
+
+
+def test_a_sweep_whose_files_cannot_be_parsed_says_so_on_the_row(tmp_path):
+    """The failure that cost a whole debugging round. Every metrics file under the root
+    was dropped because its name would not parse, `alpha_grid.load` gave up, tablekit
+    turned that into an empty frame, and the table printed `--` for every graph row
+    while volunteering no reason anywhere. The reader's own message must reach the row.
+    """
+    tk.clear_cache()
+    root = tmp_path / "v99"
+    root.mkdir()
+    (root / "metrics_zz_nosuchfamily_chemberta_nodedial.csv").write_text(
+        "arm,alpha,fold,seed,R2\n", encoding="utf-8")
+    r = tk.ours_row("cc", "transductive", "chemberta", ["R2"], root=str(root))
+    assert not r.present
+    why = " ".join(r.flags)
+    assert "dropped" in why and "nosuchfamily" in why, why
+    b = tk.boost_row("cc", "transductive", "chemberta", ["R2"], root=str(root))
+    assert "dropped" in " ".join(b.flags)
+    tk.clear_cache()

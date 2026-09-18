@@ -25,11 +25,23 @@ density. `--dry-run` prints the whole diagnostic without writing a file.
     python scripts/preprocessing/04_build_shrunk_ofm.py --dataset cc --dry-run
     python scripts/preprocessing/04_build_shrunk_ofm.py --dataset cc hc --density 0.25
 
+WHAT THE MASK DOES AND DOES NOT TOUCH. It decides what may be TRAINED on. Scoring uses
+everything else: the pool written here is the parent's, complete, and each fold's test
+split is whatever train and val did not take. A masked-out cell's response was hidden
+from the model, never from us, so it is legitimate to score on -- and it is the
+difference between a ~70-row test and a ~5200-row one.
+
 Writes, per dataset:
-    data/external/ofm/<DIR>/raw/<ds>_z.csv          the surviving rows, columns untouched
-    data/external/ofm/<DIR>/rand_splits/...         upstream's folds, filtered
+    data/external/ofm/<DIR>/raw/<ds>_z.csv           the parent pool, COMPLETE
+    data/external/ofm/<DIR>/raw/<ds>_measured.csv    the cells training may see
+    data/external/ofm/<DIR>/{rand,our_inductive}_splits/...
+                                                     train/val masked, test = the rest,
+                                                     plus test_origin.csv saying which
+                                                     kind each test cell is
     data/processed/molecules/molecule_smiles_<ds>.csv
-Then build the cold-molecule family with 03_build_ofm_our_inductive_splits.py --dataset <ds>.
+Both split families are built here, from the parent's own fold files, so the held-out
+odorants match the parent fold for fold. 03_build_ofm_our_inductive_splits.py is NOT
+run for these -- it would split the pool without regard to the mask.
 """
 from __future__ import annotations
 
@@ -213,13 +225,36 @@ def build(ds, args, prof):
                 min_row=args.min_per_receptor, min_col=args.min_per_molecule)
     report(f"{ds} [{args.mask}, seed {args.seed}]", keep, prof)
 
-    sel = keep[pool["Protein sequence"].map(ri).to_numpy(),
-               pool["SMILES"].map(mi).to_numpy()]
-    shrunk = pool[sel]
-    surviving = set(shrunk["SMILES"])
-    print(f"    rows {len(pool)} -> {len(shrunk)}; "
-          f"odorants {len(mols)} -> {shrunk['SMILES'].nunique()}; "
-          f"receptors {len(recs)} -> {shrunk['Protein sequence'].nunique()}")
+    measured = keep[pool["Protein sequence"].map(ri).to_numpy(),
+                    pool["SMILES"].map(mi).to_numpy()]
+    key = ["SMILES", "Protein sequence"]
+    pool_idx = pd.MultiIndex.from_frame(pool[key])
+    print(f"    pool {len(pool)} rows; measured {int(measured.sum())}")
+
+    # THE MASK CONSTRAINS TRAINING, NOT SCORING. train and val keep only measured cells
+    # -- a sparse assay is all the model would have had -- and test is everything else,
+    # labels included. Those labels were never hidden from us, only from the model, so
+    # scoring on them is honest; it is also what turns a ~70-row test into a ~5200-row
+    # one, and the fly panel's transductive error bar of +/-0.657 was the cost of not
+    # doing it. The three parts still partition the pool exactly, so `ofm_indices`
+    # needs no special case.
+    plans = {}
+    for family in spec["families"]:
+        for f in FOLDS:
+            src = (OFM_DIR / DATASETS[base]["dir"] / f"{family}_splits"
+                   / f"{family}_split_{f}")
+            up = {s: pool_idx.isin(set(map(tuple,
+                                           pd.read_csv(src / f"{s}_df.csv")[key].to_numpy())))
+                  for s in ("train", "val", "test")}
+            tr = up["train"] & measured
+            va = up["val"] & measured
+            plans[(family, f)] = (tr, va, ~(tr | va), up)
+
+    for family in spec["families"]:
+        tr, va, te, _ = plans[(family, 1)]
+        cold = int((~pool.loc[te, "SMILES"].isin(set(pool.loc[tr, "SMILES"]))).sum())
+        print(f"    {family:14} fold 1: train={int(tr.sum()):5} val={int(va.sum()):4} "
+              f"test={int(te.sum()):5}  (cold-molecule test cells {cold})")
     if args.dry_run:
         print("    (dry run -- nothing written)")
         return
@@ -228,32 +263,48 @@ def build(ds, args, prof):
     if raw.exists() and not args.overwrite:
         raise SystemExit(f"{raw} exists -- pass --overwrite")
     raw.parent.mkdir(parents=True, exist_ok=True)
-    shrunk.to_csv(raw, index=False)
-    print(f"    wrote {raw.relative_to(_root)}")
+    # The pool is the parent's, COMPLETE. The mask lives in the split files, not here:
+    # every cell keeps its response, which is what makes the held-out ones scoreable.
+    pool.to_csv(raw, index=False)
+    pool[measured][key].to_csv(raw.parent / f"{ds}_measured.csv", index=False)
+    print(f"    wrote {raw.relative_to(_root)} + {ds}_measured.csv")
 
-    # Upstream's own i.i.d. folds, restricted to the surviving rows. Filtering rather
-    # than redrawing keeps `rand` meaning exactly what it means on the parent panel, and
-    # the three parts still partition the shrunk pool, which is what ofm_indices checks.
-    key = ["SMILES", "Protein sequence"]
-    kept_keys = set(map(tuple, shrunk[key].to_numpy()))
-    for f in FOLDS:
-        src = OFM_DIR / DATASETS[base]["dir"] / "rand_splits" / f"rand_split_{f}"
-        dst = OFM_DIR / spec["dir"] / "rand_splits" / f"rand_split_{f}"
+    for (family, f), (tr, va, te, up) in sorted(plans.items()):
+        dst = OFM_DIR / spec["dir"] / f"{family}_splits" / f"{family}_split_{f}"
         dst.mkdir(parents=True, exist_ok=True)
-        sizes = {}
-        for split in ("train", "val", "test"):
-            df = pd.read_csv(src / f"{split}_df.csv")
-            m = [tuple(t) in kept_keys for t in df[key].to_numpy()]
-            df[m].to_csv(dst / f"{split}_df.csv", index=False)
-            sizes[split] = int(np.sum(m))
-        print(f"    rand_split_{f}: " + " ".join(f"{k}={v}" for k, v in sizes.items()))
+        for split, m in (("train", tr), ("val", va), ("test", te)):
+            pool[m].to_csv(dst / f"{split}_df.csv", index=False)
+        # What KIND of cell each test row is. Without this the big test can never be cut
+        # back to the parent panel's own test rows, and the cold-molecule column would
+        # quietly be mostly warm -- on our_inductive only about a fifth of the test
+        # cells belong to an odorant the SPLIT held out.
+        #
+        # TWO DIFFERENT NOTIONS, do not conflate them:
+        #   origin == "upstream_test"  the parent's own test block. Scoring on exactly
+        #                              these rows is what makes shrunk-vs-parent a
+        #                              paired comparison.
+        #   cold_molecule / _receptor  no row in the MASKED train split -- either the
+        #                              split held it out, or the mask deleted its every
+        #                              measurement. The model cannot tell those apart,
+        #                              so this is the wider set (on Carey 1933 cells
+        #                              against the split's 1100) and it is the honest
+        #                              "the model never saw this entity" flag.
+        train_mols = set(pool.loc[tr, "SMILES"])
+        train_recs = set(pool.loc[tr, "Protein sequence"])
+        origin = np.where(up["test"], "upstream_test",
+                          np.where(up["train"], "unmeasured_train", "unmeasured_val"))
+        pool[te][key].assign(
+            origin=origin[te],
+            cold_molecule=~pool.loc[te, "SMILES"].isin(train_mols).to_numpy(),
+            cold_receptor=~pool.loc[te, "Protein sequence"].isin(train_recs).to_numpy(),
+        ).to_csv(dst / "test_origin.csv", index=False)
+    print(f"    wrote {len(plans)} split folders under "
+          f"{(OFM_DIR / spec['dir']).relative_to(_root)}")
 
     bridge = pd.read_csv(MOL_DIR / DATASETS[base]["molecules"])
     out = MOL_DIR / spec["molecules"]
-    bridge[bridge["smiles"].isin(surviving)].to_csv(out, index=False)
-    print(f"    wrote {out.relative_to(_root)}")
-    print(f"    NEXT: python scripts/preprocessing/03_build_ofm_our_inductive_splits.py "
-          f"--dataset {ds}")
+    bridge.to_csv(out, index=False)
+    print(f"    wrote {out.relative_to(_root)} ({len(bridge)} odorants, unchanged)")
 
 
 def main(argv=None):

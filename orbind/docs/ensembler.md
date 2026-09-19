@@ -226,5 +226,13 @@ thrown from an XGBoost destructor calls `std::terminate` (SIGABRT — no Python
 `except` sees it). `run_ensemble` therefore runs every extractor first, calls
 `_release_gpu()` (gc + `torch.cuda.empty_cache()`), and only then fits the boosting
 heads. A repeat that dies that way used to leave the parent blocked forever on
-`q.get()`; `_await_repeat` now polls the child and raises `repeat N died (exit
-code -6)` naming its log.
+`q.get()`; the parent now polls every child, reports `repeat N died (exit code -6)`
+naming its log, lets the other repeats finish and write their rows, and exits
+non-zero at the end. Rerunning the same command redoes only what is missing in
+substance: trained models reload from `checkpoints/`.
+
+**Repeats run as a queue, not in chunks.** `--max-parallel N` keeps N worker slots,
+each bound to one GPU, and refills a slot the moment its repeat finishes
+(`_run_repeat_pool`). The earlier scheme started N repeats and waited for all of
+them before starting the next N, so a checkpoint-loaded repeat (minutes) paired with
+one training from scratch (hours) left a card idle for the difference.

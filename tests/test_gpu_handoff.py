@@ -115,51 +115,102 @@ def test_release_gpu_is_a_noop_without_cuda():
     ens._release_gpu()
 
 
-# ------------------------------------------------------------------ the dead worker
+# ------------------------------------------------- the repeat pool and dead workers
 
 teb = _module("scripts/modeling/train/train_ensemble_boost.py", "_train_ensemble_boost_gpu")
 
 
-class _Proc:
-    def __init__(self, alive, exitcode=None):
-        self._alive, self.exitcode = alive, exitcode
+class _Worker:
+    """One fake repeat, playing both the process and its queue.
+
+    It answers after `ticks` polls. `dies` exits without answering (SIGABRT in a CUDA
+    teardown); `late` reports itself dead BEFORE its result is readable -- the
+    feeder-thread race -- and only a grace read then finds the result."""
+
+    def __init__(self, repeat, ticks, dies=False, late=False):
+        self.repeat, self.ticks, self.dies, self.late = repeat, ticks, dies, late
+        self.taken, self.exitcode = False, None
 
     def is_alive(self):
-        return self._alive
+        if self.dies or self.late:
+            return self.ticks > 0
+        return not self.taken
 
+    def join(self):
+        self.exitcode = -6 if self.dies else 0
 
-class _Queue:
-    """Empty for the first `empties` reads, then hands over `item`."""
-
-    def __init__(self, item=None, empties=0):
-        self.item, self.left, self.reads = item, empties, 0
+    def get_nowait(self):
+        self.ticks -= 1
+        if self.dies or self.late or self.ticks > 0:
+            raise queue.Empty
+        self.taken = True
+        return self.repeat, {"repeat": self.repeat}
 
     def get(self, timeout=None):
-        self.reads += 1
-        if self.left > 0:
-            self.left -= 1
+        if self.dies:
             raise queue.Empty
-        if self.item is None:
-            raise queue.Empty
-        return self.item
+        self.taken = True
+        return self.repeat, {"repeat": self.repeat}
 
 
-def test_a_worker_killed_in_a_cuda_teardown_raises_instead_of_hanging():
-    q = _Queue(item=None)
-    with pytest.raises(RuntimeError, match=r"repeat 3 died \(exit code -6\)"):
-        teb._await_repeat(3, _Proc(alive=False, exitcode=-6), q, poll=0.01, grace=0.01)
+def _pool(ticks, n_slots=2, gpus=(0, 1), dies=(), late=()):
+    """Run the real scheduler over fake workers; return what it did."""
+    events, collected, running = [], [], {}
+
+    def launch(repeat, gpu):
+        w = _Worker(repeat, ticks[repeat], dies=repeat in dies, late=repeat in late)
+        running[repeat] = gpu
+        events.append(("start", repeat, gpu, dict(running)))
+        return w, w
+
+    def collect(repeat, result):
+        running.pop(repeat)
+        collected.append(repeat)
+
+    failed = teb._run_repeat_pool(list(ticks), n_slots, list(gpus), launch, collect,
+                                  poll=0, grace=0, log=lambda *a, **k: None)
+    for r, _ in failed:
+        running.pop(r, None)
+    return events, collected, failed
+
+
+def test_a_freed_slot_is_refilled_before_the_slow_repeat_finishes():
+    """The whole point: repeat 1 trains for hours, repeat 2 loads a checkpoint. Under
+    the chunked loop repeat 3 waited for repeat 1; here it takes repeat 2's card."""
+    events, collected, failed = _pool({1: 50, 2: 2, 3: 2})
+    assert failed == []
+    assert collected == [2, 3, 1]
+    starts = [(r, g) for _, r, g, _ in events]
+    assert starts == [(1, 0), (2, 1), (3, 1)], "the refill lands on the card just freed"
+    assert 1 in events[-1][3], "repeat 3 started while repeat 1 was still running"
+
+
+def test_never_more_workers_than_slots_and_never_two_on_one_card():
+    events, collected, failed = _pool({1: 9, 2: 3, 3: 7, 4: 1, 5: 4, 6: 2, 7: 5})
+    assert sorted(collected) == [1, 2, 3, 4, 5, 6, 7] and failed == []
+    for _, _, _, running in events:
+        assert len(running) <= 2
+        assert len(set(running.values())) == len(running), f"two workers on one GPU: {running}"
+
+
+def test_a_dead_worker_is_reported_and_the_others_are_still_written():
+    """A CUDA teardown abort in one repeat used to raise at once and throw away the
+    hours of training still running next to it."""
+    events, collected, failed = _pool({1: 6, 2: 2, 3: 3}, dies={2})
+    assert failed == [(2, -6)]
+    assert sorted(collected) == [1, 3]
 
 
 def test_a_result_flushed_as_the_worker_exits_is_still_collected():
     """`put` then exit is a race, not a crash: the feeder thread may still be
     flushing when is_alive() first says False. Believing that would throw away a
     finished repeat."""
-    q = _Queue(item=(4, {"combos": {}}), empties=1)
-    assert teb._await_repeat(4, _Proc(alive=False, exitcode=0), q,
-                             poll=0.01, grace=0.01) == (4, {"combos": {}})
+    events, collected, failed = _pool({1: 2, 2: 3}, late={1})
+    assert failed == [] and sorted(collected) == [1, 2]
 
 
-def test_a_slow_but_living_worker_is_waited_on():
-    q = _Queue(item=(2, "ok"), empties=3)
-    assert teb._await_repeat(2, _Proc(alive=True), q, poll=0.001, grace=0.001) == (2, "ok")
-    assert q.reads == 4, "it kept polling rather than declaring the worker dead"
+def test_without_gpus_the_slots_still_bound_concurrency():
+    events, collected, failed = _pool({1: 3, 2: 1, 3: 2}, n_slots=2, gpus=())
+    assert sorted(collected) == [1, 2, 3]
+    assert all(g is None for _, _, g, _ in events)
+    assert max(len(r) for *_, r in events) <= 2

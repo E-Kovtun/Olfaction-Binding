@@ -155,6 +155,7 @@ import pathlib
 import queue
 import shutil
 import sys
+import time
 from datetime import datetime
 
 import pandas as pd
@@ -529,34 +530,69 @@ def _run_one_repeat_to_queue(q, *call_args):
     q.put(_run_one_repeat(*call_args))
 
 
-def _await_repeat(repeat, p, q, poll=30.0, grace=10.0):
-    """`q.get()` that notices a worker which died without answering.
+def _run_repeat_pool(repeats, n_slots, gpu_ids, launch, collect, poll=5.0, grace=10.0,
+                     log=print):
+    """Run `repeats` through `n_slots` worker slots, refilling a slot the moment its
+    worker finishes. Returns [(repeat, exitcode)] for workers that died unanswered.
 
-    A bare `q.get()` blocks forever on a dead child, and a CUDA teardown can kill one
-    outright: a C++ exception escaping a destructor calls std::terminate, so the
-    worker takes SIGABRT with no Python traceback and no queue entry. That turned a
-    crashed repeat into a parent that looked busy while metrics.csv silently stayed
-    short -- and a short metrics.csv reads downstream as a legitimate run with fewer
-    folds. Fail loudly instead.
+    It replaced fixed chunks of `n_slots` that each waited for their slowest member:
+    a repeat whose model loads from a checkpoint is done in minutes, one that trains
+    from scratch takes hours, and every chunk mixing the two left a GPU idle for the
+    difference -- as did the last chunk of an odd count. The server showed one busy
+    card out of two for most of a ProSmith run.
 
-    A worker can exit between `put` and our `is_alive()` check while its feeder
-    thread is still flushing, so death is only believed after one more `grace`-long
-    read comes up empty."""
-    while True:
-        try:
-            return q.get(timeout=poll)
-        except queue.Empty:
-            if p.is_alive():
-                continue
+    Slot k is bound to `gpu_ids[k % len(gpu_ids)]` for its whole life, so a refill lands
+    on the card that was just freed and no card ever holds more workers than it did
+    under the chunked scheme. `launch(repeat, gpu) -> (process, queue)` starts one
+    worker; `collect(repeat, result)` records it.
+
+    A worker that dies without answering (a CUDA teardown abort takes SIGABRT and
+    leaves nothing on the queue) is recorded and its slot reused; the OTHER repeats
+    carry on and are written. Raising at the first death, as the chunked loop did,
+    threw away hours of training still running beside it. The caller decides what a
+    death means -- here, a non-zero exit after every survivor is on disk.
+
+    The queue is always drained BEFORE the process is joined: a worker cannot exit
+    while its result is still in the pipe, so join-then-read can deadlock on a large
+    result. A dead worker's result is only given up on after one more `grace`-long
+    read, because it may exit between `put` and the liveness check."""
+    pending = list(repeats)
+    running = {}                           # slot -> (repeat, process, queue)
+    failed = []
+    while pending or running:
+        for slot in range(n_slots):
+            if slot not in running and pending:
+                repeat = pending.pop(0)
+                gpu = gpu_ids[slot % len(gpu_ids)] if gpu_ids else None
+                p, q = launch(repeat, gpu)
+                running[slot] = (repeat, p, q)
+        progressed = False
+        for slot, (repeat, p, q) in list(running.items()):
             try:
-                return q.get(timeout=grace)
+                got = q.get_nowait()
             except queue.Empty:
-                raise RuntimeError(
-                    f"repeat {repeat} died (exit code {p.exitcode}) without returning "
-                    f"metrics -- see logs/repeat_{repeat}.log for how far it got. An "
-                    f"abort inside a CUDA teardown looks exactly like this and cannot "
-                    f"be caught in the worker."
-                ) from None
+                if p.is_alive():
+                    continue
+                try:
+                    got = q.get(timeout=grace)
+                except queue.Empty:
+                    p.join()
+                    del running[slot]
+                    failed.append((repeat, p.exitcode))
+                    log(f"!!! repeat {repeat} died (exit code {p.exitcode}) without returning "
+                        f"metrics -- see logs/repeat_{repeat}.log. The other repeats continue; "
+                        f"an abort inside a CUDA teardown looks exactly like this.", flush=True)
+                    progressed = True
+                    continue
+            p.join()
+            del running[slot]
+            r_repeat, result = got
+            log(f"--- repeat {r_repeat} done (see logs/repeat_{r_repeat}.log) ---", flush=True)
+            collect(r_repeat, result)
+            progressed = True
+        if not progressed:
+            time.sleep(poll)
+    return failed
 
 
 def main() -> None:
@@ -784,30 +820,31 @@ def _run(args, run_dir) -> None:
             print(f"\nrunning {len(repeats)} repeats, up to {args.max_parallel} concurrently "
                   f"(separate processes; each writes logs/repeat_{{R}}.log)...", flush=True)
 
-        for start in range(0, len(repeats), args.max_parallel):
-            chunk = list(enumerate(repeats))[start:start + args.max_parallel]
-            procs = []
-            for i, repeat in chunk:
-                gpu = gpu_ids[i % len(gpu_ids)] if gpu_ids else None
-                if gpu is not None:
-                    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu)
-                q = ctx.Queue()
-                p = ctx.Process(target=_run_one_repeat_to_queue, args=(q, args.regime, pairs, extractors,
-                                                                        args.combos, args.split, repeat,
-                                                                        args.test_size, args.val_size,
-                                                                        args.weight_method, args.on_missing,
-                                                                        args.full_full_mode, run_dir,
-                                                                        save_checkpoints, args.tune_boost,
-                                                                        args.n_trials, optuna_storage,
-                                                                        args.task, args.dataset,
-                                                                        args.split_family))
-                p.start()
-                procs.append((repeat, p, q))
-            for repeat, p, q in procs:
-                r_repeat, result = _await_repeat(repeat, p, q)
-                p.join()
-                print(f"--- repeat {r_repeat} done (see logs/repeat_{r_repeat}.log) ---", flush=True)
-                collect(r_repeat, result)
+        def launch(repeat, gpu):
+            if gpu is not None:
+                os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu)
+            q = ctx.Queue()
+            p = ctx.Process(target=_run_one_repeat_to_queue, args=(q, args.regime, pairs, extractors,
+                                                                    args.combos, args.split, repeat,
+                                                                    args.test_size, args.val_size,
+                                                                    args.weight_method, args.on_missing,
+                                                                    args.full_full_mode, run_dir,
+                                                                    save_checkpoints, args.tune_boost,
+                                                                    args.n_trials, optuna_storage,
+                                                                    args.task, args.dataset,
+                                                                    args.split_family))
+            p.start()
+            print(f"  started repeat {repeat}" + (f" on GPU {gpu}" if gpu is not None else ""),
+                  flush=True)
+            return p, q
+
+        failed = _run_repeat_pool(repeats, args.max_parallel, gpu_ids, launch, collect)
+        if failed:
+            raise SystemExit(
+                f"{len(failed)} of {len(repeats)} repeats died without returning metrics: "
+                + ", ".join(f"repeat {r} (exit {c})" for r, c in failed)
+                + f". The others are in {metrics_path}; rerun the same command to redo the "
+                  f"missing ones -- trained models load from checkpoints/.")
 
     df = pd.DataFrame(all_rows)
     print(f"\nfinal -> {metrics_path} ({len(df)} rows)")

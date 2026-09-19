@@ -220,8 +220,15 @@ def make_splits(dataset, pairs, y_all, regime, folds):
     `inductive_molecule_v5` seeds 42-46 (folds 1-5 -> seed 41+fold); cc/hc =
     upstream `our_inductive`. transductive = `rand` folds. cold_receptor
     (optional) holds whole receptors out: m2or = group_receptor seeds; cc =
-    upstream `cdhit`; HC ships neither, so it has no cold_receptor cell. Insect
-    train = upstream train+val (no tuning here, so val is just more rows).
+    upstream `cdhit`; HC ships neither, so it has no cold_receptor cell.
+
+    TRAIN ONLY, on every dataset -- val is never fitted on. This script used to
+    fold the insects' val into train ("no tuning here, so val is just more rows"),
+    which gave its boost 11-26% more rows than every other method in the paper --
+    and on `our_inductive` 18 odorants the others never saw -- so its ESM-1b row
+    read 0.537 where the main tables' identical boost read 0.486. The rule the
+    rest of the paper follows is: parameters are fitted on train only; val exists
+    for decisions (a baseline's best epoch, the alpha, a threshold).
     """
     splits = {}
     if dataset == "m2or":
@@ -249,7 +256,7 @@ def make_splits(dataset, pairs, y_all, regime, folds):
                          f"(has {available_families(dataset)})")
     for f in folds:
         tr, va, te = ofm_indices(dataset, family, f)
-        splits[f] = (np.concatenate([tr, va]), te)
+        splits[f] = (tr, te)
     return splits
 
 
@@ -259,6 +266,13 @@ def main():
     ap.add_argument("--regime", default="transductive",
                     choices=["transductive", "inductive", "cold_receptor"])
     ap.add_argument("--folds", type=int, nargs="+", default=[1, 2, 3, 4, 5])
+    # The boost's own seed (subsample/colsample draws), NOT the split: the main
+    # tables' boost row is the alpha sweep's `boost_full`, fitted at seeds 42-46 and
+    # averaged within each split, so the same seeds here are what make the two rows
+    # the same number. The old default was the fold number, which moves R2 by up to
+    # 0.045 on a single insect fold.
+    ap.add_argument("--seeds", type=int, nargs="+", default=[42, 43, 44, 45, 46],
+                    help="boost seeds, averaged within each fold (default 42-46)")
     ap.add_argument("--mol", default=None, help="override molecule npz")
     ap.add_argument("--extra-prot", action="append", default=[], metavar="name=path",
                     help="add a protein npz (keyed by sequence); repeatable")
@@ -334,33 +348,46 @@ def main():
             tr, te = splits[f]
 
             def build(idx):
+                # [protein || molecule], the alpha sweep's own column order: with
+                # colsample_bytree the seed picks columns BY POSITION, so the same seed
+                # on the other order is a different forest
                 parts = []
-                if use_mol: parts.append(Xmol[row_m[idx]])
                 if pm is not None: parts.append(protmats[pm][row_r[idx]])
+                if use_mol: parts.append(Xmol[row_m[idx]])
                 return np.concatenate(parts, axis=1).astype(np.float32)
 
-            model = fit_boost(build(tr), y_all[tr], seed=f, task=task)
-            p = predict_scores(model, build(te), task=task)
-            m = metric_fn(y_all[te], p)
-            rows.append({"prot": name, "fold": f, "pdim": pdim,
-                         "dim": build(tr[:1]).shape[1], **m})
-            print(f"{name:12} fold{f} pdim={pdim:5} " +
-                  "  ".join(f"{k}={m[k]:.3f}" for k in list(m)[:2]), flush=True)
+            Xtr, Xte = build(tr), build(te)
+            for seed in args.seeds:
+                model = fit_boost(Xtr, y_all[tr], seed=seed, task=task)
+                p = predict_scores(model, Xte, task=task)
+                m = metric_fn(y_all[te], p)
+                rows.append({"prot": name, "fold": f, "seed": seed, "pdim": pdim,
+                             "dim": Xtr.shape[1], "n_train": len(tr), **m})
+                print(f"{name:12} fold{f} seed{seed} pdim={pdim:5} " +
+                      "  ".join(f"{k}={m[k]:.3f}" for k in list(m)[:2]), flush=True)
             pd.DataFrame(rows).to_csv(out, index=False)
 
-    df = pd.DataFrame(rows); g = df.groupby("prot")
-    metric_cols = [c for c in df.columns if c not in ("prot", "fold", "pdim", "dim")]
-    print("\n" + "=" * 84)
+    df = pd.DataFrame(rows)
+    metric_cols = [c for c in df.columns
+                   if c not in ("prot", "fold", "seed", "pdim", "dim", "n_train")]
+    # the split is the unit: seeds are averaged inside a fold first, as the main tables do
+    per_fold = df.groupby(["prot", "fold"], as_index=False)[metric_cols + ["pdim"]].mean()
+    g = per_fold.groupby("prot")
+    print("\n" + "=" * 96)
     print(f"{args.dataset.upper()} / {args.regime.upper()} -- protein floor "
-          f"(mol=ChemBERTa), {len(args.folds)}-fold mean, sorted by {primary}  "
-          f"[pdim = protein-side dim]")
-    print("=" * 84)
+          f"(mol=ChemBERTa), train only, seeds {args.seeds} averaged per fold, "
+          f"{len(args.folds)} folds, sorted by {primary}")
+    print("mean ± std over folds (the main tables' convention)   [ci95 = 1.96*std/sqrt(n)]")
+    print("=" * 96)
     for name in g[primary].mean().sort_values(ascending=False).index:
         s = g.get_group(name)
         def mc(c):
-            x = s[c].to_numpy(); return f"{x.mean():.3f}±{1.96 * x.std(ddof=1) / len(x) ** 0.5:.3f}"
+            x = s[c].to_numpy()
+            return f"{x.mean():.3f}±{x.std(ddof=1):.3f}"
+        x = s[primary].to_numpy()
         cells = "  ".join(f"{c} {mc(c)}" for c in metric_cols[:4])
-        print(f"{name:12} pdim={int(s['pdim'].iloc[0]):5}  {cells}")
+        print(f"{name:12} pdim={int(s['pdim'].iloc[0]):5}  {cells}   "
+              f"[ci95 {primary} ±{1.96 * x.std(ddof=1) / len(x) ** 0.5:.3f}]")
     print(f"\nwrote -> {out}")
 
 

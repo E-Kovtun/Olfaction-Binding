@@ -256,7 +256,11 @@ Baseline pools are `{ds}-{rand,ourind}-fulltest`; graph sweeps are
 Separate script, not the ensembler: real pLMs (ESM-1b, ProtT5, ESM3; ESM-2 on M2OR
 only) against a classical amino-acid floor (kmer2, CTD, PseAAC, BLOSUM, AAC,
 AAIndex) plus `onehot`, `onehot_only` and `mol_only` controls. A pLM whose npz is
-absent is skipped with a warning.
+absent is skipped with a warning. The boost is fitted on **train only** at seeds
+42–46 (averaged within each fold) with `[prot ‖ mol]` columns — the alpha sweep's
+`boost_full` exactly, so its ESM-1b row equals the main tables' boosting row. (Until
+2026-09-19 it fitted the insects on train+val with the fold number as seed, which put
+its insect numbers 0.007–0.051 R² above the same boost everywhere else.)
 
 Protein sources and where they come from:
 

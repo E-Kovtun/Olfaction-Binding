@@ -5,23 +5,49 @@ receptor sequence string (the same value `pairs["receptor"]` holds), `emb` =
 float32 [n, d] -- so the file drops straight into the pipeline as
 `prot=esm:<npz>` and into `orbind.dataset.load_npz_dict`.
 
-Two backends, lazy-imported so each runs in its own env:
+Three backends, lazy-imported so each runs in its own env:
   * prott5 -- Rostlab/prot_t5_xl_half_uniref50-enc (HuggingFace T5 encoder,
     1024-d). Env: transformers + sentencepiece + torch.
-  * esmc   -- EvolutionaryScale ESM-C 600M (`esm` SDK, 1152-d). Env: a FRESH
-    venv with `pip install esm` (its package name clashes with fair-esm, so it
-    must NOT share the env that builds ESM-1b/ESM-2).
+  * esmc   -- EvolutionaryScale ESM-C 600M (`esm` SDK, 1152-d).
+  * esm3   -- ESM3 open, `esm3-sm-open-v1` (1.4B, `esm` SDK). The only ESM3 whose
+    weights are public; medium/large are API-only. Sequence track only: no
+    structure or function prompt is given, so this is ESM3 read as a sequence
+    encoder -- the same footing as every other pLM in the table.
+  esmc and esm3 share one env, separate from everything else: the SDK's package
+  is ALSO called `esm` and clashes with fair-esm, so it must never share the env
+  that builds ESM-1b/ESM-2. On the server:
+
+      uv venv .venv-esm --python 3.11
+      uv pip install --python .venv-esm/bin/python torch --index-url https://download.pytorch.org/whl/cu124
+      uv pip install --python .venv-esm/bin/python esm pandas scikit-learn
+
+  The weights download from HuggingFace on first use; if that answers 401,
+  `export HF_TOKEN=<read token>` and rerun.
+
+Outputs, under data/embeddings/proteins/:
+  {tag}_{ds}.npz              mean over residues, `ids`/`emb` as above. This is the
+                              file every mean consumer reads: `prot=esm:<npz>`, the
+                              sweep's --prot-embeddings, hladis, the protein-floor
+                              and geometry tables.
+  {tag}_per_residue_{ds}.npz  with --per-residue (esmc/esm3 only): {sequence:
+                              float32[L, d]}, the shape ESM-1b's per-residue file
+                              has, for the cross-attention baselines (LORAX,
+                              ProSmith, MolOR). The mean file is then DERIVED from
+                              it in the same pass, so the two cannot disagree --
+                              script 05's single-source-of-truth rule.
 
 Sequences come from the repo's own loaders, so coverage spans M2OR + the insect
 datasets with no extra bookkeeping:
   m2or -> orbind.regimes.full_full_pairs   (1237 receptors)
   cc   -> orbind.regimes_ofm.ofm_pairs cc  (50)
   hc   -> orbind.regimes_ofm.ofm_pairs hc  (24)
+The shrunk panels need no files of their own: they read their parent's.
 
     # ProtT5 (in the transformers env):
     python scripts/embedding_generation/proteins/embed_proteins_plm.py --model prott5 --dataset all
-    # ESM-C (in .venv-esmc):
-    python scripts/embedding_generation/proteins/embed_proteins_plm.py --model esmc   --dataset all
+    # ESM-C / ESM3 (in .venv-esm):
+    python scripts/embedding_generation/proteins/embed_proteins_plm.py --model esmc --dataset all
+    python scripts/embedding_generation/proteins/embed_proteins_plm.py --model esm3 --dataset all --per-residue
 """
 import argparse
 import pathlib
@@ -105,26 +131,54 @@ def embed_prott5(seqs, batch=8):
     return np.stack(out).astype(np.float32)
 
 
-# -------------------------------------------------------------------- ESM-C ---
-def embed_esmc(seqs, model_name="esmc_600m"):
+# ------------------------------------------------- EvolutionaryScale SDK ------
+# ESM-C and ESM3 come out of the same `esm` SDK and answer the same call, encode
+# -> logits(return_embeddings=True), so they share one loop. It returns the
+# per-residue matrices; the mean is taken by the caller.
+def _esm_sdk_per_residue(model, seqs, label):
     import torch
-    from esm.models.esmc import ESMC
     from esm.sdk.api import ESMProtein, LogitsConfig
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = ESMC.from_pretrained(model_name).to(device).eval()
     cfg = LogitsConfig(sequence=True, return_embeddings=True)
     out = []
     for i, s in enumerate(seqs):
         tok = model.encode(ESMProtein(sequence=s))
         with torch.no_grad():
             emb = model.logits(tok, cfg).embeddings[0]   # [L+2, d] incl BOS/EOS
-        out.append(emb[1:-1].float().mean(0).cpu().numpy())
-        print(f"  esmc {i + 1}/{len(seqs)}", end="\r", flush=True)
+        # One token per residue plus BOS/EOS is what makes [1:-1] the residues.
+        # If a tokenizer ever merged or dropped a character, the slice would
+        # still "work" and quietly misalign every residue after it.
+        if emb.shape[0] != len(s) + 2:
+            raise RuntimeError(f"{label}: {emb.shape[0]} tokens for a {len(s)}-residue "
+                               f"sequence (expected {len(s) + 2} with BOS/EOS)")
+        out.append(emb[1:-1].float().cpu().numpy())
+        print(f"  {label} {i + 1}/{len(seqs)}", end="\r", flush=True)
     print()
-    return np.stack(out).astype(np.float32)
+    return out
 
 
-BACKENDS = {"prott5": embed_prott5, "esmc": embed_esmc}
+def _device():
+    import torch
+    # Straight onto the GPU at load: this container dies on CPU tensor compute
+    # ("Failed to initialize cpuinfo!", see embed_prott5), and building on the
+    # CPU first and moving afterwards is exactly that.
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def embed_esmc(seqs, model_name="esmc_600m"):
+    from esm.models.esmc import ESMC
+    model = ESMC.from_pretrained(model_name, device=_device()).eval()
+    return _esm_sdk_per_residue(model, seqs, "esmc")
+
+
+def embed_esm3(seqs, model_name="esm3-sm-open-v1"):
+    from esm.models.esm3 import ESM3
+    model = ESM3.from_pretrained(model_name, device=_device()).eval()
+    return _esm_sdk_per_residue(model, seqs, "esm3")
+
+
+BACKENDS = {"prott5": embed_prott5, "esmc": embed_esmc, "esm3": embed_esm3}
+# Backends that hand back per-residue matrices rather than finished means.
+PER_RESIDUE = {"esmc", "esm3"}
 
 
 def main():
@@ -132,7 +186,11 @@ def main():
     ap.add_argument("--model", required=True, choices=sorted(BACKENDS))
     ap.add_argument("--dataset", default="all", help="m2or | cc | hc | all")
     ap.add_argument("--out-tag", default=None, help="npz stem (default = model name)")
+    ap.add_argument("--per-residue", action="store_true",
+                    help="also write {tag}_per_residue_{ds}.npz (esmc/esm3 only)")
     args = ap.parse_args()
+    if args.per_residue and args.model not in PER_RESIDUE:
+        ap.error(f"--per-residue needs one of {sorted(PER_RESIDUE)}, not {args.model}")
 
     datasets = ["m2or", "cc", "hc"] if args.dataset == "all" else [args.dataset]
     tag = args.out_tag or args.model
@@ -143,7 +201,18 @@ def main():
     for ds in datasets:
         seqs = sequences_for(ds)
         print(f"[{args.model}] {ds}: {len(seqs)} unique receptor sequences", flush=True)
-        emb = embed(seqs)
+        res = embed(seqs)
+        if args.model in PER_RESIDUE:
+            if args.per_residue:
+                out = outdir / f"{tag}_per_residue_{ds}.npz"
+                # keyed by sequence, one ragged matrix each -- ESM-1b's per-residue
+                # layout, which `load_npz_dict` reads without an `ids` array
+                np.savez_compressed(out, **{s: r.astype(np.float32) for s, r in zip(seqs, res)})
+                print(f"  saved {len(res)} per-residue x {res[0].shape[1]} float32 -> {out}",
+                      flush=True)
+            emb = np.stack([r.mean(0) for r in res]).astype(np.float32)
+        else:
+            emb = res
         out = outdir / f"{tag}_{ds}.npz"
         np.savez_compressed(out, ids=np.array(seqs, dtype=object), emb=emb)
         print(f"  saved {emb.shape[0]} x {emb.shape[1]} float32 -> {out}", flush=True)

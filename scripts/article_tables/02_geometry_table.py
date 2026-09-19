@@ -38,7 +38,7 @@ import tablekit as tk  # noqa: E402
 
 GEOMS = ["rsa", "cca", "procrustes"]
 GEOM_LABEL = {"rsa": "RSA", "cca": "CCA", "procrustes": "Procrustes"}
-EMB_LABEL = {"esm1b": "ESM-1b", "prott5": "ProtT5", "esm2": "ESM-2", "kmer2": "kmer2",
+EMB_LABEL = {"esm1b": "ESM-1b", "prott5": "ProtT5", "esm2": "ESM-2", "esm3": "ESM3", "kmer2": "kmer2",
              "ctd": "CTD", "pseaac": "PseAAC", "blosum": "BLOSUM", "aac": "AAC",
              "aaindex": "AAindex", "onehot": "one-hot"}
 COLS = [f"{g}_fun" for g in GEOMS] + [f"{g}_fun_z" for g in GEOMS]
@@ -125,7 +125,7 @@ def latex(cells, a):
     prev = None
     for key in keys:
         rows_k = [r for d in dss for r in cells[d][0] if r.key == key]
-        kind = "ours" if key.startswith("ours") else ("plm" if key in ("esm1b", "prott5", "esm2")
+        kind = "ours" if key.startswith("ours") else ("plm" if key in ("esm1b", "prott5", "esm2", "esm3")
                                                       else ("id" if key == "onehot" else "desc"))
         if kind != prev:
             out.append(r"\midrule")

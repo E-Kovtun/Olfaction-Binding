@@ -4,7 +4,7 @@ For one dataset x one regime, boosts `[protein_feature || ChemBERTa]` with the
 pipeline's own fit_boost/predict_scores (auto-GPU) and reports the fold-mean
 metric for each protein feature side by side:
 
-  * real pLMs      -- esm1b, esm2, prott5  (loaded from npz, keyed by SEQUENCE;
+  * real pLMs      -- esm1b, esm2, prott5, esm3  (loaded from npz, keyed by SEQUENCE;
                       each is included only if its npz exists AND covers every
                       receptor, so a box that is missing one just skips it)
   * classical floor -- AAC, kmer2, AAindex, CTD, PseAAC, BLOSUM (computed here
@@ -187,17 +187,20 @@ DATASETS = {
              "mol": f"{EMB}/molecules/chemberta_77m_m2or.npz",
              "plms": {"esm1b": f"{EMB}/proteins/esm1b_650m_mean.npz",
                       "esm2":  f"{EMB}/proteins/esm2_650m_mean.npz",
-                      "prott5": f"{EMB}/proteins/prott5_m2or.npz"}},
+                      "prott5": f"{EMB}/proteins/prott5_m2or.npz",
+                      "esm3":  f"{EMB}/proteins/esm3_m2or.npz"}},
     "cc":   {"task": "regression", "primary": "R2",
              "mol": f"{EMB}/molecules/chemberta_77m_cc.npz",
              "plms": {"esm1b": f"{EMB}/proteins/esm1b_650m_mean_cc.npz",
                       "esm2":  f"{EMB}/proteins/esm2_650m_mean_cc.npz",
-                      "prott5": f"{EMB}/proteins/prott5_cc.npz"}},
+                      "prott5": f"{EMB}/proteins/prott5_cc.npz",
+                      "esm3":  f"{EMB}/proteins/esm3_cc.npz"}},
     "hc":   {"task": "regression", "primary": "R2",
              "mol": f"{EMB}/molecules/chemberta_77m_hc.npz",
              "plms": {"esm1b": f"{EMB}/proteins/esm1b_650m_mean_hc.npz",
                       "esm2":  f"{EMB}/proteins/esm2_650m_mean_hc.npz",
-                      "prott5": f"{EMB}/proteins/prott5_hc.npz"}},
+                      "prott5": f"{EMB}/proteins/prott5_hc.npz",
+                      "esm3":  f"{EMB}/proteins/esm3_hc.npz"}},
 }
 
 

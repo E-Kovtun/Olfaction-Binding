@@ -6,8 +6,9 @@ it can be invoked from anywhere; call an environment's interpreter directly
 itself.
 
 Which environment to use is in the root [README](../README.md#environments). Most of
-this runs in the project `.venv`; ProSmith/LORAX need `.venv-controls`, MolOR needs
-`.venv-molor`, and embedding generation needs `.venv-embeddings`.
+this runs in the project `.venv` (Hladiš included — it needs rdkit); ProSmith/LORAX need
+`.venv-controls`, MolOR needs `.venv-molor`, embedding generation needs
+`.venv-embeddings`, and ESM3/ESM-C embeddings need `.venv-esm`.
 
 Self-contained side directions with their own dependencies live in
 [`../legacy/experiments/`](../legacy/experiments/) instead.
@@ -18,7 +19,7 @@ Self-contained side directions with their own dependencies live in
 |-------|--------|--------------|
 | 0. download   | `downloading/`          | fetch the raw M2OR export |
 | 1. preprocess | `preprocessing/`        | pair tables, split indices, our cold-molecule splits, BW numbering |
-| 2. embeddings | `embedding_generation/` | protein (ESM-2 / ESM-1b / other pLMs) and molecule (ChemBERTa / GIN / ECFP) caches |
+| 2. embeddings | `embedding_generation/` | protein (ESM-2 / ESM-1b / ProtT5 / ESM3) and molecule (ChemBERTa / GIN / ECFP) caches |
 | 3. modeling   | `modeling/`             | train, evaluate, analyse |
 | 4. reading    | `analysis/`             | dashboards over `results/ensemble_logs/` |
 
@@ -33,10 +34,15 @@ preprocessing/
                                         OR family for the refinement notebooks
   03_build_ofm_our_inductive_splits.py  our stratified cold-molecule splits for
                                         Carey and Hallem (seedless, deterministic)
+  04_build_shrunk_ofm.py                the shrunk insect panels (cc/hc_shrinked,
+                                        *_shrinked50): M2OR-shaped "measured" mask
+                                        over the complete panel; train/val = split ∩
+                                        measured, test = everything else
 
 embedding_generation/
   proteins/    02_embed_receptors, 05_per_residue_embeddings, 06_import_ofm_esm1b,
-               embed_proteins_plm (other pLMs + the classical amino-acid floor)
+               embed_proteins_plm (ProtT5 / ESM-C / ESM3, mean + optional
+               per-residue)
   molecules/   03_embed_molecules, 07_prepare_ofm_molecules, embed_molecules_gin,
                embed_molecules_ecfp, audit_molecule_npz
 
@@ -94,7 +100,8 @@ analysis/
                                     AND as z, the paired GNN+ESM vs one-hot comparison,
                                     and the sparse-matrix assay-design check
 
-`setup_envs.sh` creates `.venv-controls` and `.venv-embeddings`.
+`setup_envs.sh` creates `.venv-controls` and `.venv-embeddings`. `.venv-molor` and
+`.venv-esm` are set up by hand (see the root README).
 
 ## Archive
 

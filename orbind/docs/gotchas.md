@@ -14,7 +14,15 @@ against the method's own step budget before quoting a wall-clock number.
 
 The server shell is **zsh**, where `$VAR` is *not* word-split. A variable holding
 several flags expands as one argument and argparse fails with an unrelated-looking
-error. Only single-token values go in variables there.
+error. Only single-token values go in variables there. Forcing the split with
+`${=VAR}` is no fix: it also splits a quoted multi-word value such as
+`--combos "1 12 123"`. Two more zsh-only traps: `$VAR:e` (a colon followed by a
+letter) is a history modifier, so brace every variable that touches a colon —
+`${base}:…`; and a glob with no match is an *error*, not a literal, so
+`rm -rf pool-*` aborts an `&&` chain when nothing matches — write `pool-*(N)`.
+
+Hladiš runs in the project `.venv`, not `.venv-controls`: it needs rdkit, and the
+controls env does not install it.
 
 ## Metrics
 
@@ -85,10 +93,38 @@ runs a small fraction of that budget, which is why its own scalar head reaches
 it does not affect the ensemble rows built on its features. Transductively our port
 reaches 0.729 AUPRC against his 0.765, inside his own 0.07–0.08 spread.
 
+**External `cls` sources default to M2OR protein files.** LORAX, ProSmith and MolOR
+read `esm1b_650m_per_residue_full_full.npz`, Hladiš `esm1b_650m_mean.npz`. On the
+insect panels a bare `cls=lorax` therefore covers no receptor: `run_ensemble` drops
+every row as uncovered and the run dies inside the DataLoader with `num_samples=0`,
+far from the cause. The `WARNING coverage[train]: 0/…` line just above it is the
+tell. Always name the insect file in the spec — the full set is in the root README.
+
+**Hladiš's step budget is sized for M2OR.** 10000/6000/500 steps on M2OR's ~41k
+train rows; on Carey's 3.5k that is ~285 epochs. The insect runs use
+`1:2000:1200:100` (n_models:max_steps:warmup:eval_every), same 0.6 warmup ratio, and
+the shrunk panels keep it for comparability even though their train sets differ.
+
 **A method's name is not a configuration.** "LORAX" as a `cls` source and "LORAX
 cls+prot+mol" are different rows, and our graph's headline `cls+mol` deliberately
 excludes raw ESM while every external baseline's best row includes it. Always read
 the combo name alongside the method name.
+
+## Shrunk insect panels
+
+**Two "cold" notions, not one.** `test_origin.csv` flags `origin == "upstream_test"`
+(the parent panel's own test block — the rows to use for a paired shrunk-vs-complete
+comparison) and `cold_molecule` / `cold_receptor` (no row in the *masked* train). The
+second is wider — on Carey 1933 cells against the split's 1100 — because the mask can
+delete every measurement of an entity, which the model cannot tell from a held-out one.
+
+**A dataset tag must survive the filename round trip.** Sweep files are
+`metrics_{ds}_{family}…csv`, and `cc_shrinked` contains the separator: split naively
+it reads as dataset `cc`, family `shrinked_rand`, which is no family, and every file
+was dropped as unparseable — the tables printed `--` on a finished sweep.
+`headline_table.parse_name` now matches the longest known dataset first, and
+`test_sweep_planning` round-trips every tag the writer knows. A new tag needs an entry
+in `CANONICAL_VARIANT`, or it is not "known".
 
 ## Counting parameters
 

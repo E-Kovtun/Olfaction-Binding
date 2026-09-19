@@ -219,3 +219,12 @@ round-robin via `CUDA_VISIBLE_DEVICES`. A pair-level source's `n_models` are alw
 trained concurrently regardless. Two XGBoost processes pinned to the *same* GPU
 will abort in `cuMemUnmap` — give each worker its own device, or use
 `--max-parallel 1`.
+
+The same abort hit torch and XGBoost inside ONE process: torch's caching allocator
+keeps freed blocks reserved, XGBoost's `device="cuda"` then fails, and a CUDA error
+thrown from an XGBoost destructor calls `std::terminate` (SIGABRT — no Python
+`except` sees it). `run_ensemble` therefore runs every extractor first, calls
+`_release_gpu()` (gc + `torch.cuda.empty_cache()`), and only then fits the boosting
+heads. A repeat that dies that way used to leave the parent blocked forever on
+`q.get()`; `_await_repeat` now polls the child and raises `repeat N died (exit
+code -6)` naming its log.

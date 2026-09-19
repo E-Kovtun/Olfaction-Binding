@@ -387,3 +387,41 @@ def test_a_sweep_whose_files_cannot_be_parsed_says_so_on_the_row(tmp_path):
     b = tk.boost_row("cc", "transductive", "chemberta", ["R2"], root=str(root))
     assert "dropped" in " ".join(b.flags)
     tk.clear_cache()
+
+
+def _brute_best_threshold(metric, y, p, grid=200):
+    """The search as it was before it was vectorised: one sklearn call per cut."""
+    p = np.asarray(p, float)
+    qs = np.unique(np.quantile(p, np.linspace(0.005, 0.995, grid)))
+    cands = np.unique(np.concatenate([[0.5], qs]))
+    return float(max(cands, key=lambda t: tk._hard_metric(metric, y, p, t)))
+
+
+@pytest.mark.parametrize("metric", ["MCC", "F1"])
+@pytest.mark.parametrize("case", ["separable", "noisy", "ties", "rare", "all_negative"])
+def test_the_vectorised_threshold_search_picks_the_cut_sklearn_picks(metric, case):
+    rng = np.random.default_rng(len(case) * 7 + len(metric))
+    n = 2000
+    y = (rng.random(n) < (0.02 if case == "rare" else 0.3)).astype(float)
+    if case == "all_negative":
+        y[:] = 0.0
+    p = {"separable": 0.6 * y + 0.4 * rng.random(n),
+         "noisy": np.clip(0.2 * y + rng.normal(0.4, 0.2, n), 0, 1),
+         "ties": np.round(np.clip(0.3 * y + rng.random(n) * 0.7, 0, 1), 1),
+         "rare": np.clip(0.3 * y + rng.normal(0.3, 0.15, n), 0, 1),
+         "all_negative": rng.random(n)}[case]
+    fast = tk._best_threshold(metric, y, p)
+    slow = _brute_best_threshold(metric, y, p)
+    assert np.isclose(tk._hard_metric(metric, y, p, fast), tk._hard_metric(metric, y, p, slow))
+    assert fast == slow
+
+
+@pytest.mark.parametrize("metric", ["MCC", "F1"])
+def test_the_metric_curve_is_sklearn_at_every_cut(metric):
+    rng = np.random.default_rng(3)
+    y = (rng.random(500) < 0.25).astype(float)
+    p = np.round(np.clip(0.3 * y + rng.random(500) * 0.7, 0, 1), 2)
+    cands = np.array([-1.0, 0.0, 0.1, 0.5, 0.73, 1.0, 2.0])
+    got = tk._metric_curve(metric, y, p, cands)
+    want = [tk._hard_metric(metric, y, p, t) for t in cands]
+    assert np.allclose(got, want, atol=1e-12)

@@ -41,22 +41,29 @@ Two rules make the tree readable:
 
 ## Environments
 
-Four, on purpose — the source dispatch in the trainer imports each method's deps
+Five, on purpose — the source dispatch in the trainer imports each method's deps
 lazily, so a ProSmith/LORAX run needs no PyG and the fragile torch↔PyG pin stays
 confined to the graph pipeline.
 
 | env | path | holds |
 |---|---|---|
-| project | `.venv` | graph + ensemble pipeline (torch, torch-geometric, xgboost) |
-| controls | `.venv-controls` | ProSmith / LORAX baselines, PyG-free |
+| project | `.venv` | graph + ensemble pipeline (torch, torch-geometric, xgboost, rdkit) — also Hladiš |
+| controls | `.venv-controls` | ProSmith / LORAX baselines, PyG-free, **no rdkit** |
 | embeddings | `.venv-embeddings` | run-once embedding generation (fair-esm, deepchem, rdkit) |
 | molor | `.venv-molor` | MolOR only (dgl 2.4 + dgllife — install `dgl` **before** `dgllife`) |
+| esm | `.venv-esm` | ESM3 / ESM-C embeddings only (EvolutionaryScale `esm` SDK) |
 
 ```bash
 uv python install 3.11
 uv sync --frozen                 # the project env (.venv)
 bash scripts/setup_envs.sh       # controls + embeddings
 ```
+
+`.venv-esm` is separate because the SDK's package is also named `esm` and clashes
+with fair-esm. Its install lines are in the docstring of
+`scripts/embedding_generation/proteins/embed_proteins_plm.py`; add `httpx` by hand
+(the SDK imports it without declaring it), and expect it to pull its own torch
+(2.14+cu130 on the server — it works on the A100s there).
 
 Scripts add the repo root to `sys.path` themselves, so `orbind` imports without
 being installed — call an env's interpreter directly:
@@ -159,7 +166,8 @@ Pools: `m2or-{transductive,inductive}-chemberta-fixed`.
 ```
 
 Swap `cls=lorax` for `cls=prosmith::::data/external/ofm/saved_model/pretraining_IC50_6gpus_bs144_1.5e-05_layers6.txt.pkl`,
-`cls=hladis`, or (in `.venv-molor`) `cls=molor`. Our graph runs in the project env:
+`cls=hladis` (in the project `.venv` — it needs rdkit, which `.venv-controls` does
+not have), or (in `.venv-molor`) `cls=molor`. Our graph runs in the project env:
 
 ```bash
 .venv/bin/python scripts/modeling/train/train_ensemble_boost.py \
@@ -203,11 +211,66 @@ A `_pm` run-name suffix marks the variant that also adds raw ESM (`cls+prot+mol`
 it is null everywhere on these datasets. Only the `*-molcross-fixed` complexes feed
 the paper tables — the other cc/hc complexes on disk are older exploratory grids.
 
+**The external `cls` baselines must be given the insect protein file explicitly.**
+Bare `cls=lorax` (likewise prosmith, molor, hladis) loads its M2OR default, which
+holds none of the insect receptors: coverage drops every row and the run dies with
+`num_samples=0`. The specs of record, with `{ds}` = `cc` or `hc`:
+
+```
+cls=lorax:data/embeddings/proteins/esm1b_650m_per_residue_{ds}.npz
+cls=prosmith:data/embeddings/proteins/esm1b_650m_per_residue_{ds}.npz:data/embeddings/molecules/chemberta_77m_{ds}.npz::data/external/ofm/saved_model/pretraining_IC50_6gpus_bs144_1.5e-05_layers6.txt.pkl
+cls=molor:data/embeddings/proteins/esm1b_650m_per_residue_{ds}.npz:1
+cls=hladis:data/embeddings/proteins/esm1b_650m_mean_{ds}.npz:1:2000:1200:100
+```
+
+with `--combos "1 12 123" --max-parallel 2 --gpus 0 1`. Hladiš's `2000:1200:100` is its
+step budget rescaled to the insect panels (see `orbind/docs/gotchas.md`).
+
+### Shrunk insect panels (`cc_shrinked`, `hc_shrinked`, `*_shrinked50`)
+
+The insect panels with most cells declared *not measured*, so that what is left has
+M2OR's sparsity profile — to separate "M2OR behaves differently because it is sparse"
+from "because it is a different assay". Built by
+`scripts/preprocessing/04_build_shrunk_ofm.py`; registered in
+`orbind/regimes_ofm.DATASETS` with a `base` key naming the parent panel, whose
+embeddings they share (no npz of their own).
+
+| tag | density | mask |
+|---|---|---|
+| `{cc,hc}_shrinked` | 0.063 (M2OR's own) | `marginal`: M2OR's row/column count profile, IPF + Gumbel top-k |
+| `{cc,hc}_shrinked50` | 0.5 | the same profile rescaled; its head saturates against the panel width |
+
+**The mask constrains training, not scoring.** train/val = the parent's split ∩
+measured; test = *everything else*, with its labels. Each fold's `test_origin.csv`
+says which test rows were the parent's own test block (`origin == "upstream_test"`,
+the anchor for a paired comparison with the complete panel) and which entities the
+masked train never saw (`cold_molecule`/`cold_receptor` — a wider set). Read R²
+against the `naive` row, never against 0: the masked train mean and the test mean differ.
+
+Baseline pools are `{ds}-{rand,ourind}-fulltest`; graph sweeps are
+`results/graph/v11_shrunk` (0.063) and `results/graph/v12_shrunk50` (0.5), both
+`--dial nodes --seed-graph`.
+
 ### Tp — protein-source floor
 
-Separate script, not the ensembler: real pLMs (ESM-1b, ProtT5) against a classical
-amino-acid floor (kmer2, CTD, PseAAC, BLOSUM, AAC, AAIndex) plus `onehot`,
-`onehot_only` and `mol_only` controls.
+Separate script, not the ensembler: real pLMs (ESM-1b, ProtT5, ESM3; ESM-2 on M2OR
+only) against a classical amino-acid floor (kmer2, CTD, PseAAC, BLOSUM, AAC,
+AAIndex) plus `onehot`, `onehot_only` and `mol_only` controls. A pLM whose npz is
+absent is skipped with a warning.
+
+Protein sources and where they come from:
+
+| source | files | how |
+|---|---|---|
+| ESM-1b | `esm1b_650m_mean*.npz`, `esm1b_650m_per_residue_*.npz` | **imported**, not computed: M2OR mean from LoRaX, per-residue from the OFM zenodo release (`06_import_ofm_esm1b.py`) |
+| ESM-2 | `esm2_650m_*` | `05_per_residue_embeddings.py` |
+| ProtT5 | `prott5_{ds}.npz` | `embed_proteins_plm.py --model prott5` |
+| ESM3 | `esm3_{ds}.npz`, `esm3_per_residue_{ds}.npz` | `embed_proteins_plm.py --model esm3 --dataset all --per-residue` in `.venv-esm` |
+
+ESM3 is `esm3-sm-open-v1` (1.4B, the only open-weight ESM3; MIT licence), fed the
+sequence track alone. Any of these drops in by file name: `prot=esm:<npz>:<label>`
+(the third field is provenance only), `--prot-embeddings …/esm3_{ds}.npz` for the
+sweep, the per-residue file for LORAX/ProSmith/MolOR's `cls=` spec.
 
 ```bash
 .venv/bin/python scripts/modeling/analysis/prot_floor_sweep.py --help

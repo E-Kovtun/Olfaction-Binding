@@ -385,17 +385,48 @@ def _hard_metric(metric, y, p, t):
     return float(f1_score(yb, hard, zero_division=0))
 
 
+def _metric_curve(metric, y, p, cands):
+    """`_hard_metric` at every cut in `cands` at once.
+
+    One sort, then the confusion counts at each cut by `searchsorted` -- the same
+    numbers sklearn would build per call, without its per-call input validation. That
+    validation is what made the per-cut loop cost minutes on M2OR: ~200 cuts x 25
+    (fold, seed) cells x every row x both metrics is tens of thousands of calls.
+    Degenerate cuts score 0, as sklearn scores them (MCC with a zero denominator,
+    F1 with `zero_division=0`)."""
+    yb = np.asarray(y) > 0.5
+    p = np.asarray(p, float)
+    order = np.argsort(p, kind="stable")
+    ps, pos_sorted = p[order], yb[order].astype(float)
+    cum_pos = np.concatenate([[0.0], np.cumsum(pos_sorted)])
+    n, n_pos = float(len(p)), float(yb.sum())
+    idx = np.searchsorted(ps, np.asarray(cands, float), side="left")   # first p >= t
+    tp = n_pos - cum_pos[idx]
+    fp = (n - idx) - tp
+    fn = n_pos - tp
+    tn = (n - n_pos) - fp
+    with np.errstate(invalid="ignore", divide="ignore"):
+        if metric == "MCC":
+            den = np.sqrt((tp + fp) * (tp + fn) * (tn + fp) * (tn + fn))
+            out = (tp * tn - fp * fn) / den
+        else:
+            den = 2 * tp + fp + fn
+            out = 2 * tp / den
+    return np.where(den > 0, out, 0.0)
+
+
 def _best_threshold(metric, y, p, grid=200):
     """The cut that maximises `metric` on the VALIDATION rows.
 
     Searched over quantiles of the scores rather than every midpoint: the winner is
-    indistinguishable and the cost stops depending on how many rows the split has."""
+    indistinguishable and the cost stops depending on how many rows the split has.
+    Ties go to the LOWEST cut, as `max` over the ascending candidates always did."""
     p = np.asarray(p, float)
     if p.size == 0:
         return 0.5
     qs = np.unique(np.quantile(p, np.linspace(0.005, 0.995, grid)))
     cands = np.unique(np.concatenate([[0.5], qs]))
-    return float(max(cands, key=lambda t: _hard_metric(metric, y, p, t)))
+    return float(cands[int(np.argmax(_metric_curve(metric, y, p, cands)))])
 
 
 def add_val_threshold_metrics(rows, metrics, task):

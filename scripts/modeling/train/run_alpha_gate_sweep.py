@@ -398,7 +398,9 @@ def _fold_prep(ds, regime, fold, args, data):
     # binding. The `tested mask` control in mechanism_holdout measured that share at
     # 76-103% of the trained graph's own gain on M2OR. So on M2OR read the `fun`
     # geometry columns as an upper bound contaminated by design, and lean on the
-    # prediction columns instead. On the complete insect matrices this does not arise.
+    # prediction columns instead. On the complete insect matrices this does not arise;
+    # on the SHRUNK insect panels (cc/hc_shrinked, *_shrinked50) it does, by
+    # construction -- they carry a measured-cell mask exactly so they would.
     tr_mols = list(pd.unique(ik[tr]))
     mrank = {m: i for i, m in enumerate(tr_mols)}
     R = np.full((len(order), len(tr_mols)), np.nan)

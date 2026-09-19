@@ -168,6 +168,7 @@ from orbind.dataset import (                                       # noqa: E402
     METRICS as METRIC_FNS, METRICS_FULL, load_npz_dict)
 from orbind.gnn_extractor import GnnSignedExtractor                # noqa: E402
 from orbind.regimes import full_full_pairs, load_split           # noqa: E402
+from orbind.regimes_ofm import DATASETS as OFM_DATASETS            # noqa: E402
 from orbind.regimes_ofm import ofm_indices, ofm_pairs              # noqa: E402
 from orbind.gpu_dashboard import (                                 # noqa: E402
     Dashboard, plan_placement, visible_gpus)
@@ -184,14 +185,18 @@ FAMILY = {"cc": {"transductive": "rand", "inductive": "our_inductive"},
           "hc": {"transductive": "rand", "inductive": "our_inductive"},
           "cc_shrinked": {"transductive": "rand", "inductive": "our_inductive"},
           "hc_shrinked": {"transductive": "rand", "inductive": "our_inductive"},
+          "cc_shrinked50": {"transductive": "rand", "inductive": "our_inductive"},
+          "hc_shrinked50": {"transductive": "rand", "inductive": "our_inductive"},
           "m2or": {"transductive": "transductive",
                    "inductive": "inductive_molecule_v5"}}
 # M2OR's repeats are cold-molecule SEEDS, not folds, for the inductive regime.
 REPEATS = {"cc": {}, "hc": {}, "cc_shrinked": {}, "hc_shrinked": {},
+           "cc_shrinked50": {}, "hc_shrinked50": {},
            "m2or": {"transductive": [1, 2, 3, 4, 5],
                     "inductive": [42, 43, 44, 45, 46]}}
 TASK = {"cc": "regression", "hc": "regression", "m2or": "classification",
-        "cc_shrinked": "regression", "hc_shrinked": "regression"}
+        "cc_shrinked": "regression", "hc_shrinked": "regression",
+        "cc_shrinked50": "regression", "hc_shrinked50": "regression"}
 TASK_METRICS = {"regression": ["R2", "RMSE", "MAE", "Pearson", "Spearman"],
                 "classification": ["AUROC", "AUPRC", "MCC", "F1"]}
 # The MP-edge variants. On M2OR coverage is heavy-tailed and q99+greedy picks a hub
@@ -204,7 +209,8 @@ VARIANTS = {"q99greedy": dict(q=0.99, criterion="greedy_pair_cover",
 # differs from the complete run; switching the edge variant at the same time would
 # confound "sparsity did it" with "hub selection did it".
 DEFAULT_VARIANT = {"cc": "q0cov", "hc": "q0cov", "m2or": "q99greedy",
-                   "cc_shrinked": "q0cov", "hc_shrinked": "q0cov"}
+                   "cc_shrinked": "q0cov", "hc_shrinked": "q0cov",
+                   "cc_shrinked50": "q0cov", "hc_shrinked50": "q0cov"}
 GEOMS = ["rsa", "cca", "procrustes"]
 REFS = ["esm", "fun"]
 # The molecule source is BOTH the boost's molecular half and the graph's molecule node
@@ -231,7 +237,10 @@ UNTAGGED_MOL = "gin"
 # count as measured -- its receptors and odorants are its parent's, so it shares every
 # npz with it and none has to be regenerated. Keyed here rather than by adding an entry
 # per molecule source, so `gin` and `ecfp` follow without a second edit.
-EMBEDDING_BASE = {"cc_shrinked": "cc", "hc_shrinked": "hc"}
+# Derived, not typed: `base` already says which panel a shrunk tag was cut from, and a
+# second hand-kept copy of that fact is exactly how a new tag ends up resolving its
+# embeddings against a file named after itself, which does not exist.
+EMBEDDING_BASE = {k: v["base"] for k, v in OFM_DATASETS.items() if "base" in v}
 
 
 # Which held-out set a row is scored on. `train` is in the dump because an overfit
@@ -1173,7 +1182,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dataset", nargs="+", default=["hc", "cc"],
-                    choices=["hc", "cc", "m2or", "cc_shrinked", "hc_shrinked"],
+                    choices=sorted(FAMILY),
                     help="cc/hc are the continuous insect panels (regression); m2or is "
                          "the sparse binary pool (classification, AUROC/AUPRC/MCC/F1)")
     ap.add_argument("--variant", choices=list(VARIANTS), default=None,

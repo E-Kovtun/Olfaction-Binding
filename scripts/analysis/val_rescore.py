@@ -319,7 +319,8 @@ def main():
     ap.add_argument("--root", default="results/graph/v9_node_dial",
                     help="the sweep directory holding metrics_*.csv and dumps/")
     ap.add_argument("--dataset", nargs="+", default=None,
-                    choices=["cc", "hc", "m2or", "cc_shrinked", "hc_shrinked"])
+                    choices=["cc", "hc", "m2or", "cc_shrinked", "hc_shrinked",
+                             "cc_shrinked50", "hc_shrinked50"])
     ap.add_argument("--regime", nargs="+", default=None,
                     choices=["transductive", "inductive"])
     ap.add_argument("--alphas", type=float, nargs="+", default=None,

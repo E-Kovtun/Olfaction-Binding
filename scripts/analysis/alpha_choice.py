@@ -64,7 +64,9 @@ NL = chr(10)
 # One row of one of the three tables.
 CELL = ["dataset", "regime", "mol_source"]
 DATASET_LABEL = {"cc": "Carey", "hc": "Hallem", "m2or": "M2OR",
-                 "cc_shrinked": "Carey-shrunk", "hc_shrinked": "Hallem-shrunk"}
+                 "cc_shrinked": "Carey-shrunk", "hc_shrinked": "Hallem-shrunk",
+                 "cc_shrinked50": "Carey-shrunk50",
+                 "hc_shrinked50": "Hallem-shrunk50"}
 # Competitors that are not the dial. `naive` is deliberately absent: it is the floor a
 # table quotes, not a candidate to report.
 REF_ARMS = {"boost_full": "boost", "graph_legacy": "legacy"}

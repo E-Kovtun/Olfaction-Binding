@@ -59,10 +59,14 @@ EXPECTED_SPLITS = 5
 
 DATASET_LABEL = {"m2or": "M2OR", "cc": "Mosquito (Carey)", "hc": "Fly (Hallem-Carlson)",
                  "cc_shrinked": "Mosquito (Carey, shrunk)",
-                 "hc_shrinked": "Fly (Hallem-Carlson, shrunk)"}
+                 "hc_shrinked": "Fly (Hallem-Carlson, shrunk)",
+                 "cc_shrinked50": "Mosquito (Carey, shrunk 50%)",
+                 "hc_shrinked50": "Fly (Hallem-Carlson, shrunk 50%)"}
 DATASET_TEX = {"m2or": "M2OR", "cc": "Mosquito (Carey)", "hc": r"Fly (Hallem--Carlson)",
                "cc_shrinked": "Mosquito (Carey, shrunk)",
-               "hc_shrinked": r"Fly (Hallem--Carlson, shrunk)"}
+               "hc_shrinked": r"Fly (Hallem--Carlson, shrunk)",
+               "cc_shrinked50": r"Mosquito (Carey, shrunk 50\%)",
+               "hc_shrinked50": r"Fly (Hallem--Carlson, shrunk 50\%)"}
 REGIME_LABEL = {"transductive": "Transductive", "inductive": "Cold molecule"}
 MOL_LABEL = {"chemberta": "ChemBERTa", "gin": "GIN", "ecfp": "ECFP"}
 BASELINE_LABEL = {"lorax": "LORAX", "prosmith": "ProSmith", "molor": "MolOR",

@@ -95,10 +95,13 @@ from scripts.analysis import alpha_grid as ag                      # noqa: E402
 
 DATASET_LABEL = {"m2or": "M2OR", "cc": "Carey", "hc": "Hallem-Carlson",
                  "cc_shrinked": "Carey (shrunk)",
-                 "hc_shrinked": "Hallem-Carlson (shrunk)"}
+                 "hc_shrinked": "Hallem-Carlson (shrunk)",
+                 "cc_shrinked50": "Carey (shrunk 50%)",
+                 "hc_shrinked50": "Hallem-Carlson (shrunk 50%)"}
 # The shrunk panels sit LAST: every table's --dataset defaults to this list, so putting
 # them anywhere else would silently reorder tables that already exist in the paper.
-DATASET_ORDER = ["m2or", "cc", "hc", "cc_shrinked", "hc_shrinked"]
+DATASET_ORDER = ["m2or", "cc", "hc", "cc_shrinked", "hc_shrinked",
+                 "cc_shrinked50", "hc_shrinked50"]
 REGIME_ORDER = ["transductive", "inductive"]
 # The columns each table prints. Fewer than the battery on purpose: this is the table,
 # not the archive -- `headline_table.py --all-metrics` is where everything lives.
@@ -121,6 +124,14 @@ ENSEMBLE_SCOPE = {
                                           split_family="rand"),
     ("hc_shrinked", "inductive"): dict(regime="ofm", dataset="hc_shrinked",
                                        split_family="our_inductive"),
+    ("cc_shrinked50", "transductive"): dict(regime="ofm", dataset="cc_shrinked50",
+                                            split_family="rand"),
+    ("cc_shrinked50", "inductive"): dict(regime="ofm", dataset="cc_shrinked50",
+                                         split_family="our_inductive"),
+    ("hc_shrinked50", "transductive"): dict(regime="ofm", dataset="hc_shrinked50",
+                                            split_family="rand"),
+    ("hc_shrinked50", "inductive"): dict(regime="ofm", dataset="hc_shrinked50",
+                                         split_family="our_inductive"),
     ("m2or", "transductive"): dict(regime="full_full", full_full_mode="transductive"),
     ("m2or", "inductive"): dict(regime="full_full",
                                 full_full_mode="inductive_molecule_v5"),

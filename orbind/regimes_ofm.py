@@ -105,6 +105,29 @@ DATASETS: dict[str, dict] = {
         "label": "Hallem-Carlson (shrunk)",
         "base": "hc",
     },
+    # The same construction at half density instead of M2OR's 6.3%. At 6.3% every model
+    # on these panels scored near zero, so the comparison had nothing to rank; this pair
+    # keeps the marginal SHAPE (the profile is rescaled, not replaced) and buys signal
+    # with volume. The shape match is necessarily worse than at 6.3% -- see the note in
+    # `_ipf`: M2OR's busiest receptors sit at 53% of their panel, and asking for the same
+    # FRACTION above a mean of 50% drives the head into the clip, so the heavy tail
+    # flattens against the ceiling. `report()` prints both profiles; read them.
+    "cc_shrinked50": {
+        "dir": "CC_shrinked50",
+        "raw": pathlib.Path("CC_shrinked50") / "raw" / "cc_shrinked50_z.csv",
+        "families": ("rand", "our_inductive"),
+        "molecules": "molecule_smiles_cc_shrinked50.csv",
+        "label": "Carey (shrunk 50%)",
+        "base": "cc",
+    },
+    "hc_shrinked50": {
+        "dir": "HC_shrinked50",
+        "raw": pathlib.Path("HC_shrinked50") / "raw" / "hc_shrinked50_z.csv",
+        "families": ("rand", "our_inductive"),
+        "molecules": "molecule_smiles_hc_shrinked50.csv",
+        "label": "Hallem-Carlson (shrunk 50%)",
+        "base": "hc",
+    },
 }
 FOLDS = (1, 2, 3, 4, 5)
 

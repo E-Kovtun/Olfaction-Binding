@@ -5,6 +5,7 @@ notebook can pass *modified* protein embeddings (e.g. transformed ESM-2) without
 touching files.
 """
 from __future__ import annotations
+import os
 import warnings
 warnings.filterwarnings("ignore")
 import numpy as np
@@ -82,10 +83,16 @@ def fit_boost(Xtr, ytr, seed=42, task="classification"):
     clf = make_estimator(device)
     try:
         clf.fit(Xtr, ytr)
-    except xgb.core.XGBoostError:
+    except xgb.core.XGBoostError as e:
         if device != "cuda":
             raise
-        print("  XGBoost CUDA unavailable; retrying boost head on CPU", flush=True)
+        # Say WHICH card and WHY. The CPU retry below rarely saves the process: the
+        # failed GPU booster's destructor throws from C++ (cuMemUnmap) and aborts it,
+        # so this line is usually the last thing the log gets to say.
+        first = str(e).strip().splitlines()[0][:300] if str(e).strip() else repr(e)
+        print(f"  XGBoost CUDA unavailable on CUDA_VISIBLE_DEVICES="
+              f"{os.environ.get('CUDA_VISIBLE_DEVICES', '<unset>')}: {first}; "
+              f"retrying boost head on CPU", flush=True)
         clf = make_estimator("cpu")
         clf.fit(Xtr, ytr)
     return clf

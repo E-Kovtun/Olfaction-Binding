@@ -24,6 +24,40 @@ letter) is a history modifier, so brace every variable that touches a colon —
 Hladiš runs in the project `.venv`, not `.venv-controls`: it needs rdkit, and the
 controls env does not install it.
 
+**xgboost is pinned to 2.x in every environment, and a run refuses to start
+otherwise** (`orbind.baselines.check_xgboost_version`, called from
+`train_ensemble_boost.main`). The boosting head is the one thing every reported
+number shares, so two majors are two methods; `config.json` now records the
+interpreter and the xgboost version for exactly this reason.
+
+The crash that forced the pin, written down so it is not re-diagnosed: on this box,
+**xgboost 3.2.0 aborts on GPUs 2 and 3** (not 0 and 1) inside its CUDA
+virtual-memory allocator —
+
+```
+cuMemCreate(&alloc_handle, padded_size, ...) CUDA_ERROR_INVALID_VALUE
+terminate called ... cuMemUnmap(...) CUDA_ERROR_INVALID_VALUE   -> exit code -6
+```
+
+The `except XGBoostError` CPU fallback in `fit_boost` never saves the process: the
+failed booster's *destructor* throws from C++, so `std::terminate` fires after our
+message is printed. A whole ESM3 baseline block died this way (2026-09-20) while
+the same methods ran green on GPUs 0/1, because `.venv-controls` and `.venv-molor`
+had installed xgboost unpinned while `.venv` held 2.1.4.
+
+What was measured and **excluded** — do not re-test these:
+
+* not the embeddings (the reproducer is `np.random.rand(1901, 3600)`);
+* not the cards: identical A100-SXM4-80GB, `Remapping Failure Occurred: No`, ECC
+  clean, VMM and POSIX-FD supported on all four;
+* not memory pressure (holding 85% of the card in torch, then boosting: fine);
+* not our GPU pinning: `device="cuda:2"` with no `CUDA_VISIBLE_DEVICES` fails too;
+* not the driver API: raw `cuMemCreate` up to 1 GB succeeds on every card.
+
+So the residue is empirical — xgboost 3.x + those two cards — and the fix is the
+pin, which works on all four. Small-feature methods (Hladiš) survive 3.x there,
+which is why a failure can look method-specific when it is not.
+
 ## Metrics
 
 **R² is measured against the test mean; naive predicts the train mean.** A model

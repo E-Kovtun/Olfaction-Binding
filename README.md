@@ -65,6 +65,17 @@ with fair-esm. Its install lines are in the docstring of
 (the SDK imports it without declaring it), and expect it to pull its own torch
 (2.14+cu130 on the server — it works on the A100s there).
 
+**Every env that fits a boosting head must hold `xgboost>=2.0,<3.0`** — the same
+head is what all reported numbers share, and 3.x also aborts on some of the
+server's GPUs (see [`orbind/docs/gotchas.md`](orbind/docs/gotchas.md)). A run now
+refuses to start on the wrong major. `.venv-molor` is built by hand, so pin it
+there explicitly:
+
+```bash
+uv pip install --python .venv-molor/bin/python "xgboost>=2.0,<3.0"
+uv pip install --python .venv-controls/bin/python "xgboost>=2.0,<3.0"
+```
+
 Scripts add the repo root to `sys.path` themselves, so `orbind` imports without
 being installed — call an env's interpreter directly:
 `.venv-controls/bin/python scripts/modeling/train/train_ensemble_boost.py ...`.

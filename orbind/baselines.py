@@ -12,6 +12,31 @@ import numpy as np
 from . import dataset as D
 
 
+#: The boosting head must be the SAME implementation in every environment. Two
+#: majors are two heads, and the paper reports one. 3.x additionally allocates its
+#: device vectors through CUDA virtual memory (`cuMemCreate`), which aborts the
+#: whole process on some cards -- see orbind/docs/gotchas.md.
+XGBOOST_MAJOR = 2
+
+
+def check_xgboost_version(major: int = XGBOOST_MAJOR) -> str:
+    """Raise unless the installed xgboost is the pinned major. Returns its version.
+
+    Called at run start-up, not at fit time: a mismatch otherwise surfaces hours
+    later, inside a C++ destructor, as an unattributable SIGABRT.
+    """
+    import xgboost as xgb
+    got = xgb.__version__
+    if int(got.split(".")[0]) != major:
+        raise RuntimeError(
+            f"xgboost {got} is installed, but this repository pins major {major}. "
+            f"Every reported number uses one fixed boosting head, so a different "
+            f"major is a different method -- and {major + 1}.x aborts on some of "
+            f"this box's GPUs (see orbind/docs/gotchas.md). Fix the environment:\n"
+            f"    uv pip install --python <this venv>/bin/python 'xgboost>=2.0,<3.0'")
+    return got
+
+
 def make_xy(pairs, prot, mol, random_prot=False, seed=0):
     """X = [molecule || protein] for the pairs that have both embeddings."""
     mask = pairs["receptor"].isin(prot) & pairs["inchikey"].isin(mol)

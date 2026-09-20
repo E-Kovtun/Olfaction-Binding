@@ -167,6 +167,7 @@ sys.path.insert(0, str(_root))
 
 import importlib
 
+from orbind.baselines import check_xgboost_version
 from orbind.ensemble import run_ensemble
 from orbind.regimes import full_full_pairs, load_split
 from orbind.regimes_ofm import DATASETS as OFM_DATASETS, available_families, ofm_indices, ofm_pairs
@@ -595,7 +596,13 @@ def _run_repeat_pool(repeats, n_slots, gpu_ids, launch, collect, poll=5.0, grace
     return failed
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
+    """The CLI, separated from `main` so other tools can read its defaults.
+
+    `relaunch_incomplete.py` rebuilds a command line out of a finished run's
+    `config.json`, and to do that it has to know which recorded value is a default
+    worth omitting and which flag spells a given dest.
+    """
     ap = argparse.ArgumentParser()
     ap.add_argument("--regime", default="curated_full", choices=["curated_full", "full_full", "ofm"])
     ap.add_argument("--task", default=None, choices=list(TASKS),
@@ -666,7 +673,15 @@ def main() -> None:
                           "degenerate (scaf fold 1 has test sd 0.215 and naive R2 -4.92); "
                           "build it with scripts/preprocessing/"
                           "03_build_ofm_our_inductive_splits.py.")
+    return ap
+
+
+def main() -> None:
+    ap = build_parser()
     args = ap.parse_args()
+
+    # Fail here, not three hours from now inside an XGBoost destructor.
+    xgb_version = check_xgboost_version()
 
     # The ofm datasets exist for their continuous response; defaulting them to
     # classification would silently binarise the very thing they were fetched for.
@@ -691,7 +706,11 @@ def main() -> None:
     print(f"run: {run_dir}")
 
     with open(run_dir / "config.json", "w", encoding="utf-8") as f:
-        json.dump(vars(args), f, indent=2, default=str)
+        # `python` and `xgboost` are not CLI args: they record WHICH environment
+        # produced these numbers, which is exactly what we could not reconstruct
+        # when the two majors diverged.
+        json.dump({**vars(args), "python": sys.executable, "xgboost": xgb_version},
+                  f, indent=2, default=str)
 
     log_path = run_dir / "log.txt"
     with open(log_path, "w", encoding="utf-8") as logf:

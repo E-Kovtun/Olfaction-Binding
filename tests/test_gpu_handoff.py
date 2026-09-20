@@ -214,3 +214,32 @@ def test_without_gpus_the_slots_still_bound_concurrency():
     assert sorted(collected) == [1, 2, 3]
     assert all(g is None for _, _, g, _ in events)
     assert max(len(r) for *_, r in events) <= 2
+
+
+# --------------------------------------------------------------------------- #
+# The third guard: which xgboost is installed.
+#
+# A whole ESM3 baseline block died on 2026-09-20 because `.venv-controls` and
+# `.venv-molor` had xgboost 3.x while `.venv` had 2.1.4. 3.x allocates device
+# vectors through CUDA virtual memory and aborts on two of the server's cards --
+# and the abort comes out of a C++ destructor, so no `except` sees it. The
+# version check exists to turn three lost hours into one line at start-up.
+# --------------------------------------------------------------------------- #
+from orbind.baselines import check_xgboost_version
+
+
+def test_the_matching_major_is_accepted_and_the_version_returned():
+    # Parametrised by what is installed rather than by the pin, so the test says
+    # the same thing in an env that has not been fixed yet.
+    import xgboost as xgb
+    assert check_xgboost_version(major=int(xgb.__version__.split(".")[0])) == xgb.__version__
+
+
+def test_a_different_major_is_refused_before_anything_runs():
+    import pytest
+    with pytest.raises(RuntimeError) as e:
+        check_xgboost_version(major=99)
+    msg = str(e.value)
+    # The message has to be actionable on a server at 3am: what is wrong, and the
+    # exact command that fixes it.
+    assert "xgboost" in msg and "uv pip install" in msg

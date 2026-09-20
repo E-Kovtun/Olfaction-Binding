@@ -41,8 +41,13 @@ uv venv .venv-controls --python "$PYVER"
 uv pip install --python .venv-controls/bin/python torch --index-url "$TORCH_INDEX"
 # ...then the rest from PyPI. transformers+peft are only needed by LORAX's live
 # ChemBERTa; ProSmith needs neither. No torch_geometric, no deepchem here.
+# xgboost is PINNED to the same major the project env uses. Two reasons, and the
+# second one alone would be enough: (a) 3.x allocates its device vectors through
+# CUDA virtual memory (cuMemCreate), which aborts on some of this box's cards --
+# see orbind/docs/gotchas.md; (b) the paper claims ONE fixed boosting head for
+# every method, and two majors are two implementations of it.
 uv pip install --python .venv-controls/bin/python \
-    xgboost scikit-learn optuna pandas numpy transformers peft
+    "xgboost>=2.0,<3.0" scikit-learn optuna pandas numpy transformers peft
 
 echo "############################################################"
 echo "# env 2: embeddings (run-once) -> .venv-embeddings"

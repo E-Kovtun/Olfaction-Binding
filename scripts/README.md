@@ -51,6 +51,9 @@ modeling/
     train_ensemble_boost.py         THE entry point: the multi-source boosting
                                     ensemble. Every paper table on M2OR / Carey /
                                     Hallem comes from here.
+    relaunch_incomplete.py          rebuilds the command line of every run under an
+                                    ensemble_logs root that has fewer than N repeats,
+                                    from its own config.json. Prints, never executes.
     run_quantile_criteria_sweep.py  quantile x criterion sweep of the pipeline GNN
                                     (appendix); read by
                                     notebooks/graph/alternatives/protein_based_graph*

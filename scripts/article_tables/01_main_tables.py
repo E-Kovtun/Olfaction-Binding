@@ -306,7 +306,10 @@ def main(argv=None):
         for reg, (_, st) in blocks.items():
             print("\n" + tk.text_block(st, metrics, f"=== {tk.DATASET_LABEL[ds]} / "
                                                      f"{tk.REGIME_LABEL[reg]}", a.sig))
-            longs.append(st)
+            # block_stats knows nothing about which panel it came from, and
+            # main_long.csv is the file you join two runs on -- without these two
+            # columns the rows of six panels are indistinguishable.
+            longs.append(st.assign(dataset=ds, regime=reg))
         summ = summary(ds, blocks, metrics, a)
         (out / f"{ds}.tex").write_text(latex(ds, blocks, metrics, a) + "\n", encoding="utf-8")
         (out / f"{ds}_summary.txt").write_text(summ + "\n", encoding="utf-8")

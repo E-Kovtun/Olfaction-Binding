@@ -126,3 +126,42 @@ def test_each_pair_level_source_maps_to_its_own_env(kind, env):
 def test_an_entity_only_run_names_no_env_and_falls_back(tmp_path, capsys):
     # prot+mol has no pair-level source, so any env with xgboost will do.
     assert R.infer_python({"sources": ["prot=esm:p.npz", "mol=gin:m.npz"]}) is None
+
+
+# --------------------------------------------------------------------------- #
+# config.json records the LAST invocation, not the union of every one. A run that
+# was once topped up fold-by-fold therefore carries a narrowed `repeats`, and
+# copying it verbatim rebuilds a three-fold run out of a five-fold one. Caught in
+# the wild on cc_rand_lorax_concatCB (2026-09-20), whose config said "3 4 5".
+# --------------------------------------------------------------------------- #
+def test_a_narrowed_fold_list_is_widened_back_to_the_full_set():
+    parser = R._teb.build_parser()
+    narrowed = {**CONFIG, "repeats": [3, 4, 5]}
+    argv = R.rebuild(narrowed, parser, "py", "train.py",
+                     repeats=R.canonical_repeats(narrowed))
+    i = argv.index("--repeats")
+    assert argv[i + 1:i + 6] == ["1", "2", "3", "4", "5"]
+
+
+def test_the_cold_molecule_modes_are_numbered_from_42():
+    ind = {"regime": "full_full", "full_full_mode": "inductive_molecule_v5"}
+    assert R.canonical_repeats(ind) == [42, 43, 44, 45, 46]
+    assert R.canonical_repeats({"regime": "full_full",
+                                "full_full_mode": "transductive"}) == [1, 2, 3, 4, 5]
+    assert R.canonical_repeats({"regime": "ofm"}) == [1, 2, 3, 4, 5]
+
+
+def test_widening_is_announced_rather_than_done_silently(tmp_path, capsys):
+    _write_run(tmp_path, "pool", "narrowed", {**CONFIG, "repeats": [3, 4, 5]})
+    R.main(["--root", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert "config records repeats [3, 4, 5]" in out
+    assert "full set [1, 2, 3, 4, 5]" in out
+
+
+def test_the_recorded_fold_list_can_still_be_kept_on_purpose(tmp_path, capsys):
+    _write_run(tmp_path, "pool", "narrowed", {**CONFIG, "repeats": [3, 4, 5]})
+    R.main(["--root", str(tmp_path), "--keep-recorded-repeats"])
+    out = capsys.readouterr().out
+    assert "--repeats 3 4 5" in out
+    assert "config records repeats" not in out

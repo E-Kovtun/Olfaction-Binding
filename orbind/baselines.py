@@ -12,10 +12,11 @@ import numpy as np
 from . import dataset as D
 
 
-#: The boosting head must be the SAME implementation in every environment. Two
-#: majors are two heads, and the paper reports one. 3.x additionally allocates its
-#: device vectors through CUDA virtual memory (`cuMemCreate`), which aborts the
-#: whole process on some cards -- see orbind/docs/gotchas.md.
+#: 3.x allocates its device vectors through CUDA virtual memory (`cuMemCreate`),
+#: which aborts the whole process on some of the server's cards. Measured, not
+#: assumed: the two majors produce IDENTICAL metrics on the same features, so this
+#: pin is about the process surviving, not about the numbers -- see
+#: orbind/docs/gotchas.md.
 XGBOOST_MAJOR = 2
 
 
@@ -30,9 +31,9 @@ def check_xgboost_version(major: int = XGBOOST_MAJOR) -> str:
     if int(got.split(".")[0]) != major:
         raise RuntimeError(
             f"xgboost {got} is installed, but this repository pins major {major}. "
-            f"Every reported number uses one fixed boosting head, so a different "
-            f"major is a different method -- and {major + 1}.x aborts on some of "
-            f"this box's GPUs (see orbind/docs/gotchas.md). Fix the environment:\n"
+            f"{major + 1}.x builds the same trees but allocates GPU memory through "
+            f"CUDA virtual memory, which aborts the process on some of this box's "
+            f"cards (see orbind/docs/gotchas.md). Fix the environment:\n"
             f"    uv pip install --python <this venv>/bin/python 'xgboost>=2.0,<3.0'")
     return got
 

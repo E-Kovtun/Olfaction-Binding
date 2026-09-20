@@ -102,9 +102,31 @@ def is_store_true(dest: str, parser: argparse.ArgumentParser) -> bool:
     return False
 
 
+def canonical_repeats(config: dict, n: int = 5) -> list[int]:
+    """The full fold set a run of this kind is supposed to have.
+
+    NOT the one config.json holds. config.json records the LAST invocation, so a
+    run that was once topped up fold-by-fold has a narrowed `repeats` list, and
+    copying it would quietly rebuild a three-fold run out of a five-fold one --
+    which is how a paper row loses two folds without anything looking wrong.
+    The trainer's own convention: 42..46 for the cold-molecule modes, 1..n
+    everywhere else.
+    """
+    if config.get("regime") == "full_full" and \
+            str(config.get("full_full_mode", "")).startswith("inductive"):
+        return list(range(42, 42 + n))
+    return list(range(1, n + 1))
+
+
 def rebuild(config: dict, parser: argparse.ArgumentParser, python: str,
-            script: str) -> list[str]:
-    """config.json -> argv. Defaults are dropped so the command stays readable."""
+            script: str, repeats: list[int] | None = None) -> list[str]:
+    """config.json -> argv. Defaults are dropped so the command stays readable.
+
+    `repeats` overrides whatever the config recorded; pass None to keep it.
+    """
+    config = dict(config)
+    if repeats is not None:
+        config["repeats"] = repeats
     argv = [python, script]
     for dest, value in config.items():
         if dest in NON_CLI_KEYS or value is None:
@@ -140,6 +162,11 @@ def main(argv=None) -> int:
                     help="interpreter for the rebuilt commands. Default: the one "
                          "config.json recorded; for older runs, the env the cls "
                          "source needs (ENV_FOR_SOURCE); failing both, this one.")
+    ap.add_argument("--keep-recorded-repeats", action="store_true",
+                    help="use the fold list config.json holds instead of the full "
+                         "canonical set. config.json records the LAST invocation, so "
+                         "a run topped up fold-by-fold has a narrowed list -- the "
+                         "default rebuilds all of them.")
     ap.add_argument("--show-complete", action="store_true",
                     help="also list the runs that need nothing")
     args = ap.parse_args(argv)
@@ -164,7 +191,13 @@ def main(argv=None) -> int:
         config = json.loads(config_path.read_text(encoding="utf-8"))
         python = (args.python or config.get("python") or infer_python(config)
                   or sys.executable)
-        incomplete.append((label, len(done), rebuild(config, parser, python, script)))
+        want = None if args.keep_recorded_repeats else canonical_repeats(config, args.repeats)
+        note = ""
+        if want is not None and sorted(config.get("repeats") or want) != sorted(want):
+            note = (f"  [config records repeats {config.get('repeats')}; rebuilding with "
+                    f"the full set {want}]")
+        incomplete.append((label, len(done),
+                           rebuild(config, parser, python, script, repeats=want), note))
 
     if not incomplete:
         print("# nothing to relaunch")
@@ -172,8 +205,8 @@ def main(argv=None) -> int:
 
     print(f"# {len(incomplete)} incomplete run(s) under {root}")
     print("# checkpoints are reused, so a relaunch redoes only what is missing.\n")
-    for label, n_done, cmd in incomplete:
-        print(f"# {label}  ({n_done}/{args.repeats} repeats present)")
+    for label, n_done, cmd, note in incomplete:
+        print(f"# {label}  ({n_done}/{args.repeats} repeats present){note}")
         print(" ".join(shlex.quote(c) for c in cmd))
         print()
     return 0

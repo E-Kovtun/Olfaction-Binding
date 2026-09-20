@@ -26,9 +26,17 @@ controls env does not install it.
 
 **xgboost is pinned to 2.x in every environment, and a run refuses to start
 otherwise** (`orbind.baselines.check_xgboost_version`, called from
-`train_ensemble_boost.main`). The boosting head is the one thing every reported
-number shares, so two majors are two methods; `config.json` now records the
-interpreter and the xgboost version for exactly this reason.
+`train_ensemble_boost.main`). `config.json` records the interpreter and the
+xgboost version so this is answerable from disk next time.
+
+The pin is about *stability, not numbers*. We assumed two majors meant two
+boosting heads and checked: refitting `transductive_lorax_chemberta`
+(classification) and `cc_rand_lorax_concatCB` (regression) under 2.1.4 on the
+features 3.2.0 had used reproduced **every metric to 6 decimals in every fold**.
+The majors build identical trees; they differ only in how they allocate GPU
+memory. So no historical run needs re-fitting for comparability -- which is worth
+knowing, because the affected set was every `lorax`/`prosmith`/`molor` run since
+2026-08-17 (`.venv-controls` and `.venv-molor` installed xgboost unpinned).
 
 The crash that forced the pin, written down so it is not re-diagnosed: on this box,
 **xgboost 3.2.0 aborts on GPUs 2 and 3** (not 0 and 1) inside its CUDA

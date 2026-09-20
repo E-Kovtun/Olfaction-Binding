@@ -97,6 +97,9 @@ analysis/
   headline_table.py                 the scoreboard of record at one alpha
   summarize_runs.py                 one row per (run, combo), mean +- 95% CI,
                                     task-aware columns
+  run_dates.py                      one compact line per run: finish time, env,
+                                    method, repeats, recorded xgboost. Answers
+                                    "which runs did THIS environment produce"
   extend_runs_with_combo.py         prints the commands that add a cls+prot+mol row
                                     to an existing cls-only run, reusing checkpoints
   mechanism_summary.py              reads a mechanism-holdout run: geometry in raw units

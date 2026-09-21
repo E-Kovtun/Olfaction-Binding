@@ -12,18 +12,19 @@ Three rows per cell, on the same folds:
     boost [ESM|mol]  the sweep's own boost_full reference
     boost [1hot|mol] the same head over a ONE-HOT receptor block instead of ESM
 
-The third is the one this script computes; the first two are read from the sweep. It
-is the honest floor for the first: a one-hot block is receptor identity with no
-refinement, so a graph at alpha=0 that does not beat it has learned nothing from the
+The first two are read from the sweep; the third comes from `05a_onehot_boost.py`,
+which fits it. That one is the honest floor for the first: a one-hot block is receptor
+identity with no refinement, so a graph at alpha=0 that does not beat it has learned nothing from the
 response profile, and one that beats boost-over-ESM while tying one-hot says the win
 was never about sequence.
 
     python scripts/article_tables/05_alpha0_vs_boost.py \
         --sweep-root results/graph/v13_esm3
 
-The one-hot heads are cached under results/article_tables/onehot_boost/ (one CSV per
-dataset and regime) because refitting them is the only slow part; --force redoes them.
-Everything else is read from disk each time.
+READ-ONLY. The one-hot heads are fitted by `05a_onehot_boost.py`, which writes one
+CSV per (dataset, regime) under results/article_tables/onehot_boost/; this script only
+reads them, so it is fast and safe to re-run while tweaking a label. If those files are
+absent the column reads `--` and the run prints the command that makes them.
 
 Writes to results/article_tables/alpha0/: alpha0_long.csv, alpha0.tex, and a printed
 text block.
@@ -31,7 +32,6 @@ text block.
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import pathlib
 import sys
 
@@ -49,57 +49,23 @@ GRAPH, BOOST, ONEHOT = "graph a=0", "boost [ESM || mol]", "boost [1hot || mol]"
 ROWS = (GRAPH, BOOST, ONEHOT)
 
 
-def _module(rel, name):
-    spec = importlib.util.spec_from_file_location(name, tk.ROOT / rel)
-    m = importlib.util.module_from_spec(spec)
-    sys.modules[name] = m
-    spec.loader.exec_module(m)
-    return m
+# ------------------------------------------------------------------ the one-hot rows
 
+def onehot_table(ds, regime, cache):
+    """The one-hot head's rows for this cell, as `05a_onehot_boost.py` wrote them.
 
-# ------------------------------------------------------------------ the one-hot head
-
-def onehot_rows(ds, regime, sw, ns, data, seed, task):
-    """One row per fold: the boosting head over [one-hot receptor || molecule].
-
-    Everything except the protein block is the sweep's own code -- the same fold
-    indices, the same coverage mask, the same `fit_boost` hyperparameters and the same
-    metric battery -- so the row lands beside `boost_full` as a like-for-like control
-    rather than a second implementation of one.
+    Missing is not an error: the one-hot column simply reads `--`, and the message
+    below says what to run. That keeps this script fast and read-only -- fitting a
+    1237-wide one-hot block on M2OR is minutes per fold, and it does not belong in
+    something you re-run to change a label.
     """
-    from orbind.baselines import fit_boost, predict_scores
-    rows = []
-    for fold in sw.REPEATS[ds].get(regime, [1, 2, 3, 4, 5]):
-        P = sw._fold_prep(ds, regime, fold, ns, data)
-        order = {r: i for i, r in enumerate(P["order"])}
-        eye = np.eye(len(order), dtype=np.float32)
-
-        def block(key):
-            idx = [order[r] for r in P[f"rec_{key}"]]
-            return np.concatenate([eye[idx], P[f"Xm_{key}"]], axis=1)
-
-        est = fit_boost(block("tr"), P["y_tr"], seed=seed, task=task)
-        scores = sw._score_split(P, predict_scores(est, block("te"), task), task, "test")
-        rows.append(dict(fold=int(fold), n_receptors=len(order), **scores))
-        print(f"  {ds}/{regime} fold {fold}: {len(order)} receptors, "
-              f"{block('tr').shape[1]} features")
-    return pd.DataFrame(rows)
-
-
-def onehot_table(ds, regime, cache, a):
-    """The cached one-hot rows for this cell, computing them on first ask."""
-    path = pathlib.Path(cache) / f"{ds}_{regime}.csv"
-    if path.exists() and not a.force:
-        return pd.read_csv(path)
-    sw = _module("scripts/modeling/train/run_alpha_gate_sweep.py", "_sweep_for_alpha0")
-    ns = argparse.Namespace(mol_source=a.mol_source, mol_embeddings=None,
-                            prot_embeddings=a.prot_embeddings, pool_fold=1)
-    print(f"{ds}/{regime}: fitting the one-hot head")
-    df = onehot_rows(ds, regime, sw, ns, sw._prepare(ds, ns), a.seed, tk.TASK[ds])
-    path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(path, index=False)
-    print(f"  -> {path}")
-    return df
+    path = pathlib.Path(cache)
+    if not path.is_absolute():
+        path = tk.ROOT / path
+    path = path / f"{ds}_{regime}.csv"
+    if not path.exists():
+        return None
+    return pd.read_csv(path)
 
 
 # ------------------------------------------------------------------ the comparison
@@ -141,11 +107,13 @@ def build(a):
                  dataset=a.dataset, regime=a.regime, combo=a.combo)
     ds_of = dict(zip(df.series, df.dataset))
     reg_of = dict(zip(df.series, df.regime))
-    out = []
+    out, missing = [], set()
     for s in sorted(df.series.unique()):
         sub = df[df.series == s]
         ds, regime = ds_of[s], reg_of[s]
-        oh = onehot_table(ds, regime, a.cache, a)
+        oh = onehot_table(ds, regime, a.cache)
+        if oh is None:
+            missing.add((ds, regime))
         alphas = pd.to_numeric(sub.loc[sub.arm == "gate", "alpha"], errors="coerce")
         if not np.isclose(alphas.dropna(), a.alpha).any():
             raise SystemExit(
@@ -156,7 +124,8 @@ def build(a):
         boost_all = sub[sub.arm == "boost_full"]
         for m in ag.metrics_available(sub, dataset=ds, which=a.which):
             g, b = fold_values(graph_all, m), fold_values(boost_all, m)
-            o = fold_values(oh.assign(seed=a.seed), m) if m in oh.columns else {}
+            o = ({} if oh is None or m not in oh.columns
+                 else fold_values(oh, m))
             wb, nb = wins(g, b, m)
             wo, no = wins(g, o, m)
             out.append(dict(
@@ -166,6 +135,14 @@ def build(a):
                     (ONEHOT, cell(o, a.level)))
                    for k, v in d.items()},
                 won_vs_boost=wb, n_vs_boost=nb, won_vs_onehot=wo, n_vs_onehot=no))
+    if missing:
+        cells = ", ".join(f"{d}/{r}" for d, r in sorted(missing))
+        datasets = " ".join(sorted({d for d, _ in missing}))
+        print(f"\nNOTE: no one-hot rows for {cells} -- that column reads '--'.\n"
+              f"      Fit them once (slow, then cached) with:\n"
+              f"        python scripts/article_tables/05a_onehot_boost.py"
+              f" --dataset {datasets}"
+              f" --prot-embeddings '<the npz the sweep used>'\n")
     return pd.DataFrame(out)
 
 
@@ -250,20 +227,11 @@ def parser():
     ap.add_argument("--dataset", nargs="+", default=None)
     ap.add_argument("--regime", nargs="+", default=None)
     ap.add_argument("--which", default="headline", choices=["headline", "all"])
-    ap.add_argument("--seed", type=int, default=42,
-                    help="seed for the one-hot head. 42 is what every reported "
-                         "boosting number uses")
-    ap.add_argument("--prot-embeddings", default=None,
-                    help="THE SAME protein npz the sweep was run with. The one-hot "
-                         "block replaces ESM in the features, but the file still "
-                         "decides the coverage mask, and a different mask is a "
-                         "different set of rows in every fold. For the ESM3 sweep: "
-                         "'data/embeddings/proteins/esm3_{ds}.npz'")
     ap.add_argument("--level", type=float, default=0.95)
     ap.add_argument("--flag-at", type=int, default=3,
                     help="mark a row with this many wins or more")
-    ap.add_argument("--cache", default="results/article_tables/onehot_boost")
-    ap.add_argument("--force", action="store_true", help="refit the one-hot heads")
+    ap.add_argument("--cache", default="results/article_tables/onehot_boost",
+                    help="where 05a_onehot_boost.py wrote its CSVs")
     ap.add_argument("--out", default="results/article_tables/alpha0")
     return ap
 

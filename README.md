@@ -353,6 +353,199 @@ makes the axis mean anything there (`orbind/mol_selection.resolve_K`).
 
 ---
 
+## The runbook: which commands produce which table
+
+The sections above explain *why* each run exists. This one is the flat list of
+*what to type*, in the order it has to happen: producers first, then readers. It
+covers the two protein sources we report (ESM-1b and ESM3) and the three molecule
+sources, and nothing else — an experiment not listed here is not in a table.
+
+Every command runs from the repo root. Which interpreter matters: `.venv-controls`
+for LORAX/ProSmith, `.venv-molor` for MolOR, `.venv` for Hladiš, the graph and every
+reader.
+
+| paper table | reader | producers it needs |
+|---|---|---|
+| main head-to-head (all methods × 3 datasets × 2 regimes) | `01_main_tables.py` | sweep **A** + baselines **B** |
+| molecule ablation (ChemBERTa / GIN / ECFP) | `03_molecule_ablation.py` | sweep **A** with all three `--mol-source`, plus Hladiš from **C** |
+| protein-source floor (`tab:t4`) | `prot_floor_sweep.py` | nothing — it fits its own heads |
+| geometry (RSA / CCA / Procrustes) | `02_geometry_table.py` | sweep **A** + `02a_protein_geometry.py` |
+
+### A. The sweep — our graph and the boosting base
+
+One command per protein source. Both must carry the **same** dial flags or their
+cells are not comparable: `--dial nodes` is the v9 parameterisation (alpha moves the
+graph's *input*), and `--seed-graph` removes the initialisation lottery. Turning
+either on or off makes a new series, not more folds of an old one.
+
+```bash
+# ESM-1b -- the tables' default root. Omitting --prot-embeddings selects PROT_SOURCE,
+# whose M2OR entry has no dataset suffix.
+.venv/bin/python scripts/modeling/train/run_alpha_gate_sweep.py \
+    --dataset m2or cc hc --regime transductive inductive \
+    --mol-source chemberta gin ecfp --alphas 1.0 \
+    --dial nodes --seed-graph --seeds 42 43 44 45 46 \
+    --out results/graph/v9_seeded \
+    --max-parallel 4 --gpus 0 1 2 3
+
+# ESM3 -- the same command with two flags changed.
+.venv/bin/python scripts/modeling/train/run_alpha_gate_sweep.py \
+    --dataset m2or cc hc --regime transductive inductive \
+    --mol-source chemberta gin ecfp --alphas 1.0 \
+    --dial nodes --seed-graph --seeds 42 43 44 45 46 \
+    --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz' \
+    --out results/graph/v13_esm3 \
+    --max-parallel 4 --gpus 0 1 2 3
+```
+
+Quote `'…{ds}.npz'`: the placeholder belongs to the script and an unquoted brace
+belongs to the shell. ESM3's files are named uniformly (`esm3_m2or.npz`,
+`esm3_cc.npz`, `esm3_hc.npz`), so one template covers all three.
+
+The sweep is resumable — it reads what is already in the CSV and fits only the
+missing heads — so the command above is also the command that tops a series up.
+`--alphas 1.0` is the only point the tables read; the wider grid belongs to the dial
+figures.
+
+To check that an existing root was produced the way the tables assume, read the
+flags back out of the CSV rather than trusting shell history:
+
+```bash
+.venv/bin/python scripts/analysis/sweep_provenance.py --root results/graph/v13_esm3
+```
+
+### B. The baselines — LORAX, ProSmith, MolOR, Hladiš
+
+Four methods × 3 datasets × 2 regimes. The ESM-1b M2OR form is under **T1 / T1b**
+above; this is its ESM3 counterpart.
+
+```bash
+PRES3=data/embeddings/proteins/esm3_per_residue_m2or.npz
+PROT3=data/embeddings/proteins/esm3_m2or.npz
+MOL=data/embeddings/molecules/chemberta_77m_m2or.npz
+
+.venv-controls/bin/python scripts/modeling/train/train_ensemble_boost.py \
+    --regime full_full --full-full-mode transductive \
+    --out-dir results/ensemble_logs_esm3/m2or-transductive-chemberta-esm3 \
+    --run-name transductive_lorax_esm3 \
+    --source cls=lorax:${PRES3} \
+    --source prot=esm:${PROT3}:esm3-sm-open-v1 \
+    --source mol=gin:${MOL}:chemberta_77m \
+    --combos "1 123" --on-missing drop \
+    --max-parallel 2 --gpus 0 1 --repeats 1 2 3 4 5
+```
+
+For cold molecule: `--full-full-mode inductive_molecule_v5 --repeats 42 43 44 45 46`
+and the `m2or-inductive-chemberta-esm3` pool.
+
+Two things that silently break a run rather than failing it:
+
+* **`--out-dir` is not optional.** The readers glob `<root>/<pool>/<run>/config.json`
+  at exactly that depth; a run written to the default root is invisible to them.
+* **`cls=` goes first.** Combos are named after the `--source` order, so a reordered
+  command line produces `prot+mol+cls` where the reader is looking for
+  `cls+prot+mol`, and the row is simply not found.
+
+The other three `cls=` specs, with `{ds}` = `m2or`, `cc` or `hc`:
+
+```
+cls=prosmith:esm3_per_residue_{ds}.npz:chemberta_77m_{ds}.npz::<prosmith .pkl>
+cls=molor:esm3_per_residue_{ds}.npz:1
+cls=hladis:esm3_{ds}.npz:1:2000:1200:100
+```
+
+Hladiš takes the **mean** file — it has no per-residue path, and its molecule side is
+built from SMILES, so it has no molecule npz either. `2000:1200:100` is its step
+budget rescaled to the insect panels.
+
+Insects: `--regime ofm --dataset {cc,hc} --split-family {rand,our_inductive}
+--task regression --combos "1 12 123" --repeats 1 2 3 4 5`, pools
+`{cc,hc}-{rand,ourind}-esm3`. The insect protein file must be named explicitly — a
+bare `cls=lorax` loads its M2OR default, which holds none of these receptors, and the
+run dies with `num_samples=0`.
+
+### C. Molecule-source variation
+
+Sweep **A** already covers the graph and the base on all three molecule sources. Only
+Hladiš needs extra runs, because its row in the ablation moves with the *boost's*
+molecular half rather than with its own input:
+
+```bash
+for DS in cc hc; do
+  for FAM in rand our_inductive; do
+    if [[ ${FAM} == rand ]]; then POOL=${DS}-rand-esm3; TAG=${DS}_rand
+    else POOL=${DS}-ourind-esm3; TAG=${DS}_our_inductive; fi
+    for MOL in gin ecfp; do
+      if [[ ${MOL} == gin ]]; then MF=data/embeddings/molecules/gin_supervised_contextpred_${DS}.npz
+      else MF=data/embeddings/molecules/ecfp_${DS}.npz; fi
+      .venv/bin/python scripts/modeling/train/train_ensemble_boost.py \
+        --regime ofm --dataset ${DS} --split-family ${FAM} --task regression \
+        --out-dir results/ensemble_logs_esm3/${POOL} \
+        --run-name ${TAG}_hladis_esm3_${MOL} \
+        --source cls=hladis:data/embeddings/proteins/esm3_${DS}.npz \
+        --source prot=esm:data/embeddings/proteins/esm3_${DS}.npz:esm3-sm-open-v1 \
+        --source mol=gin:${MF}:${MOL} \
+        --combos "1 12 123" --on-missing drop \
+        --max-parallel 2 --gpus 0 1 --repeats 1 2 3 4 5
+    done
+  done
+done
+```
+
+`mol=gin:` is the generic entity extractor, not the GIN model: the file decides what
+the embedding is and the third field is provenance only.
+
+### D. The readers
+
+Inventory first — it reports READY / PARTIAL / MISSING per input cell, which is the
+difference between a table that is complete and one that merely printed:
+
+```bash
+.venv/bin/python scripts/article_tables/00_inventory.py \
+    --sweep-root results/graph/v13_esm3 --ensemble-root results/ensemble_logs_esm3
+```
+
+```bash
+# main head-to-head, all three datasets, both regimes, one run per protein source
+.venv/bin/python scripts/article_tables/01_main_tables.py --no-val-cut \
+    --sweep-root results/graph/v9_seeded --ensemble-root results/ensemble_logs \
+    --out results/article_tables/esm1b
+.venv/bin/python scripts/article_tables/01_main_tables.py --no-val-cut \
+    --sweep-root results/graph/v13_esm3 --ensemble-root results/ensemble_logs_esm3 \
+    --out results/article_tables/esm3
+
+# tab:t1's shape: competitors in their cls form vs the boosting base, no graph
+.venv/bin/python scripts/article_tables/01_main_tables.py --no-val-cut     --dataset m2or --baseline-combo cls --no-ours     --sweep-root results/graph/v13_esm3 --ensemble-root results/ensemble_logs_esm3     --out results/article_tables/esm3/t1
+
+# molecule ablation: ChemBERTa / GIN / ECFP x {graph, base, Hladis}
+.venv/bin/python scripts/article_tables/03_molecule_ablation.py \
+    --sweep-root results/graph/v13_esm3 --ensemble-root results/ensemble_logs_esm3 \
+    --out results/article_tables/esm3/molecule
+
+# protein-source floor (tab:t4): real pLMs vs the classical amino-acid floor
+.venv/bin/python scripts/modeling/analysis/prot_floor_sweep.py --dataset m2or cc hc
+
+# two table runs side by side: value, place, and what moved
+.venv/bin/python scripts/article_tables/04_compare_runs.py \
+    --a results/article_tables/esm1b --a-label ESM-1b \
+    --b results/article_tables/esm3  --b-label ESM3
+```
+
+`--no-val-cut` drops the extra column whose threshold is chosen on validation and
+leaves the 0.5 cut alone. Give each protein source its own `--out`, or the second run
+overwrites the first and there is nothing left to compare.
+
+Geometry is a separate pair, and `02a` skips a CSV that already exists — `--force` is
+what adds a protein source generated after those files were written:
+
+```bash
+.venv/bin/python scripts/article_tables/02a_protein_geometry.py --dataset cc hc --force
+.venv/bin/python scripts/article_tables/02_geometry_table.py \
+    --sweep-root results/graph/v13_esm3 --out results/article_tables/esm3/geometry
+```
+
+---
+
 ## Reading results
 
 ```bash

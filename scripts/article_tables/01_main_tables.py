@@ -273,6 +273,13 @@ def parser():
     ap.add_argument("--alpha", type=float, default=tk.ALPHA)
     ap.add_argument("--ours", nargs="+", default=list(tk.GRAPH_COMBOS),
                     choices=tk.GRAPH_COMBOS, help="which heads of our graph get a row")
+    ap.add_argument("--no-ours", dest="ours", action="store_const", const=[],
+                    help="drop our graph entirely: baselines against the boosting base "
+                         "and nothing else. That is tab:t1's shape -- with "
+                         "--baseline-combo cls it asks whether a learned pair "
+                         "representation beats two frozen embeddings, a question our "
+                         "own rows are not part of. No row is then tested, since every "
+                         "test in this table is ours-against-the-best-other.")
     ap.add_argument("--baselines", nargs="+", default=list(tk.BASELINES))
     ap.add_argument("--baseline-combo", nargs="+", default=[tk.BASELINE_COMBO],
                     help="one combo for all, or name=combo items")

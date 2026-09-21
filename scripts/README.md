@@ -100,6 +100,9 @@ analysis/
   run_dates.py                      one compact line per run: finish time, env,
                                     method, repeats, recorded xgboost. Answers
                                     "which runs did THIS environment produce"
+  sweep_provenance.py               which dial/alphas/seeds a sweep root was built
+                                    with, read back out of its CSVs; two roots are
+                                    also diffed field by field
   extend_runs_with_combo.py         prints the commands that add a cls+prot+mol row
                                     to an existing cls-only run, reusing checkpoints
   mechanism_summary.py              reads a mechanism-holdout run: geometry in raw units

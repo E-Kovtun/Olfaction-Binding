@@ -425,3 +425,36 @@ def test_the_metric_curve_is_sklearn_at_every_cut(metric):
     got = tk._metric_curve(metric, y, p, cands)
     want = [tk._hard_metric(metric, y, p, t) for t in cands]
     assert np.allclose(got, want, atol=1e-12)
+
+
+# --------------------------------------------------------------------------- #
+# tab:t1's shape: the competitors in their cls form against the boosting base,
+# with our graph absent. Every significance test in this table is ours-against-
+# the-best-other, so with no ours rows there must simply be no tests -- not a
+# crash, and not a test of a baseline against another baseline, which is not a
+# claim this paper makes.
+# --------------------------------------------------------------------------- #
+def test_no_ours_drops_our_rows_and_leaves_the_baselines_intact(m2or):
+    s, e, tmp = m2or
+    rng = np.random.default_rng(3)
+    _m2or_sweep(s, rng)
+    _m2or_baseline(e, rng)
+    m = _script("01_main_tables")
+    out = tmp / "t1shape"
+    longs = m.main(["--dataset", "m2or", "--baselines", "hladis", "--no-ours",
+                    "--sweep-root", str(s), "--ensemble-root", str(e), "--out", str(out)])
+    st = pd.concat(longs)
+    assert not any(str(k).startswith("ours:") for k in st.key), "our rows must be gone"
+    assert "boost" in set(st.key), "the boosting base is the whole point of the table"
+    assert st["p_holm"].isna().all(), "nothing left to test against the best other row"
+    assert (out / "m2or.tex").exists()
+
+
+def test_no_ours_and_ours_can_be_given_in_either_order(m2or):
+    # argparse lets the two flags share a dest; last one on the line wins, and a
+    # reader of the runbook should not have to know which.
+    s, e, tmp = m2or
+    m = _script("01_main_tables")
+    p = m.parser()
+    assert p.parse_args(["--ours", "cls+mol", "--no-ours"]).ours == []
+    assert p.parse_args(["--no-ours", "--ours", "cls+mol"]).ours == ["cls+mol"]

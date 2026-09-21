@@ -370,6 +370,7 @@ reader.
 | molecule ablation (ChemBERTa / GIN / ECFP) | `03_molecule_ablation.py` | sweep **A** with all three `--mol-source`, plus Hladiš from **C** |
 | protein-source floor (`tab:t4`) | `prot_floor_sweep.py` | nothing — it fits its own heads |
 | geometry (RSA / CCA / Procrustes) | `02_geometry_table.py` | sweep **A** + `02a_protein_geometry.py` |
+| construction ablation (criterion × quantile) | `notebooks/article_figures/quantile_criteria.ipynb` (figure, not a table) | sweep **E** |
 
 ### A. The sweep — our graph and the boosting base
 
@@ -543,6 +544,37 @@ what adds a protein source generated after those files were written:
 .venv/bin/python scripts/article_tables/02_geometry_table.py \
     --sweep-root results/graph/v13_esm3 --out results/article_tables/esm3/geometry
 ```
+
+### E. The construction ablation — criterion × quantile
+
+A different knob from the dial: not what the receptor vector is mixed from, but which
+molecules carry the messages at all. `scripts/article_sweeps/` owns it, imports the
+alpha sweep as a module for the folds and the metric battery, and touches none of it.
+
+```bash
+# the producer. Quantiles are FRACTIONS, and the cell the paper reports
+# (greedy_pair_cover at 0.99 on M2OR, coverage at 0 on the insects) must be in the grid
+.venv/bin/python scripts/article_sweeps/run_quantile_criteria.py \
+    --dataset m2or --regime inductive transductive \
+    --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz' \
+    --seeds 42 43 --max-parallel 4 --gpus 0 1 2 3
+
+# the insect panels: their matrices are complete, so the coverage quantile cuts
+# nothing and --k-mode fraction is the knob that moves (the default switches for you)
+.venv/bin/python scripts/article_sweeps/run_quantile_criteria.py \
+    --dataset cc hc --regime inductive transductive \
+    --criteria coverage greedy_pair_cover \
+    --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz' \
+    --seeds 42 43 --max-parallel 4 --gpus 0 1 2 3
+
+# the figures. This sweep is read by eye and there is no text reader for it:
+# quantile_grid.py is the aggregation layer the notebook imports, not a command
+jupyter lab notebooks/article_figures/quantile_criteria.ipynb
+```
+
+Resumable: re-running the same command continues it. See
+`scripts/article_sweeps/README.md` for what `--k-mode` changes and why a failed cell is
+written down rather than dropped.
 
 ---
 

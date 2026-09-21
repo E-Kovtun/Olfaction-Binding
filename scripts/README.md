@@ -22,6 +22,8 @@ Self-contained side directions with their own dependencies live in
 | 2. embeddings | `embedding_generation/` | protein (ESM-2 / ESM-1b / ProtT5 / ESM3) and molecule (ChemBERTa / GIN / ECFP) caches |
 | 3. modeling   | `modeling/`             | train, evaluate, analyse |
 | 4. reading    | `analysis/`             | dashboards over `results/ensemble_logs/` |
+| ablations     | `article_sweeps/`       | runs that exist for the paper's ablations, not for the pipeline |
+| tables        | `article_tables/`       | the readers that assemble the paper's tables |
 
 Number prefixes (`00_`, `01_`, …) record the original global order within a stage.
 
@@ -108,6 +110,20 @@ analysis/
   mechanism_summary.py              reads a mechanism-holdout run: geometry in raw units
                                     AND as z, the paired GNN+ESM vs one-hot comparison,
                                     and the sparse-matrix assay-design check
+
+article_sweeps/
+  run_quantile_criteria.py          the CONSTRUCTION ablation: molecule-ranking
+                                    criterion x coverage quantile, i.e. which
+                                    molecules carry the messages at all. Trains, so
+                                    it wants a GPU; imports run_alpha_gate_sweep as a
+                                    module for the folds, the metric battery and the
+                                    boosting reference, and changes nothing in it
+  quantile_grid.py                  that sweep melted, for the notebook to draw
+                                    (no CLI): curves over the quantile,
+                                    paired deltas, where each criterion peaks and
+                                    whether the peak clears the grid's resolution.
+                                    Delegates every average to alpha_grid, so the
+                                    unit of evidence stays the fold
 
 `setup_envs.sh` creates `.venv-controls` and `.venv-embeddings`. `.venv-molor` and
 `.venv-esm` are set up by hand (see the root README).

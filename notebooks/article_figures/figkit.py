@@ -44,6 +44,70 @@ C = {
     "boost_full": "#6b7280",
     "naive": "#b9bec6",
 }
+#: The construction sweep needs SEVEN categorical hues at once, which the dial palette
+#: above was never sized for. Okabe-Ito (Wong, Nat Methods 2011) is used verbatim minus
+#: its yellow, which fails contrast on a white ground: it is the published
+#: colour-vision-safe qualitative set, so the choice is citable rather than eyeballed.
+#: Each criterion also gets its own MARKER (`CRIT_MARKER`), so identity never rests on
+#: colour alone -- with seven lines on one axis it could not anyway.
+#:
+#: These hues deliberately do NOT overlap in meaning with `C` above: the only encoding
+#: shared between the two figure families is the grey dashed reference arm, which means
+#: the same thing in both.
+CRIT = {
+    "coverage": "#0072B2",            # blue
+    "balance_bits": "#D55E00",        # vermillion
+    "entropy_bits": "#009E73",        # bluish green
+    "disc_pairs": "#CC79A7",          # reddish purple
+    "idf_coverage": "#56B4E9",        # sky blue
+    "composite": "#E69F00",           # orange
+    "greedy_pair_cover": "#000000",   # black -- the criterion the paper reports
+}
+CRIT_MARKER = {"coverage": "o", "balance_bits": "s", "entropy_bits": "^",
+               "disc_pairs": "D", "idf_coverage": "v", "composite": "P",
+               "greedy_pair_cover": "*"}
+
+
+def crit_style(name, highlight=None):
+    """(colour, marker, linewidth, zorder) for one criterion.
+
+    `highlight` dims every other criterion to a neutral grey. Seven hues on one axis
+    is at the edge of what is readable even in a safe palette; when the figure's job
+    is "ours against the rest" rather than "all seven ranked", dimming says that
+    directly and the reader is not asked to hold seven keys at once.
+    """
+    if highlight is None or name == highlight:
+        return (CRIT.get(name, INK), CRIT_MARKER.get(name, "o"),
+                2.4 if name == highlight else 2.0, 3 if name == highlight else 2)
+    return ("#b9bec6", CRIT_MARKER.get(name, "o"), 1.2, 1)
+
+
+def knob_axis(ax, xs, label=None):
+    """An x axis for a knob that is not alpha: ticks only where a point was RUN.
+
+    The quantile grid is deliberately uneven -- coarse low down where nothing moves,
+    dense at the top where K falls off a cliff. Evenly spaced ticks would hide that,
+    and a line drawn through six points looks the same as one through twenty.
+    """
+    xs = sorted(set(float(x) for x in xs))
+    if not xs:
+        return
+    span = (max(xs) - min(xs)) or 1.0
+    pad = 0.03 * span
+    ax.set_xlim(min(xs) - pad, max(xs) + pad)
+    ax.set_xticks(xs)
+    # An uneven grid crowds its own labels where it is densest -- which is exactly
+    # where the interesting end is. Rotate rather than drop: a tick whose label was
+    # silently removed reads as a point that was never run.
+    gaps = [b - a for a, b in zip(xs, xs[1:])]
+    tight = bool(gaps) and min(gaps) < 0.08 * span
+    ax.set_xticklabels([f"{x:g}" for x in xs], fontsize=7.5,
+                       rotation=45 if tight else 0,
+                       ha="right" if tight else "center")
+    if label:
+        ax.set_xlabel(label)
+
+
 #: Reference arms are dashed, so a line is identifiable without colour -- the figures
 #: are read in print and in greyscale at least as often as on screen.
 DASH = {"boost_full": (0, (5, 2)), "graph_legacy": (0, (4, 1.5, 1, 1.5)),

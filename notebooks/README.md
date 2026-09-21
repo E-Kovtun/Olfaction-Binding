@@ -23,11 +23,14 @@ uv run jupyter lab
 
 ```text
 notebooks/
-  article_figures/         the paper's alpha-dial figures: geometry_dial and
-                           prediction_dial over one sweep, sharing figkit.py's visual
-                           contract. They DRAW only -- every mean and interval comes
-                           from scripts/analysis/alpha_grid.py, which averages model
-                           seeds inside each fold and takes the interval over folds
+  article_figures/         the paper's figures: geometry_dial and prediction_dial over
+                           one alpha sweep, and quantile_criteria over the construction
+                           sweep (scripts/article_sweeps/), all sharing figkit.py's
+                           visual contract. They DRAW only -- every mean and interval
+                           comes from scripts/analysis/alpha_grid.py (or, for the
+                           construction sweep, quantile_grid.py, which delegates to
+                           it), which averages seeds inside each fold and takes the
+                           interval over folds
   datasets/                carey_hallem_carlson_overview  -- the dataset description
                            behind the paper's data section
   graph/

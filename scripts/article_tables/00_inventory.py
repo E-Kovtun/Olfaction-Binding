@@ -138,11 +138,22 @@ def figure_cells(a):
 
 def construction_cells(a):
     out = []
+    # The article's own construction sweep (scripts/article_sweeps/), which shares the
+    # alpha sweep's folds and metric battery. The v7 study below predates it: same
+    # question, older seeding protocol, not paired with anything the tables read.
+    art = sorted(tk.resolve("results/article_sweeps/quantile_criteria").glob("metrics_*.csv"))
+    for f in art:
+        out.append(rec("construction", f.stem.split("_")[1], "", "",
+                       "criterion x quantile (article_sweeps)", ("READY", f.name)))
+    if not art:
+        out.append(rec("construction", "", "", "", "criterion x quantile (article_sweeps)",
+                       ("MISSING", "scripts/article_sweeps/run_quantile_criteria.py "
+                                   "output not on this box")))
     v7 = sorted(tk.resolve("results/graph/full_full/v7/protein_based_graph").glob("metrics_*.csv"))
-    out.append(rec("construction", "m2or", "", "", "quantile x criterion sweep (v7)",
+    out.append(rec("construction", "m2or", "", "", "quantile x criterion sweep (v7, superseded)",
                    ("PARTIAL", f"{len(v7)} file(s); older seeding protocol, not paired with "
-                               f"v9_seeded -- rerun for the paper") if v7 else
-                   ("MISSING", "run_quantile_criteria_sweep.py output not on this box")))
+                               f"v9_seeded -- use article_sweeps for the paper") if v7 else
+                   ("MISSING", "the superseded v7 study is not on this box either")))
     alt = sorted(tk.resolve(a.sweep_root).glob("metrics_m2or_*_q0cov_*nodedial.csv"))
     out.append(rec("construction", "m2or", "", "", "q0/coverage variant in the sweep",
                    ("PARTIAL", ", ".join(p.name for p in alt)) if alt else

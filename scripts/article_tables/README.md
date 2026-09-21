@@ -15,6 +15,7 @@ Run from the repo root with `.venv/bin/python`.
 | `02_geometry_table.py` | RSA / CCA / Procrustes vs the functional profile | sweep geometry columns at α + `02a` CSVs |
 | `03_molecule_ablation.py` | graph vs boost vs Hladiš × ChemBERTa / GIN / ECFP (successor of tab:t2m2or/t2cc/t2hc) | sweep + ensemble_logs |
 | `04_compare_runs.py` | two table runs side by side: value, place and what moved | the `main_long.csv` of each run |
+| `05_alpha0_vs_boost.py` | the identity control: our graph at alpha=0 vs boost over ESM and over a one-hot receptor block | sweep + its own cached one-hot heads |
 
 Every table takes `--dataset` from `paper_tables.DATASET_ORDER`, which includes the
 shrunk insect panels (`cc_shrinked`, `hc_shrinked`, `*_shrinked50`). Their graph rows

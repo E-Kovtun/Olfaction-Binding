@@ -5,6 +5,8 @@ once on test. So the tests are about the protocol and not about the arithmetic, 
 belongs to `scripts/analysis/alpha_choice.py` and is tested there:
 
 * a run without validation rows must REFUSE, not fall back to test;
+* WHICH run is being rendered is chosen from outside and required -- no default root,
+  and the output is named after the run, so two runs cannot overwrite each other;
 * the confirmed alpha must be the one validation picked, not the one test likes;
 * `optimism` must be non-negative and must be measured on test;
 * the 1-SE tie set must be marked, because an argmax out of a flat set is noise.
@@ -74,11 +76,50 @@ def run(tmp_path, *extra):
 
 def test_without_validation_it_refuses_rather_than_using_test(tmp_path, capsys):
     """The one failure mode this file exists to prevent: a choice made on test and
-    typeset as if it had been made on validation."""
-    rc, out = run(sweep(tmp_path, with_val=False))
+    typeset as if it had been made on validation. It prints the command that scores
+    THIS root and stops -- it does not score anything itself."""
+    root = sweep(tmp_path, with_val=False)
+    rc, out = run(root)
     assert rc == 1
     assert not (out / "alpha_choice.tex").exists()
-    assert "val_rescore.py" in capsys.readouterr().out
+    printed = capsys.readouterr().out
+    assert "val_rescore.py" in printed
+    assert str(root) in printed
+
+
+# ------------------------------------------------------- which run, chosen outside
+
+def test_the_sweep_root_is_required(capsys):
+    """No default root: the ESM3 grid and an ESM-1b grid are different runs, and a
+    default is how the wrong one gets typeset without anybody noticing."""
+    with pytest.raises(SystemExit):
+        T.parser().parse_args(["--nodes", "nodedial"])
+    assert "--sweep-root" in capsys.readouterr().err
+
+
+def test_the_run_is_the_roots_own_name(tmp_path):
+    assert T.run_name("results/graph/v13_esm3") == "v13_esm3"
+    assert T.run_name("results/graph/v9_seeded/") == "v9_seeded"
+    assert T.run_name(tmp_path / "run_a") != T.run_name(tmp_path / "run_b")
+
+
+def test_the_default_output_is_named_after_the_run(tmp_path, monkeypatch):
+    """Two runs rendered the same day must not land on top of each other, and that is
+    decided by the root's name rather than by whoever typed --out."""
+    root = tmp_path / "v_other"
+    root.mkdir()
+    sweep(root)
+    seen = {}
+
+    def out_dir(path):
+        seen["path"] = str(path)
+        d = tmp_path / "rendered"
+        d.mkdir(exist_ok=True)
+        return d
+
+    monkeypatch.setattr(T.tk, "out_dir", out_dir)
+    assert T.main(["--sweep-root", str(root)]) == 0
+    assert seen["path"] == "results/article_tables/v_other/alpha_choice"
 
 
 def test_the_confirmed_alpha_is_the_one_validation_picked(tmp_path):

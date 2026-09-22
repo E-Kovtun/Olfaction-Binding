@@ -8,8 +8,14 @@ the decision lives in `scripts/analysis/alpha_choice.py` and is imported from th
 the paper's table and the command we actually run can never drift apart. What this adds
 is the rendering -- LaTeX, a CSV per panel, and a text block -- and nothing else.
 
-    .venv/bin/python scripts/article_tables/06_alpha_choice.py \\
+    .venv/bin/python scripts/article_tables/06_alpha_choice.py \
         --sweep-root results/graph/v13_esm3 --nodes nodedial
+
+THE RUN IS AN ARGUMENT, AND IT IS REQUIRED. This table belongs to one sweep root and
+says which: the ESM3 grid and an ESM-1b grid are different runs with different numbers,
+and a default would let the wrong one be typeset without anybody noticing. So
+`--sweep-root` has no default, the output directory is named after the root unless
+`--out` says otherwise, and the root is printed under the table.
 
 THREE TABLES, IN THE ORDER THE ARGUMENT NEEDS THEM
 
@@ -30,9 +36,11 @@ THREE TABLES, IN THE ORDER THE ARGUMENT NEEDS THEM
                lands on the third. A choice that does not survive it is a property of
                the folds rather than of the method.
 
-WHAT THIS SCRIPT WILL NOT DO. It will not read test unless a validation frame exists.
-A sweep whose `val_metrics_*.csv` are missing gets the `val_rescore.py` command printed
-and nothing else -- a "choice" made on test and typeset as if it had been made on
+WHAT THIS SCRIPT WILL NOT DO. It computes nothing -- not the sweep, not the validation
+split. It reads a root and renders it, so what it reports is what that run actually
+produced. And it will not read test unless a validation frame exists: a sweep whose
+`val_metrics_*.csv` are missing gets the `val_rescore.py` command for THAT root printed
+and nothing else. A "choice" made on test and typeset as if it had been made on
 validation is the one failure mode this whole file exists to prevent.
 """
 from __future__ import annotations
@@ -206,10 +214,21 @@ def text(rk, cf, lo, alpha):
 
 # ------------------------------------------------------------------ driver
 
+def run_name(root):
+    """The run a root stands for: its own directory name. `results/graph/v13_esm3` is
+    the run `v13_esm3`, and that is what the output directory is named after, so two
+    runs rendered on the same day cannot land on top of each other."""
+    root = str(root).replace("\\", "/").rstrip("/")
+    return pathlib.Path(root).name or "alpha_choice"
+
+
 def parser():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--sweep-root", default=tk.SWEEP_ROOT)
+    ap.add_argument("--sweep-root", required=True,
+                    help="the sweep root to render, e.g. results/graph/v13_esm3. "
+                         "REQUIRED and deliberately without a default: one run, one "
+                         "table, chosen here rather than assumed")
     ap.add_argument("--nodes", default="nodedial",
                     help="which dial; the two must never share a table")
     ap.add_argument("--mol-source", nargs="+", default=None)
@@ -222,7 +241,10 @@ def parser():
     ap.add_argument("--at-alpha", type=float, default=None,
                     help="confirm THIS alpha instead of the one validation picked "
                          "(for the sensitivity paragraph, not for the table)")
-    ap.add_argument("--out", default="results/article_tables/alpha_choice")
+    ap.add_argument("--out", default=None,
+                    help="default: results/article_tables/<run>/alpha_choice, named "
+                         "after the sweep root, so two runs never overwrite each "
+                         "other's table")
     return ap
 
 
@@ -235,7 +257,7 @@ def main(argv=None):
     except SystemExit as e:
         print(f"no validation rows under {a.sweep_root}: {e}\n\n"
               f"This table cannot be built from test alone -- that is the point of it.\n"
-              f"A sweep made before Sep 2026 gets its val rows from:\n"
+              f"Score the validation split of THIS run, then re-run this script:\n"
               f"    .venv/bin/python scripts/analysis/val_rescore.py "
               f"--root {a.sweep_root}\n")
         return 1
@@ -254,7 +276,8 @@ def main(argv=None):
 
     note = (r"noise-chasing. Among a tied set the dial position to report is the one "
             r"with an argument behind it, not the one with the smallest number.")
-    out = tk.out_dir(a.out)
+    out = tk.out_dir(a.out or f"results/article_tables/{run_name(a.sweep_root)}/"
+                              f"alpha_choice")
     rk.to_csv(out / "alpha_choice_rank.csv", index=False)
     cf.to_csv(out / "alpha_choice_confirm.csv", index=False)
     if len(lo):
@@ -264,7 +287,10 @@ def main(argv=None):
         encoding="utf-8")
     print(text(rk, cf, lo, alpha))
     src = "chosen on validation" if a.at_alpha is None else "asked for on the command line"
-    print(f"\nalpha = {alpha:g} ({src})\nwritten to {out}")
+    print(f"\nalpha = {alpha:g} ({src})"
+          f"\nrun {run_name(a.sweep_root)}, read from {a.sweep_root}, "
+          f"nodes={a.nodes}, combo={a.combo}"
+          f"\nwritten to {out}")
     return 0
 
 

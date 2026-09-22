@@ -372,10 +372,18 @@ reader.
 | geometry (RSA / CCA / Procrustes) | `02_geometry_table.py` | sweep **A** + `02a_protein_geometry.py` |
 | construction ablation (criterion × quantile) | `notebooks/article_figures/quantile_criteria.ipynb` (figure, not a table) | sweep **E** |
 | protein representations + our rows (`tab:protsrc*`) | `07_protein_sources.py` | `prot_floor_sweep.py --gnn` (**F**) |
-| how alpha was chosen (`tab:alphachoice`, `tab:alphaconfirm`) | `06_alpha_choice.py` | sweep **A**, with its `val_metrics_*` |
+| how alpha was chosen (`tab:alphachoice`, `tab:alphaconfirm`) | `06_alpha_choice.py` | sweep **A** of the run you name, with its `val_metrics_*` |
 | identity control (`tab:alpha0`) | `05_alpha0_vs_boost.py` | sweep **A** + `05a_onehot_boost.py` |
 
 ### A. The sweep — our graph and the boosting base
+
+**The run name is the unit of provenance.** `--out results/graph/<run>` is what every
+later command points back at: `v9_seeded` is the ESM-1b grid, `v13_esm3` the ESM3 one,
+and they are different runs with different numbers. Readers take the root as an
+argument and never assume one, so rendering the other grid is the same command with a
+different `--sweep-root` — and `sweep_provenance.py` reads the flags back out of a root
+when shell history is not evidence enough. Start a new run name when the dial flags,
+the protein source or the seed set change; top up the existing one otherwise.
 
 One command per protein source. Both must carry the **same** dial flags or their
 cells are not comparable: `--dial nodes` is the v9 parameterisation (alpha moves the
@@ -530,11 +538,20 @@ difference between a table that is complete and one that merely printed:
 # AND our own graph as three more rows -- see F below for why they are computed there
 .venv/bin/python scripts/modeling/analysis/prot_floor_sweep.py --dataset m2or cc hc
 
-# how alpha was chosen: ranked on validation, then read once on test. It REFUSES
-# to run without val_metrics_* rather than quietly choosing on the rows it reports
+# how alpha was chosen: ranked on validation, then read once on test. It only READS
+# a run, and WHICH run is an argument with no default -- the same command with
+# --sweep-root results/graph/v9_seeded renders the ESM-1b grid instead. Without --out
+# the table lands in results/article_tables/<run>/alpha_choice, named after the root,
+# so two runs never overwrite each other.
 .venv/bin/python scripts/article_tables/06_alpha_choice.py \
-    --sweep-root results/graph/v13_esm3 --nodes nodedial \
-    --out results/article_tables/esm3/alpha_choice
+    --sweep-root results/graph/v13_esm3 --nodes nodedial
+
+# It REFUSES to run without that root's val_metrics_* rather than quietly choosing on
+# the rows it reports. Score them for that root first -- the head is refit on the same
+# train rows with the same seed and asked for the val rows instead: one XGBoost fit per
+# cell, no message passing, no GPU, resumable, and self-checking (it re-predicts test
+# and compares against what the sweep recorded).
+.venv/bin/python scripts/analysis/val_rescore.py --root results/graph/v13_esm3
 
 # the identity control (tab:alpha0): our graph with the receptor's sequence removed,
 # against the boost over ESM and over a one-hot receptor. The 05a half FITS heads --
@@ -566,47 +583,45 @@ what adds a protein source generated after those files were written:
     --sweep-root results/graph/v13_esm3 --out results/article_tables/esm3/geometry
 ```
 
-### F. The protein-representation table — and our rows inside it
+### F. The protein-representation table (`tab:t4`)
 
-One command for the whole table --- `--dataset` and `--regime` take lists. It fits every row: the classical
-amino-acid descriptors, the one-hot controls, each pLM whose npz covers the pool, and
-— with `--gnn` — our own graph, boosted as `[refined receptor ‖ ChemBERTa]`, which is
-our `cls+mol`.
+Two commands: one fits every row of the table, the other renders it. `--dataset` and
+`--regime` take lists, so the whole six-cell table is one invocation.
 
 ```bash
-# the whole table in one go: 3 datasets x 2 regimes, reusing whatever is already
-# fitted. A cell a dataset cannot do is skipped with a note, not a crash.
+# fits: classical amino-acid descriptors, the one-hot controls, each pLM whose npz
+# covers the pool, and -- with --gnn -- our graph, boosted as
+# [refined receptor || ChemBERTa], which is our cls+mol.
+# Five graph seeds, to match the five the main tables average.
 .venv/bin/python scripts/modeling/analysis/prot_floor_sweep.py \
     --dataset m2or cc hc --regime transductive inductive \
-    --gnn esm3@1 esm3@0 prott5@1
+    --gnn esm3@1 esm3@0 prott5@1 --gnn-seeds 42 43 44 45 46
 
-# the table: the metric of record only (the full battery stays in the long CSV)
+# renders: one combined table, a column per cell, the metric of record only
 .venv/bin/python scripts/article_tables/07_protein_sources.py \
     --dataset m2or cc hc --regime transductive inductive
 ```
 
-**Why our rows are fitted HERE and not imported from the sweep.** The refined receptor
-vector is trained on its fold's training pairs. In another fold those same pairs are
-test rows, so a vector lifted from a different run's folds is a leak wearing the
-costume of a cached feature. Training it inside this script's own folds makes the row
-comparable with the descriptor rows above it by construction instead of by inspection.
+**What comes out.** The sweep writes one CSV per (dataset, regime) under
+`results/tables/`, plus a provenance sidecar `prot_floor_<ds>_<regime>.json`. The reader
+writes `results/article_tables/protein_sources/`: `protein_long.csv` (every metric,
+every row), `protein_sources.tex` (the combined table) and the same table as text.
+`--which headline|all` widens the rendered metrics; the long CSV always holds them all.
 
-**It is resumable**, which is the point of running it this way: rows already in the
-CSV are kept and only the missing ones are fitted, so adding `--gnn` to a cell whose
-descriptor and pLM rows are already there costs the graphs and nothing else. What may
-be reused is decided by the sidecar `prot_floor_<ds>_<regime>.json` written beside the
-CSV. A file with no sidecar predates that record and is refused by default: this script
-once folded the insects' val rows into train, so an old CSV can hold boost rows fitted
-on 11–26% more data than every other method in the paper. `--trust-existing` says you
-know the file is newer than that fix; `--force` refits everything.
+**Our rows are fitted here, not imported from the sweep.** The refined receptor vector
+is trained on its fold's training pairs, so a vector lifted from another run's folds is
+a leak, not a cached feature. `name@alpha` names the row: `esm3@1` is the plain graph on
+ESM3 nodes, `esm3@0` is the v9 node dial at zero — receptor identity alone, so there the
+protein file only decides the coverage mask. The edge variant follows the dataset
+(M2OR's hub core, the insects' complete matrix).
 
-`name@alpha` names the row: `esm3@1` is the plain graph on ESM3 nodes, `esm3@0` is the
-v9 node dial at zero — receptor identity and nothing else, so there the protein file
-only decides the coverage mask. The edge variant follows the dataset (M2OR's hub core,
-the insects' complete matrix), the graph seed defaults to one because each seed trains
-a graph, and the boost seeds average inside each fold as everywhere else. A run
-rewrites the whole CSV, so one command produces one complete, internally consistent
-cell.
+**Resuming.** Rows already in the CSV are kept and only the missing ones are fitted, so
+adding `--gnn` to a cell that already has its descriptor and pLM rows costs the graphs
+and nothing else. What may be reused is decided by the sidecar; a CSV without one is
+refused by default, since it may predate the fix that stopped this script folding the
+insects' validation rows into train. `--trust-existing` accepts such a file, `--force`
+refits everything. A cell a dataset cannot do (HC ships no `cold_receptor`) is skipped
+with a note.
 
 ### E. The construction ablation — criterion × quantile
 

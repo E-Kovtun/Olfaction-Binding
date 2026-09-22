@@ -353,42 +353,41 @@ makes the axis mean anything there (`orbind/mol_selection.resolve_K`).
 
 ---
 
-## The runbook: which commands produce which table
+## The runbook: what to run, in order
 
-The sections above explain *why* each run exists. This one is the flat list of
-*what to type*, in the order it has to happen: producers first, then readers. It
-covers the two protein sources we report (ESM-1b and ESM3) and the three molecule
-sources, and nothing else — an experiment not listed here is not in a table.
+The sections above explain *why* each run exists. This one is what to type. It has
+two stages and the order between them is fixed: **stage 1 computes and names things**,
+stage 2 turns those names into tables. Nothing in stage 2 fits a model except where it
+says so; nothing in stage 1 needs a table to exist.
 
 Every command runs from the repo root. Which interpreter matters: `.venv-controls`
-for LORAX/ProSmith, `.venv-molor` for MolOR, `.venv` for Hladiš, the graph and every
-reader.
+for LORAX/ProSmith, `.venv-molor` for MolOR, `.venv` for Hladiš, the graph, the
+fitters and every reader.
 
-| paper table | reader | producers it needs |
-|---|---|---|
-| main head-to-head (all methods × 3 datasets × 2 regimes) | `01_main_tables.py` | sweep **A** + baselines **B** |
-| molecule ablation (ChemBERTa / GIN / ECFP) | `03_molecule_ablation.py` | sweep **A** with all three `--mol-source`, plus Hladiš from **C** |
-| protein-source floor (`tab:t4`) | `prot_floor_sweep.py` | nothing — it fits its own heads |
-| geometry (RSA / CCA / Procrustes) | `02_geometry_table.py` | sweep **A** + `02a_protein_geometry.py` |
-| construction ablation (criterion × quantile) | `notebooks/article_figures/quantile_criteria.ipynb` (figure, not a table) | sweep **E** |
-| protein representations + our rows (`tab:protsrc*`) | `07_protein_sources.py` | `prot_floor_sweep.py --gnn` (**F**) |
-| how alpha was chosen (`tab:alphachoice`, `tab:alphaconfirm`) | `06_alpha_choice.py` | sweep **A** of the run you name, with its `val_metrics_*` |
-| identity control (`tab:alpha0`) | `05_alpha0_vs_boost.py` | sweep **A** + `05a_onehot_boost.py` |
+**The three names you choose, and what they mean.**
 
-### A. The sweep — our graph and the boosting base
+| name | chosen by | what it is | ours |
+|---|---|---|---|
+| `<run>` | `--out results/graph/<run>` (1.1) | one sweep grid = one protein source + one set of dial flags | `v9_seeded` (ESM-1b), `v13_esm3` (ESM3) |
+| `<pool>` | `--out-dir results/ensemble_logs*/<pool>` (1.2) | one (dataset, regime, molecule source, protein source) of baselines | `m2or-transductive-chemberta-esm3`, `cc-ourind-esm3`, … |
+| `--out` | every reader | where a rendered table lands | `results/article_tables/esm3/…` |
 
-**The run name is the unit of provenance.** `--out results/graph/<run>` is what every
-later command points back at: `v9_seeded` is the ESM-1b grid, `v13_esm3` the ESM3 one,
-and they are different runs with different numbers. Readers take the root as an
-argument and never assume one, so rendering the other grid is the same command with a
-different `--sweep-root` — and `sweep_provenance.py` reads the flags back out of a root
-when shell history is not evidence enough. Start a new run name when the dial flags,
-the protein source or the seed set change; top up the existing one otherwise.
+`<run>` and the ensemble root must be a **matched pair**: `v13_esm3` goes with
+`results/ensemble_logs_esm3`, `v9_seeded` with `results/ensemble_logs`. Crossing them
+does not fail — it prints a table that compares a graph on one protein source against
+baselines on another.
 
-One command per protein source. Both must carry the **same** dial flags or their
-cells are not comparable: `--dial nodes` is the v9 parameterisation (alpha moves the
-graph's *input*), and `--seed-graph` removes the initialisation lottery. Turning
-either on or off makes a new series, not more folds of an old one.
+---
+
+### Stage 1 — the producers
+
+#### 1.1 The sweep — our graph and the boosting base
+
+One command per protein source, and the run name is the thing every later command
+points back at. Both commands must carry the **same** dial flags or their cells are not
+comparable: `--dial nodes` is the v9 parameterisation (alpha moves the graph's *input*),
+and `--seed-graph` removes the initialisation lottery. Turning either on or off makes a
+new series, not more folds of an old one.
 
 ```bash
 # ESM-1b -- the tables' default root. Omitting --prot-embeddings selects PROT_SOURCE,
@@ -414,22 +413,41 @@ Quote `'…{ds}.npz'`: the placeholder belongs to the script and an unquoted bra
 belongs to the shell. ESM3's files are named uniformly (`esm3_m2or.npz`,
 `esm3_cc.npz`, `esm3_hc.npz`), so one template covers all three.
 
-The sweep is resumable — it reads what is already in the CSV and fits only the
-missing heads — so the command above is also the command that tops a series up.
-`--alphas 1.0` is the only point the tables read; the wider grid belongs to the dial
-figures.
+`--alphas 1.0` is the only point the main tables read. **The dial artefacts (A3.1,
+A3.2) need the wider grid**, which is the same command with more alphas — a longer run,
+so it is worth starting early:
 
-To check that an existing root was produced the way the tables assume, read the
-flags back out of the CSV rather than trusting shell history:
+```bash
+.venv/bin/python scripts/modeling/train/run_alpha_gate_sweep.py \
+    --dataset m2or cc hc --regime transductive inductive \
+    --mol-source chemberta \
+    --alphas 0 0.05 0.1 0.15 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 1.0 \
+    --dial nodes --seed-graph --seeds 42 43 44 45 46 \
+    --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz' \
+    --out results/graph/v13_esm3 \
+    --max-parallel 4 --gpus 0 1 2 3
+```
+
+The sweep is resumable — it reads what is already in the CSV and fits only the missing
+heads — so the commands above are also the commands that top a series up, and the dense
+grid extends the same root rather than needing its own.
+
+One run writes three files per cell: `metrics_*.csv` (TEST), `val_metrics_*.csv` (the
+same fitted head scored on VALIDATION — the only split alpha may be chosen on) and
+`records_*.csv` (everything, with wall clock and provenance). Runs made before Sep 2026
+have no val file; see 1.4.
+
+To check that an existing root was produced the way the tables assume, read the flags
+back out of the CSV rather than trusting shell history:
 
 ```bash
 .venv/bin/python scripts/analysis/sweep_provenance.py --root results/graph/v13_esm3
 ```
 
-### B. The baselines — LORAX, ProSmith, MolOR, Hladiš
+#### 1.2 The baselines — LORAX, ProSmith, MolOR, Hladiš
 
-Four methods × 3 datasets × 2 regimes. The ESM-1b M2OR form is under **T1 / T1b**
-above; this is its ESM3 counterpart.
+Four methods × 3 datasets × 2 regimes, one pool directory per cell. The ESM-1b M2OR
+form is under **T1 / T1b** above; this is its ESM3 counterpart.
 
 ```bash
 PRES3=data/embeddings/proteins/esm3_per_residue_m2or.npz
@@ -476,11 +494,11 @@ Insects: `--regime ofm --dataset {cc,hc} --split-family {rand,our_inductive}
 bare `cls=lorax` loads its M2OR default, which holds none of these receptors, and the
 run dies with `num_samples=0`.
 
-### C. Molecule-source variation
+#### 1.3 Hladiš on the other molecule sources
 
-Sweep **A** already covers the graph and the base on all three molecule sources. Only
-Hladiš needs extra runs, because its row in the ablation moves with the *boost's*
-molecular half rather than with its own input:
+Sweep 1.1 already covers the graph and the base on all three molecule sources. Only
+Hladiš needs extra runs, because its row in the molecule ablation (A6) moves with the
+*boost's* molecular half rather than with its own input:
 
 ```bash
 for DS in cc hc; do
@@ -507,86 +525,99 @@ done
 `mol=gin:` is the generic entity extractor, not the GIN model: the file decides what
 the embedding is and the third field is provenance only.
 
-### D. The readers
+#### 1.4 The fitters that belong to one table each
 
-Inventory first — it reports READY / PARTIAL / MISSING per input cell, which is the
-difference between a table that is complete and one that merely printed:
+These do not feed the main tables and do not read `<run>`; each is the compute half of
+one supplementary artefact, and each is listed again beside its reader in stage 2. They
+can run while 1.1 is still going.
+
+```bash
+# for A2 (tab:t4): fits every row of the protein-representation table, ours included
+.venv/bin/python scripts/modeling/analysis/prot_floor_sweep.py \
+    --dataset m2or cc hc --regime transductive inductive \
+    --gnn esm3@1 esm3@0 prott5@1 --gnn-seeds 42 43 44 45 46
+
+# for A3.3 (tab:alpha0): the one-hot boosting heads. Pass the SAME protein npz the
+# sweep used -- it decides the coverage mask even though one-hot replaces ESM
+.venv/bin/python scripts/article_tables/05a_onehot_boost.py \
+    --dataset m2or cc hc \
+    --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz'
+
+# for A4.2: the construction sweep, criterion x quantile (see A4.2 for the insects)
+.venv/bin/python scripts/article_sweeps/run_quantile_criteria.py \
+    --dataset m2or --regime inductive transductive \
+    --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz' \
+    --seeds 42 43 --max-parallel 4 --gpus 0 1 2 3
+
+# for A3.2, ONLY for a root made before Sep 2026: score that root's validation split.
+# The head is refit on the same train rows with the same seed and asked for the val
+# rows instead -- one XGBoost fit per cell, no message passing, no GPU, resumable,
+# and self-checking (it re-predicts test and compares against the recorded number)
+.venv/bin/python scripts/analysis/val_rescore.py --root results/graph/v13_esm3
+```
+
+#### 1.5 Before reading anything
+
+Inventory reports READY / PARTIAL / MISSING per input cell, which is the difference
+between a table that is complete and one that merely printed:
 
 ```bash
 .venv/bin/python scripts/article_tables/00_inventory.py \
     --sweep-root results/graph/v13_esm3 --ensemble-root results/ensemble_logs_esm3
 ```
 
+---
+
+### Stage 2 — the tables, in the order they stand in the paper
+
+The order below is the registry's order (`paper/PLAN.md`): the main table first, then
+the supplementary ablations as the argument needs them.
+
+| # | artefact | reader | needs |
+|---|---|---|---|
+| M1 | main battery | `01_main_tables.py` | 1.1 + 1.2 |
+| A1 | baselines as `cls` vs the boosting base | `01_main_tables.py --baseline-combo cls --no-ours` | 1.1 + 1.2 |
+| A2 | protein representations + our rows (`tab:t4`) | `07_protein_sources.py` | 1.4 (`prot_floor_sweep`) |
+| A3.1 | the alpha dial, as a figure | `notebooks/article_figures/prediction_dial.ipynb` | 1.1, dense grid |
+| A3.2 | how alpha was chosen | `06_alpha_choice.py` | 1.1, dense grid + its `val_metrics_*` |
+| A3.3 | identity control (`tab:alpha0`) | `05_alpha0_vs_boost.py` | 1.1 + 1.4 (`05a`) |
+| A4.1 | other graph constructions | — not built | — |
+| A4.2 | criterion × quantile | `notebooks/article_figures/quantile_criteria.ipynb` | 1.4 (`run_quantile_criteria`) |
+| A5 | architecture (SAGE/GAT/GCN) | — not built | — |
+| A6 | molecule ablation | `03_molecule_ablation.py` | 1.1 (all three `--mol-source`) + 1.3 |
+
+#### M1 — the main battery
+
 ```bash
-# main head-to-head, all three datasets, both regimes, one run per protein source
+# one table per dataset, both regimes, one run per protein source
 .venv/bin/python scripts/article_tables/01_main_tables.py --no-val-cut \
     --sweep-root results/graph/v9_seeded --ensemble-root results/ensemble_logs \
     --out results/article_tables/esm1b
 .venv/bin/python scripts/article_tables/01_main_tables.py --no-val-cut \
     --sweep-root results/graph/v13_esm3 --ensemble-root results/ensemble_logs_esm3 \
     --out results/article_tables/esm3
-
-# tab:t1's shape: competitors in their cls form vs the boosting base, no graph
-.venv/bin/python scripts/article_tables/01_main_tables.py --no-val-cut     --dataset m2or --baseline-combo cls --no-ours     --sweep-root results/graph/v13_esm3 --ensemble-root results/ensemble_logs_esm3     --out results/article_tables/esm3/t1
-
-# molecule ablation: ChemBERTa / GIN / ECFP x {graph, base, Hladis}
-.venv/bin/python scripts/article_tables/03_molecule_ablation.py \
-    --sweep-root results/graph/v13_esm3 --ensemble-root results/ensemble_logs_esm3 \
-    --out results/article_tables/esm3/molecule
-
-# protein-source floor: real pLMs vs the classical amino-acid floor vs one-hot,
-# AND our own graph as three more rows -- see F below for why they are computed there
-.venv/bin/python scripts/modeling/analysis/prot_floor_sweep.py --dataset m2or cc hc
-
-# how alpha was chosen: ranked on validation, then read once on test. It only READS
-# a run, and WHICH run is an argument with no default -- the same command with
-# --sweep-root results/graph/v9_seeded renders the ESM-1b grid instead. Without --out
-# the table lands in results/article_tables/<run>/alpha_choice, named after the root,
-# so two runs never overwrite each other.
-.venv/bin/python scripts/article_tables/06_alpha_choice.py \
-    --sweep-root results/graph/v13_esm3 --nodes nodedial
-
-# It REFUSES to run without that root's val_metrics_* rather than quietly choosing on
-# the rows it reports. Score them for that root first -- the head is refit on the same
-# train rows with the same seed and asked for the val rows instead: one XGBoost fit per
-# cell, no message passing, no GPU, resumable, and self-checking (it re-predicts test
-# and compares against what the sweep recorded).
-.venv/bin/python scripts/analysis/val_rescore.py --root results/graph/v13_esm3
-
-# the identity control (tab:alpha0): our graph with the receptor's sequence removed,
-# against the boost over ESM and over a one-hot receptor. The 05a half FITS heads --
-# minutes per fold on M2OR -- and caches; 05 only reads, so it is safe to re-run while
-# tweaking a label. Pass 05a the SAME protein npz the sweep used: it decides the
-# coverage mask even though the one-hot block replaces ESM in the features.
-.venv/bin/python scripts/article_tables/05a_onehot_boost.py \
-    --dataset m2or cc hc \
-    --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz'
-.venv/bin/python scripts/article_tables/05_alpha0_vs_boost.py \
-    --sweep-root results/graph/v13_esm3
-
-# two table runs side by side: value, place, and what moved
-.venv/bin/python scripts/article_tables/04_compare_runs.py \
-    --a results/article_tables/esm1b --a-label ESM-1b \
-    --b results/article_tables/esm3  --b-label ESM3
 ```
 
 `--no-val-cut` drops the extra column whose threshold is chosen on validation and
 leaves the 0.5 cut alone. Give each protein source its own `--out`, or the second run
 overwrites the first and there is nothing left to compare.
 
-Geometry is a separate pair, and `02a` skips a CSV that already exists — `--force` is
-what adds a protein source generated after those files were written:
+#### A1 — every competitor in its `cls` form, against the boosting base
+
+The same reader, told to take each baseline in its own learned pair representation and
+to leave our graph out entirely:
 
 ```bash
-.venv/bin/python scripts/article_tables/02a_protein_geometry.py --dataset cc hc --force
-.venv/bin/python scripts/article_tables/02_geometry_table.py \
-    --sweep-root results/graph/v13_esm3 --out results/article_tables/esm3/geometry
+.venv/bin/python scripts/article_tables/01_main_tables.py --no-val-cut \
+    --dataset m2or --baseline-combo cls --no-ours \
+    --sweep-root results/graph/v13_esm3 --ensemble-root results/ensemble_logs_esm3 \
+    --out results/article_tables/esm3/t1
 ```
 
-### F. The protein-representation table (`tab:t4`)
+#### A2 — the protein-representation table (`tab:t4`)
 
-Two commands: one fits every row of the table, the other renders it. `--dataset` and
-`--regime` take lists, so the whole six-cell table is one invocation.
+Two commands: the fitter from 1.4, then the reader. `--dataset` and `--regime` take
+lists, so the whole six-cell table is one invocation of each.
 
 ```bash
 # fits: classical amino-acid descriptors, the one-hot controls, each pLM whose npz
@@ -602,7 +633,7 @@ Two commands: one fits every row of the table, the other renders it. `--dataset`
     --dataset m2or cc hc --regime transductive inductive
 ```
 
-**What comes out.** The sweep writes one CSV per (dataset, regime) under
+**What comes out.** The fitter writes one CSV per (dataset, regime) under
 `results/tables/`, plus a provenance sidecar `prot_floor_<ds>_<regime>.json`. The reader
 writes `results/article_tables/protein_sources/`: `protein_long.csv` (every metric,
 every row), `protein_sources.tex` (the combined table) and the same table as text.
@@ -623,7 +654,60 @@ insects' validation rows into train. `--trust-existing` accepts such a file, `--
 refits everything. A cell a dataset cannot do (HC ships no `cold_receptor`) is skipped
 with a note.
 
-### E. The construction ablation — criterion × quantile
+#### A3.1 — the alpha dial, as a figure
+
+Read by eye from the dense grid of 1.1; there is no text reader:
+
+```bash
+jupyter lab notebooks/article_figures/prediction_dial.ipynb
+```
+
+#### A3.2 — how alpha was chosen (`tab:alphachoice`, `tab:alphaconfirm`)
+
+Ranked on validation, then read once on test. It only READS a run, and **which** run is
+an argument with no default — the same command with `--sweep-root results/graph/v9_seeded`
+renders the ESM-1b grid instead. Without `--out` the table lands in
+`results/article_tables/<run>/alpha_choice`, named after the root, so two runs never
+overwrite each other.
+
+```bash
+.venv/bin/python scripts/article_tables/06_alpha_choice.py \
+    --sweep-root results/graph/v13_esm3 --nodes nodedial --mol-source chemberta
+```
+
+`--mol-source chemberta` is not cosmetic: the dense dial grid exists only there, so
+without it the mean ranks are averaged over cells holding 13 competitors and cells
+holding 3, which is not one scale. A head the run never fitted is skipped with a note.
+
+**Both boosting heads are rendered, each as its own panel** — `cls+mol` (the
+construction the paper reports, where the refined receptor replaces the protein vector)
+and `cls+prot+mol` (where it is added beside it, so its features are nested in the
+base's). They sit on the same trained graph and can prefer different dial positions;
+`--at-alpha 1` confirms one alpha in both, which is how a single reported alpha is
+defended.
+
+Each panel prints three things: the leader board on validation with the 1-SE tie set,
+the **dial trend** — Spearman between the dial position and the score, computed inside
+each cell and summarised across cells with a one-sample t-test of the null that it is
+zero — and the confirmation on test with `optimism`. A flat dial is a result: it is what
+licenses reporting the end of the scale instead of an argmax.
+
+It refuses to run without that root's `val_metrics_*` rather than quietly choosing on
+the rows it reports. A sweep run from Sep 2026 writes them itself; an older root gets
+them from `val_rescore.py` (1.4), pointed at that same root.
+
+#### A3.3 — the identity control (`tab:alpha0`)
+
+Our graph with the receptor's sequence removed, against the boost over ESM and over a
+one-hot receptor. The `05a` half from 1.4 fits heads — minutes per fold on M2OR — and
+caches; `05` only reads, so it is safe to re-run while tweaking a label.
+
+```bash
+.venv/bin/python scripts/article_tables/05_alpha0_vs_boost.py \
+    --sweep-root results/graph/v13_esm3
+```
+
+#### A4.2 — the construction ablation, criterion × quantile
 
 A different knob from the dial: not what the receptor vector is mixed from, but which
 molecules carry the messages at all. `scripts/article_sweeps/` owns it, imports the
@@ -653,6 +737,36 @@ jupyter lab notebooks/article_figures/quantile_criteria.ipynb
 Resumable: re-running the same command continues it. See
 `scripts/article_sweeps/README.md` for what `--k-mode` changes and why a failed cell is
 written down rather than dropped.
+
+#### A6 — the molecule ablation
+
+ChemBERTa / GIN / ECFP × {graph, base, Hladiš}:
+
+```bash
+.venv/bin/python scripts/article_tables/03_molecule_ablation.py \
+    --sweep-root results/graph/v13_esm3 --ensemble-root results/ensemble_logs_esm3 \
+    --out results/article_tables/esm3/molecule
+```
+
+#### Beside the tables
+
+Two runs side by side — value, place, and what moved between two `main_long.csv`:
+
+```bash
+.venv/bin/python scripts/article_tables/04_compare_runs.py \
+    --a results/article_tables/esm1b --a-label ESM-1b \
+    --b results/article_tables/esm3  --b-label ESM3
+```
+
+The geometry pair is **not in the paper** (the whole geometry line is parked), but it
+still runs, and `02a` skips a CSV that already exists — `--force` is what adds a
+protein source generated after those files were written:
+
+```bash
+.venv/bin/python scripts/article_tables/02a_protein_geometry.py --dataset cc hc --force
+.venv/bin/python scripts/article_tables/02_geometry_table.py \
+    --sweep-root results/graph/v13_esm3 --out results/article_tables/esm3/geometry
+```
 
 ---
 

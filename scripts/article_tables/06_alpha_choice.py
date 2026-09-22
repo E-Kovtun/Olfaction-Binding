@@ -17,7 +17,15 @@ and a default would let the wrong one be typeset without anybody noticing. So
 `--sweep-root` has no default, the output directory is named after the root unless
 `--out` says otherwise, and the root is printed under the table.
 
-THREE TABLES, IN THE ORDER THE ARGUMENT NEEDS THEM
+BOTH HEADS, SIDE BY SIDE. The sweep fits two boosting heads on the SAME trained
+graph: `cls+mol`, where the refined receptor REPLACES the protein vector, and
+`cls+prot+mol`, where it is added beside it. They are two readings of one run, they can
+prefer different dial positions, and a choice defended on one of them while the paper
+reports the other is not a protocol. So every section below is rendered per head, and
+`--at-alpha` confirms one alpha in both -- which is how a single reported alpha is
+defended.
+
+WHAT IT PRINTS, IN THE ORDER THE ARGUMENT NEEDS IT
 
   selection    Every competitor -- each alpha, plus the boosting base and the legacy
                graph -- ranked WITHIN each cell on VALIDATION, the ranks averaged
@@ -32,9 +40,13 @@ THREE TABLES, IN THE ORDER THE ARGUMENT NEEDS THEM
                what choosing on test would have added to the claim silently, and
                printing it is the difference between a protocol and a assertion that
                one was followed.
-  robustness   Leave one dataset out: choose on two panels, report where that alpha
-               lands on the third. A choice that does not survive it is a property of
-               the folds rather than of the method.
+  dial trend   Is the dial a slope at all? Spearman between the dial position and
+               the score, computed INSIDE each cell (the only place alpha and an R2 or
+               an AUROC are commensurable), with the cells as the sample: the mean
+               correlation, its interval over cells, and a one-sample t-test of the
+               null that it is zero. A flat dial is a result -- it is what licenses
+               reporting the end of the scale rather than an argmax -- and this is the
+               number that says so instead of the eye.
 
 WHAT THIS SCRIPT WILL NOT DO. It computes nothing -- not the sweep, not the validation
 split. It reads a root and renders it, so what it reports is what that run actually
@@ -51,6 +63,7 @@ import sys
 
 import numpy as np
 import pandas as pd
+from scipy import stats
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import tablekit as tk  # noqa: E402
@@ -58,6 +71,13 @@ import tablekit as tk  # noqa: E402
 sys.path.insert(0, str(tk.ROOT))
 from scripts.analysis import alpha_choice as ac   # noqa: E402
 from scripts.analysis import alpha_grid as ag     # noqa: E402
+
+#: The boosting heads the sweep fits on one trained graph, rendered as one panel
+#: each. `cls+mol` is the construction the paper reports; `cls+prot+mol` adds the
+#: refined receptor to what the base already reads, so its features are NESTED in the
+#: base's and beating the base there is a much weaker statement.
+COMBOS = ("cls+mol", "cls+prot+mol")
+
 
 #: How a cell is named in a table column narrow enough to typeset.
 def cell_label(row):
@@ -113,14 +133,86 @@ def confirmation(test_df, metric_of, alpha):
     return pd.DataFrame(rows)
 
 
-def robustness(val_df, metric_of):
-    """Leave one dataset out. Empty on a single-panel run, which is not a failure."""
-    return ac.loo(val_df, metric_of, argparse.Namespace())
+def dial_trend(val_df, metric_of):
+    """Is the dial a slope or a flat line? Spearman between alpha and the score.
+
+    Computed WITHIN each cell -- alpha against that cell's own metric, the only place
+    the two are commensurable -- and the cells are then the sample. The headline is the
+    mean correlation across cells with a t interval over them, because the unit of
+    evidence here is the same as everywhere else in this paper: the held-out cell, not
+    the (cell, alpha) pair. A single pooled Spearman over every (cell, alpha) point
+    would treat scores that are ranked against each other inside a cell as independent
+    observations and hand back an interval far too narrow to mean anything.
+
+    Returns (per-cell frame, summary dict). `rho` is against the SCORE, so a positive
+    rho means the metric improves as alpha rises; the correlation against the PLACE in
+    the table is the same number with the opposite sign.
+    """
+    sc = ac.scores(val_df, metric_of)
+    rows = []
+    for key, g in sc.groupby(ac.CELL, sort=True):
+        cell = dict(zip(ac.CELL, key))
+        g = g[g["alpha"].notna()]
+        if g["alpha"].nunique() < 3:
+            continue                      # two dial points cannot show a trend
+        x = g["alpha"].astype(float).to_numpy()
+        y = g["value"].astype(float).to_numpy()
+        rho, p = stats.spearmanr(x, y)
+        if not np.isfinite(rho):
+            continue                      # a cell where every alpha scored the same
+        rows.append(cell | dict(metric=metric_of[cell["dataset"]],
+                                n_alphas=int(g["alpha"].nunique()),
+                                rho=float(rho), p_cell=float(p)))
+    per_cell = pd.DataFrame(rows)
+    if per_cell.empty:
+        return per_cell, {}
+
+    r = per_cell["rho"].to_numpy()
+    mu, hw, n = ag.ci(pd.Series(r))
+    if n > 1:
+        t, p = stats.ttest_1samp(r, 0.0)
+        t, p = float(t), float(p)
+    else:
+        t = p = np.nan
+    lo, hi = mu - hw, mu + hw
+    if not np.isfinite(p):
+        verdict = "one cell only -- no test"
+    elif lo <= 0.0 <= hi:
+        verdict = "indistinguishable from zero"
+    else:
+        verdict = "rises with alpha" if mu > 0 else "falls with alpha"
+    return per_cell, dict(cells=int(n), rho=float(mu), lo=float(lo), hi=float(hi),
+                          t=t, p=p, pos=int((r > 0).sum()), neg=int((r < 0).sum()),
+                          verdict=verdict)
 
 
 # ------------------------------------------------------------------ rendering
 
-def tex_selection(rk, level_note):
+def slug(combo):
+    """A filename and a LaTeX label cannot hold `+`."""
+    return combo.replace("+", "")
+
+
+def trend_sentence(tr):
+    """The Spearman result as one sentence, for a caption or a terminal line."""
+    if not tr:
+        return "The dial has too few positions in these cells to test for a trend."
+    body = (f"Across the {tr['cells']} cells the Spearman correlation between the dial "
+            f"position and the score averages {tr['rho']:+.2f} "
+            f"(95\\% CI {tr['lo']:+.2f} to {tr['hi']:+.2f}, "
+            + ("$t$ and $p$ undefined on one cell"
+               if not np.isfinite(tr["p"]) else
+               f"$t = {tr['t']:.2f}$, $p = {tr['p']:.2f}$")
+            + f"; {tr['pos']} cells positive, {tr['neg']} negative)")
+    tail = {"indistinguishable from zero":
+            " --- indistinguishable from zero, so the dial is a flat line and not a "
+            "slope",
+            "rises with alpha": " --- the score rises along the dial",
+            "falls with alpha": " --- the score falls along the dial"}
+    return body + tail.get(tr["verdict"], "") + "."
+
+
+def tex_selection(rk, level_note, combo, tr):
     body = []
     for _, r in rk.iterrows():
         name = r["competitor"] if not np.isfinite(r["alpha"]) else \
@@ -131,7 +223,8 @@ def tex_selection(rk, level_note):
                     f"{int(r['cells'])} & {int(r['best'])} \\\\")
     return "\n".join([
         r"\begin{table}[!ht]", r"\centering", r"\small",
-        r"\caption{\textbf{Choosing $\alpha$ on validation.} Every competitor --- each "
+        r"\caption{\textbf{Choosing $\alpha$ on validation, head "
+        rf"\texttt{{{combo}}}.}} Every competitor --- each "
         r"dial position, the boosting base and the legacy graph --- is ranked "
         r"\emph{within} each cell (one cell = one row of the main tables: dataset "
         r"$\times$ regime $\times$ molecule source), and the ranks are averaged across "
@@ -140,8 +233,8 @@ def tex_selection(rk, level_note):
         r"first, so a cell's score rests on splits and not on (split, seed) pairs. "
         r"$\dagger$ marks the dial positions within one standard error of the leader: "
         r"they are not distinguishable, and an argmax taken out of that set would be "
-        + level_note + r"}",
-        r"\label{tab:alphachoice}",
+        + level_note + " " + trend_sentence(tr) + "}",
+        rf"\label{{tab:alphachoice-{slug(combo)}}}",
         r"\begin{tabular}{@{}lrrrr@{}}", r"\toprule",
         r"\textbf{Competitor} & \textbf{Mean rank} & \textbf{SE} & "
         r"\textbf{Cells} & \textbf{Firsts} \\", r"\midrule",
@@ -163,7 +256,7 @@ def _cells(r):
             fmt(r["optimism"], "+.3f"))
 
 
-def tex_confirmation(cf, alpha):
+def tex_confirmation(cf, alpha, combo):
     body = []
     for _, r in cf.iterrows():
         val, base, adv, rank, opt = _cells(r)
@@ -171,15 +264,17 @@ def tex_confirmation(cf, alpha):
                     f"{rank} & {opt} \\\\")
     return "\n".join([
         r"\begin{table}[!ht]", r"\centering", r"\small",
-        r"\caption{\textbf{The chosen $\alpha$ read once on test.} "
-        rf"$\alpha = {alpha:g}$ was fixed on validation (Table~\ref{{tab:alphachoice}}) "
+        r"\caption{\textbf{The chosen $\alpha$ read once on test, head "
+        rf"\texttt{{{combo}}}.}} "
+        rf"$\alpha = {alpha:g}$ was fixed on validation "
+        rf"(Table~\ref{{tab:alphachoice-{slug(combo)}}}) "
         r"and is reported here without further tuning. \emph{vs base} is the paired "
         r"difference against the boosting head on the same held-out splits, with the "
         r"number of splits won in brackets. \emph{Optimism} is what choosing on these "
         r"very folds would have added: the gap between the luckiest dial position on "
         r"them and the one validation picked. It is reported so that the protocol is "
         r"auditable rather than asserted.}",
-        r"\label{tab:alphaconfirm}",
+        rf"\label{{tab:alphaconfirm-{slug(combo)}}}",
         r"\resizebox{\textwidth}{!}{%",
         r"\begin{tabular}{@{}ll rr r rr@{}}", r"\toprule",
         r"\textbf{Cell} & \textbf{Metric} & \textbf{Ours} & \textbf{Base} & "
@@ -187,25 +282,50 @@ def tex_confirmation(cf, alpha):
         r"\midrule", *body, r"\bottomrule", r"\end{tabular}}", r"\end{table}"])
 
 
-def text(rk, cf, lo, alpha):
-    out = ["", "=== SELECTION (validation): mean rank across cells, 1 = best",
-           f"{'competitor':<14}{'mean rank':>10}{'SE':>7}{'cells':>7}{'firsts':>8}"
-           f"{'1-SE tie':>10}", "-" * 56]
-    for _, r in rk.iterrows():
-        se = "--" if not np.isfinite(r["se"]) else format(r["se"], ".2f")
-        out.append(f"{r['competitor']:<14}{r['mean_rank']:>10.2f}{se:>7}"
-                   f"{int(r['cells']):>7}{int(r['best']):>8}"
-                   f"{'yes' if r['tied'] else '':>10}")
-    out += ["", f"=== CONFIRMATION (test), alpha = {alpha:g}",
-            f"{'cell':<46}{'metric':>9}{'ours':>8}{'base':>8}{'vs base':>18}"
-            f"{'rank':>12}{'optimism':>10}", "-" * 111]
-    for _, r in cf.iterrows():
-        val, base, adv, rank, opt = _cells(r)
-        out.append(f"{cell_label(r):<46}{r['metric']:>9}{val:>8}{base:>8}"
-                   f"{adv:>18}{rank:>12}{opt:>10}")
-    if len(lo):
-        out += ["", "=== ROBUSTNESS: choose on two panels, look at the third",
-                lo.round(3).to_string(index=False)]
+def text(panels):
+    """Every head, one block per section, so the two are read side by side."""
+    out = ["", "=== SELECTION (validation): mean rank across cells, 1 = best"]
+    for p in panels:
+        out += [f"", f"--- head {p['combo']}",
+                f"{'competitor':<14}{'mean rank':>10}{'SE':>7}{'cells':>7}"
+                f"{'firsts':>8}{'1-SE tie':>10}", "-" * 56]
+        for _, r in p["rk"].iterrows():
+            se = "--" if not np.isfinite(r["se"]) else format(r["se"], ".2f")
+            out.append(f"{r['competitor']:<14}{r['mean_rank']:>10.2f}{se:>7}"
+                       f"{int(r['cells']):>7}{int(r['best']):>8}"
+                       f"{'yes' if r['tied'] else '':>10}")
+
+    out += ["", "=== DIAL TREND (validation): Spearman between alpha and the score,",
+            "    computed inside each cell, the cells being the sample",
+            f"{'head':<16}{'cells':>6}{'mean rho':>10}{'95% CI':>18}{'t':>7}"
+            f"{'p':>8}  {'+/-':>5}  verdict", "-" * 82]
+    for p in panels:
+        tr = p["trend"]
+        if not tr:
+            out.append(f"{p['combo']:<16}{'':>6}{'':>10}{'':>18}{'':>7}{'':>8}  "
+                       f"{'':>5}  too few dial positions")
+            continue
+        ci = f"[{tr['lo']:+.2f}, {tr['hi']:+.2f}]"
+        t = "--" if not np.isfinite(tr["t"]) else format(tr["t"], ".2f")
+        pv = "--" if not np.isfinite(tr["p"]) else format(tr["p"], ".3f")
+        signs = f"{tr['pos']}/{tr['neg']}"
+        out.append(f"{p['combo']:<16}{tr['cells']:>6}{tr['rho']:>+10.2f}{ci:>18}"
+                   f"{t:>7}{pv:>8}  {signs:>5}  {tr['verdict']}")
+    out += ["", "    rho is against the SCORE: positive means the metric improves as "
+            "alpha rises,", "    so the correlation with the PLACE in the table above "
+            "is the same number negated.", "    The per-cell values are in "
+            "alpha_trend_<head>.csv."]
+
+    for p in panels:
+        out += ["", f"=== CONFIRMATION (test), head {p['combo']}, "
+                    f"alpha = {p['alpha']:g}",
+                f"{'cell':<46}{'metric':>9}{'ours':>8}{'base':>8}{'vs base':>18}"
+                f"{'rank':>12}{'optimism':>10}", "-" * 111]
+        for _, r in p["cf"].iterrows():
+            val, base, adv, rank, opt = _cells(r)
+            out.append(f"{cell_label(r):<46}{r['metric']:>9}{val:>8}{base:>8}"
+                       f"{adv:>18}{rank:>12}{opt:>10}")
+
     out += ["", "`optimism` is the gap between the best alpha ON THESE FOLDS and the "
             "one validation", "picked. Quoting the first instead is selection on the "
             "test set."]
@@ -234,13 +354,17 @@ def parser():
     ap.add_argument("--mol-source", nargs="+", default=None)
     ap.add_argument("--dataset", nargs="+", default=None)
     ap.add_argument("--regime", nargs="+", default=None)
-    ap.add_argument("--combo", default="cls+mol")
+    ap.add_argument("--combo", nargs="+", default=list(COMBOS),
+                    help="which boosting head(s) to render, each as its own panel. "
+                         "The sweep fits both on the SAME trained graph, so they are "
+                         "two readings of one run and belong side by side")
     ap.add_argument("--metric", default=None,
                     help="override the metric of record; a choice that moves when the "
                          "metric changes is inside the noise")
     ap.add_argument("--at-alpha", type=float, default=None,
-                    help="confirm THIS alpha instead of the one validation picked "
-                         "(for the sensitivity paragraph, not for the table)")
+                    help="confirm THIS alpha in every head instead of the one each "
+                         "head's validation picked -- which is how a single reported "
+                         "alpha is defended, and what the sensitivity paragraph needs")
     ap.add_argument("--out", default=None,
                     help="default: results/article_tables/<run>/alpha_choice, named "
                          "after the sweep root, so two runs never overwrite each "
@@ -248,48 +372,85 @@ def parser():
     return ap
 
 
-def main(argv=None):
-    a = parser().parse_args(argv)
+def panel(a, combo):
+    """One head: its leader board, its chosen alpha, its confirmation, its trend.
+
+    Returns (status, panel). `ok` with the panel; `absent` when the run simply does not
+    hold this head, which is a fact about the run and not an error; `refused` when it
+    holds it on test but not on validation, which IS an error -- see the docstring.
+    """
     kw = dict(root=a.sweep_root, nodes=a.nodes, mol_source=a.mol_source,
-              dataset=a.dataset, regime=a.regime, combo=a.combo)
+              dataset=a.dataset, regime=a.regime, combo=combo)
+    try:
+        test = ag.load(split="test", **kw)
+    except SystemExit:
+        print(f"head {combo}: not in this run, skipping")
+        return "absent", None
+    # a run that never fitted this head still answers with the reference arms, which
+    # are head-independent. No dial arm on TEST is therefore "this head is not here",
+    # while a dial arm on test and none on validation is the refusal case below.
+    if not test["alpha"].notna().any():
+        print(f"head {combo}: not in this run, skipping")
+        return "absent", None
     try:
         val = ag.load(split="val", **kw)
     except SystemExit as e:
-        print(f"no validation rows under {a.sweep_root}: {e}\n\n"
+        print(f"no validation rows for head {combo} under {a.sweep_root}: {e}\n\n"
               f"This table cannot be built from test alone -- that is the point of it.\n"
               f"Score the validation split of THIS run, then re-run this script:\n"
               f"    .venv/bin/python scripts/analysis/val_rescore.py "
               f"--root {a.sweep_root}\n")
-        return 1
-    test = ag.load(split="test", **kw)
+        return "refused", None
 
     metric_of = ac._metric_of(val, argparse.Namespace(metric=a.metric))
     rk = selection(val, metric_of)
     gate = rk[rk.alpha.notna()]
     if gate.empty:
-        print("the validation frame holds no dial arm -- nothing to choose between")
-        return 1
+        print(f"head {combo}: the validation frame holds no dial arm -- nothing to "
+              f"choose between")
+        return "refused", None
     alpha = a.at_alpha if a.at_alpha is not None else float(gate.iloc[0]["alpha"])
     cf = confirmation(test, ac._metric_of(test, argparse.Namespace(metric=a.metric)),
                       alpha)
-    lo = robustness(val, metric_of)
+    per_cell, tr = dial_trend(val, metric_of)
+    return "ok", dict(combo=combo, rk=rk, cf=cf, alpha=alpha, trend=tr,
+                      per_cell=per_cell)
+
+
+def main(argv=None):
+    a = parser().parse_args(argv)
+    panels, refused = [], False
+    for combo in a.combo:
+        status, p = panel(a, combo)
+        refused |= status == "refused"
+        if p is not None:
+            panels.append(p)
+    # a head this run never fitted is not a failure; a head whose validation is missing
+    # is, and it must not be papered over by the other head having rendered
+    if refused or not panels:
+        return 1
 
     note = (r"noise-chasing. Among a tied set the dial position to report is the one "
             r"with an argument behind it, not the one with the smallest number.")
     out = tk.out_dir(a.out or f"results/article_tables/{run_name(a.sweep_root)}/"
                               f"alpha_choice")
-    rk.to_csv(out / "alpha_choice_rank.csv", index=False)
-    cf.to_csv(out / "alpha_choice_confirm.csv", index=False)
-    if len(lo):
-        lo.to_csv(out / "alpha_choice_loo.csv", index=False)
-    (out / "alpha_choice.tex").write_text(
-        tex_selection(rk, note) + "\n\n" + tex_confirmation(cf, alpha) + "\n",
-        encoding="utf-8")
-    print(text(rk, cf, lo, alpha))
+    tex = []
+    for p in panels:
+        tag = slug(p["combo"])
+        p["rk"].to_csv(out / f"alpha_choice_rank_{tag}.csv", index=False)
+        p["cf"].to_csv(out / f"alpha_choice_confirm_{tag}.csv", index=False)
+        if len(p["per_cell"]):
+            p["per_cell"].to_csv(out / f"alpha_trend_{tag}.csv", index=False)
+        tex += [tex_selection(p["rk"], note, p["combo"], p["trend"]),
+                tex_confirmation(p["cf"], p["alpha"], p["combo"])]
+    (out / "alpha_choice.tex").write_text("\n\n".join(tex) + "\n", encoding="utf-8")
+    print(text(panels))
+
     src = "chosen on validation" if a.at_alpha is None else "asked for on the command line"
-    print(f"\nalpha = {alpha:g} ({src})"
+    chosen = ", ".join(f"{p['combo']}: {p['alpha']:g}" for p in panels)
+    print(f"\nalpha per head ({src}) -- {chosen}"
           f"\nrun {run_name(a.sweep_root)}, read from {a.sweep_root}, "
-          f"nodes={a.nodes}, combo={a.combo}"
+          f"nodes={a.nodes}"
           f"\nwritten to {out}")
     return 0
 

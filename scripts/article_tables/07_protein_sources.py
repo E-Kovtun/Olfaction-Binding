@@ -149,66 +149,137 @@ def best_of(t, metric):
     return int(v.idxmin() if metric in ag.LOWER_IS_BETTER else v.idxmax())
 
 
-# ------------------------------------------------------------------ rendering
+# ------------------------------------------------------------------ the wide shape
 
-def num(t, i, m, nd=3):
-    v, hw = t.loc[i, m], t.loc[i, f"{m}_hw"]
+def combine(cells, metric_of):
+    """Every cell side by side: one row per representation, one column per cell.
+
+    `cells` is [(dataset, regime, per-cell table)]. The join is OUTER on the
+    representation name -- a row that only one panel has (a pLM whose npz covers one
+    dataset and not another) stays visible with `--` elsewhere, because "not fitted
+    here" and "fitted and bad" are different statements.
+
+    Row order: family first (ours, pLMs, the classical floor, the controls), then the
+    MEAN RANK across the cells that have the row. Sorting by a value would mean
+    sorting by whichever panel happens to come first, and AUROC and R2 are not
+    comparable anyway; ranks are.
+    """
+    wide, families, labels, dims, ranks = {}, {}, {}, {}, {}
+    for ds, reg, t in cells:
+        m = metric_of[ds]
+        col = (ds, reg, m)
+        order = t[m].rank(ascending=m in ag.LOWER_IS_BETTER, method="average")
+        for i, r in t.iterrows():
+            name = r["prot"]
+            wide.setdefault(name, {})[col] = (r[m], r[f"{m}_hw"])
+            families[name] = r["family"]
+            labels[name] = r["label"]
+            dims.setdefault(name, r["pdim"])
+            ranks.setdefault(name, []).append(float(order.loc[i]))
+    cols = [(ds, reg, metric_of[ds]) for ds, reg, _ in cells]
+    rows = sorted(wide, key=lambda n: (FAMILY_ORDER.index(families[n]),
+                                       float(np.mean(ranks[n]))))
+    return rows, cols, wide, families, labels, dims, ranks
+
+
+def best_in_column(rows, col, wide):
+    """The winning row of one column, direction-aware -- RMSE and MAE win by being
+    small, and a table that bolded their maximum would advertise the worst row."""
+    have = [(wide[n][col][0], n) for n in rows
+            if col in wide[n] and np.isfinite(wide[n][col][0])]
+    if not have:
+        return None
+    return (min if col[2] in ag.LOWER_IS_BETTER else max)(have)[1]
+
+
+def fmt(cellv, nd=3):
+    if cellv is None:
+        return "--"
+    v, hw = cellv
     if not np.isfinite(v):
         return "--"
     return f"{v:.{nd}f}" + ("" if not np.isfinite(hw) else f"+/-{hw:.{nd}f}")
 
 
-def text(t, metrics, title):
-    w = max(len(str(x)) for x in t["label"]) + 2
-    head = f"{'representation':<{w}}{'dim':>7}  " + "".join(f"{m:>18}" for m in metrics)
-    lines = ["", title, "=" * len(head), head, "-" * len(head)]
-    best = {m: best_of(t, m) for m in metrics}
+# ------------------------------------------------------------------ rendering
+
+#: Compact names for a header that has to fit six times across a terminal.
+SHORT_DS = {"m2or": "M2OR", "cc": "Carey", "hc": "Hallem"}
+SHORT_REG = {"transductive": "trans", "inductive": "cold mol",
+             "cold_receptor": "cold rec"}
+
+
+def head_label(ds, reg, m):
+    """(top line, second line) for one column: what the panel is, and its metric."""
+    return (f"{SHORT_DS.get(ds, ds)}/{SHORT_REG.get(reg, reg)}", m)
+
+
+def text(rows, cols, wide, families, labels, dims, ranks):
+    w = max(len(labels[n]) for n in rows) + 2
+    heads = [head_label(*c) for c in cols]
+    cw = 18
+    pre = f"{'representation':<{w}}{'dim':>6}{'rank':>7}  "
+    line = pre + "".join(f"{top:>{cw}}" for top, _ in heads)
+    # two header rows: the panel above, its metric below. One row would either
+    # repeat 'AUROC' six times or need columns nobody can line up by eye.
+    out = ["", "=" * len(line), line,
+           " " * len(pre) + "".join(f"{m:>{cw}}" for _, m in heads),
+           "-" * len(line)]
+    best = {c: best_in_column(rows, c, wide) for c in cols}
     last = None
-    for i, r in t.iterrows():
-        if r["family"] != last:
-            lines.append(f"-- {FAMILY_LABEL[r['family']]}")
-            last = r["family"]
-        cells = "".join(f"{num(t, i, m) + ('*' if best[m] == i else ' '):>18}"
-                        for m in metrics)
-        lines.append(f"{r['label']:<{w}}{r['pdim']:>7}  {cells}")
-    lines.append("")
-    lines.append("* = best in column. mean +/- 95% CI over folds; seeds (boost and "
-                 "graph) averaged inside each fold first.")
-    return "\n".join(lines)
+    for n in rows:
+        if families[n] != last:
+            out.append(f"-- {FAMILY_LABEL[families[n]]}")
+            last = families[n]
+        cells = "".join(f"{fmt(wide[n].get(c)) + ('*' if best[c] == n else ' '):>{cw}}"
+                        for c in cols)
+        out.append(f"{labels[n]:<{w}}{dims[n]:>6}{np.mean(ranks[n]):>7.1f}  {cells}")
+    out += ["", "* = best in column. mean +/- 95% CI over folds; seeds (boost and "
+            "graph) averaged inside each fold first.",
+            "rank = mean place within a column, averaged over the columns the row "
+            "appears in (smaller is better)."]
+    return "\n".join(out)
 
 
-def latex(t, metrics, dataset, regime):
+def latex(rows, cols, wide, families, labels, dims, ranks):
+    best = {c: best_in_column(rows, c, wide) for c in cols}
     body, last = [], None
-    best = {m: best_of(t, m) for m in metrics}
-    for i, r in t.iterrows():
-        if r["family"] != last:
-            body.append(r"\addlinespace" if last is not None else "")
-            body.append(rf"\multicolumn{{{len(metrics) + 2}}}{{@{{}}l}}"
-                        rf"{{\emph{{{FAMILY_LABEL[r['family']]}}}}} \\")
-            last = r["family"]
+    for n in rows:
+        if families[n] != last:
+            if last is not None:
+                body.append(r"\addlinespace")
+            body.append(rf"\multicolumn{{{len(cols) + 3}}}{{@{{}}l}}"
+                        rf"{{\emph{{{FAMILY_LABEL[families[n]]}}}}} \\")
+            last = families[n]
         cells = []
-        for m in metrics:
-            s = num(t, i, m).replace("+/-", r"$\pm$")
-            cells.append(rf"\textbf{{{s}}}" if best[m] == i else s)
-        body.append(f"{r['label']} & {r['pdim']} & " + " & ".join(cells) + r" \\")
+        for c in cols:
+            v = fmt(wide[n].get(c)).replace("+/-", r"$\pm$")
+            cells.append(rf"\textbf{{{v}}}" if best[c] == n else v)
+        body.append(f"{labels[n]} & {dims[n]} & {np.mean(ranks[n]):.1f} & "
+                    + " & ".join(cells) + r" \\")
+    heads = " & ".join(rf"\textbf{{{tk.DATASET_LABEL.get(ds, ds)}}}" for ds, _, _ in cols)
+    sub = " & ".join(rf"{reg.replace('_', ' ')} ({m})" for _, reg, m in cols)
     return "\n".join([
         r"\begin{table}[!ht]", r"\centering", r"\small",
         r"\caption{\textbf{What the receptor side has to be.} The same boosting head "
-        r"over $[\text{receptor representation}\,\|\,\text{ChemBERTa}]$ on "
-        rf"{tk.DATASET_LABEL.get(dataset, dataset)}, {regime}, identical folds "
-        r"throughout. \emph{Our graph} rows are the refined receptor vector beside the "
-        r"molecule --- our \texttt{cls+mol} --- trained inside these same folds rather "
-        r"than imported, since a representation fitted on one fold's training pairs "
-        r"is not a fixed feature elsewhere. \emph{identity nodes} is the node dial at "
-        r"zero: the graph is told who the receptor is and nothing about its sequence. "
-        r"5 held-out splits, mean $\pm$ 95\% CI over splits, seeds averaged inside "
-        r"each split first. \textbf{Bold} = best in column.}",
-        rf"\label{{tab:protsrc{dataset}{regime[:4]}}}",
-        r"\begin{tabular}{@{}lr" + "r" * len(metrics) + r"@{}}", r"\toprule",
-        r"\textbf{Receptor representation} & \textbf{dim} & "
-        + " & ".join(rf"\textbf{{{m}}}" for m in metrics) + r" \\",
-        r"\midrule", *[b for b in body if b != ""],
-        r"\bottomrule", r"\end{tabular}", r"\end{table}"])
+        r"over $[\text{receptor representation}\,\|\,\text{ChemBERTa}]$ in every "
+        r"column; only the receptor block changes. \emph{Our graph} rows are the "
+        r"refined receptor vector beside the molecule --- our \texttt{cls+mol} --- "
+        r"trained inside each column's own folds rather than imported, since a "
+        r"representation fitted on one fold's training pairs is not a fixed feature "
+        r"elsewhere. \emph{identity nodes} is the node dial at zero: the graph is told "
+        r"who the receptor is and nothing about its sequence. Each column reports that "
+        r"panel's metric of record, 5 held-out splits, mean $\pm$ 95\% CI over splits, "
+        r"seeds averaged inside each split first. \emph{rank} is the mean place within "
+        r"a column, averaged over columns. \textbf{Bold} = best in column, "
+        r"\texttt{--} = not fitted in that cell.}",
+        r"\label{tab:protsrc}",
+        r"\resizebox{\textwidth}{!}{%",
+        r"\begin{tabular}{@{}lrr" + "r" * len(cols) + r"@{}}", r"\toprule",
+        r"\textbf{Receptor representation} & \textbf{dim} & \textbf{rank} & "
+        + heads + r" \\",
+        r" & & & " + sub + r" \\", r"\midrule", *body,
+        r"\bottomrule", r"\end{tabular}}", r"\end{table}"])
 
 
 # ------------------------------------------------------------------ driver
@@ -233,7 +304,8 @@ def parser():
 def main(argv=None):
     a = parser().parse_args(argv)
     out = tk.out_dir(a.out)
-    longs, tex, missing, no_gnn = [], [], [], []
+    longs, panels, missing, no_gnn = [], [], [], []
+    metric_of = {}
     for ds in a.dataset:
         for reg in a.regime:
             df = load(a.root, ds, reg)
@@ -247,9 +319,13 @@ def main(argv=None):
             t = cell_table(df, ds, metrics, a.level)
             if not (t.family == "ours").any():
                 no_gnn.append((ds, reg))
-            print(text(t, metrics, f"{tk.DATASET_LABEL.get(ds, ds)} / {reg}"))
-            tex.append(latex(t, metrics, ds, reg))
             longs.append(t.assign(dataset=ds, regime=reg))
+            for m in metrics:
+                # one column per (cell, metric): with --which primary that is one
+                # column per cell, which is the table the paper prints
+                metric_of[(ds, m)] = m
+                panels.append((ds, reg, t[["prot", "family", "label", "pdim",
+                                           m, f"{m}_hw"]], m))
 
     if missing:
         cells = ", ".join(f"{d}/{r}" for d, r in missing)
@@ -264,9 +340,14 @@ def main(argv=None):
               f"--dataset <ds> --regime <regime> --gnn esm3@1 esm3@0 prott5@1\n")
     if not longs:
         return 1
+    packed = [(ds, reg, t) for ds, reg, t, _ in panels]
+    mof = {ds: m for ds, _, _, m in panels}
+    rows, cols, wide, fam, lab, dims, ranks = combine(packed, mof)
+    print(text(rows, cols, wide, fam, lab, dims, ranks))
     pd.concat(longs, ignore_index=True).to_csv(out / "protein_long.csv", index=False)
-    (out / "protein_sources.tex").write_text("\n\n".join(tex) + "\n", encoding="utf-8")
-    print(f"written to {out}")
+    (out / "protein_sources.tex").write_text(
+        latex(rows, cols, wide, fam, lab, dims, ranks) + "\n", encoding="utf-8")
+    print(f"\nwritten to {out}")
     return 0
 
 

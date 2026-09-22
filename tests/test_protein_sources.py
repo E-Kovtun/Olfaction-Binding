@@ -122,16 +122,23 @@ def test_a_missing_cell_is_a_note_not_a_crash(tmp_path, capsys):
     assert "nothing on disk" in capsys.readouterr().out
 
 
-def test_latex_bolds_and_labels(tmp_path):
+def test_the_table_is_one_combined_table_not_a_stack_of_panels(tmp_path):
+    """Six panels down the page is not a table. One row per representation, one
+    column per cell -- and a row missing from a cell reads `--` there rather than
+    splitting into two tables."""
     d = tmp_path / "tables"
     d.mkdir()
     frame().to_csv(d / "prot_floor_m2or_inductive.csv", index=False)
-    T.main(["--dataset", "m2or", "--regime", "inductive", "--root", str(d),
-            "--out", str(tmp_path / "out")])
+    frame(with_gnn=False).to_csv(d / "prot_floor_m2or_transductive.csv", index=False)
+    T.main(["--dataset", "m2or", "--regime", "inductive", "transductive",
+            "--root", str(d), "--out", str(tmp_path / "out")])
     tex = (tmp_path / "out" / "protein_sources.tex").read_text(encoding="utf-8")
-    assert r"\label{tab:protsrcm2orindu}" in tex
-    assert r"\textbf{" in tex
-    assert "identity nodes" in tex
+    assert tex.count(r"\begin{table}") == 1
+    assert r"\label{tab:protsrc}" in tex
+    assert r"\textbf{" in tex and "identity nodes" in tex
+    # our rows exist only in the inductive cell of this fixture
+    ours = [l for l in tex.splitlines() if l.startswith("ours, ESM3 nodes")][0]
+    assert ours.count("--") == 1
 
 
 # ----------------------------------------------------------------- the compute half

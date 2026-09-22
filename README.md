@@ -371,6 +371,9 @@ reader.
 | protein-source floor (`tab:t4`) | `prot_floor_sweep.py` | nothing — it fits its own heads |
 | geometry (RSA / CCA / Procrustes) | `02_geometry_table.py` | sweep **A** + `02a_protein_geometry.py` |
 | construction ablation (criterion × quantile) | `notebooks/article_figures/quantile_criteria.ipynb` (figure, not a table) | sweep **E** |
+| protein representations + our rows (`tab:protsrc*`) | `07_protein_sources.py` | `prot_floor_sweep.py --gnn` (**F**) |
+| how alpha was chosen (`tab:alphachoice`, `tab:alphaconfirm`) | `06_alpha_choice.py` | sweep **A**, with its `val_metrics_*` |
+| identity control (`tab:alpha0`) | `05_alpha0_vs_boost.py` | sweep **A** + `05a_onehot_boost.py` |
 
 ### A. The sweep — our graph and the boosting base
 
@@ -523,8 +526,26 @@ difference between a table that is complete and one that merely printed:
     --sweep-root results/graph/v13_esm3 --ensemble-root results/ensemble_logs_esm3 \
     --out results/article_tables/esm3/molecule
 
-# protein-source floor (tab:t4): real pLMs vs the classical amino-acid floor
+# protein-source floor: real pLMs vs the classical amino-acid floor vs one-hot,
+# AND our own graph as three more rows -- see F below for why they are computed there
 .venv/bin/python scripts/modeling/analysis/prot_floor_sweep.py --dataset m2or cc hc
+
+# how alpha was chosen: ranked on validation, then read once on test. It REFUSES
+# to run without val_metrics_* rather than quietly choosing on the rows it reports
+.venv/bin/python scripts/article_tables/06_alpha_choice.py \
+    --sweep-root results/graph/v13_esm3 --nodes nodedial \
+    --out results/article_tables/esm3/alpha_choice
+
+# the identity control (tab:alpha0): our graph with the receptor's sequence removed,
+# against the boost over ESM and over a one-hot receptor. The 05a half FITS heads --
+# minutes per fold on M2OR -- and caches; 05 only reads, so it is safe to re-run while
+# tweaking a label. Pass 05a the SAME protein npz the sweep used: it decides the
+# coverage mask even though the one-hot block replaces ESM in the features.
+.venv/bin/python scripts/article_tables/05a_onehot_boost.py \
+    --dataset m2or cc hc \
+    --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz'
+.venv/bin/python scripts/article_tables/05_alpha0_vs_boost.py \
+    --sweep-root results/graph/v13_esm3
 
 # two table runs side by side: value, place, and what moved
 .venv/bin/python scripts/article_tables/04_compare_runs.py \
@@ -544,6 +565,44 @@ what adds a protein source generated after those files were written:
 .venv/bin/python scripts/article_tables/02_geometry_table.py \
     --sweep-root results/graph/v13_esm3 --out results/article_tables/esm3/geometry
 ```
+
+### F. The protein-representation table — and our rows inside it
+
+One command per (dataset, regime). It fits every row of the table: the classical
+amino-acid descriptors, the one-hot controls, each pLM whose npz covers the pool, and
+— with `--gnn` — our own graph, boosted as `[refined receptor ‖ ChemBERTa]`, which is
+our `cls+mol`.
+
+```bash
+.venv/bin/python scripts/modeling/analysis/prot_floor_sweep.py \
+    --dataset m2or --regime transductive \
+    --gnn esm3@1 esm3@0 prott5@1
+.venv/bin/python scripts/article_tables/07_protein_sources.py \
+    --dataset m2or --regime transductive inductive
+```
+
+**Why our rows are fitted HERE and not imported from the sweep.** The refined receptor
+vector is trained on its fold's training pairs. In another fold those same pairs are
+test rows, so a vector lifted from a different run's folds is a leak wearing the
+costume of a cached feature. Training it inside this script's own folds makes the row
+comparable with the descriptor rows above it by construction instead of by inspection.
+
+**It is resumable**, which is the point of running it this way: rows already in the
+CSV are kept and only the missing ones are fitted, so adding `--gnn` to a cell whose
+descriptor and pLM rows are already there costs the graphs and nothing else. What may
+be reused is decided by the sidecar `prot_floor_<ds>_<regime>.json` written beside the
+CSV. A file with no sidecar predates that record and is refused by default: this script
+once folded the insects' val rows into train, so an old CSV can hold boost rows fitted
+on 11–26% more data than every other method in the paper. `--trust-existing` says you
+know the file is newer than that fix; `--force` refits everything.
+
+`name@alpha` names the row: `esm3@1` is the plain graph on ESM3 nodes, `esm3@0` is the
+v9 node dial at zero — receptor identity and nothing else, so there the protein file
+only decides the coverage mask. The edge variant follows the dataset (M2OR's hub core,
+the insects' complete matrix), the graph seed defaults to one because each seed trains
+a graph, and the boost seeds average inside each fold as everywhere else. A run
+rewrites the whole CSV, so one command produces one complete, internally consistent
+cell.
 
 ### E. The construction ablation — criterion × quantile
 

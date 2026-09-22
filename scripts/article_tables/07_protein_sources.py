@@ -4,7 +4,9 @@
 Rows, in the order the argument needs them: our graph first (the refined receptor,
 boosted as `cls+mol`), then real protein language models, then the classical
 amino-acid floor, then the controls -- one-hot identity, one-hot without a molecule,
-molecule alone. One column per metric, one panel per (dataset, regime).
+molecule alone. One panel per (dataset, regime), and by default ONE column: the
+metric of record. Six panels times a four-metric battery is a table nobody reads
+across, and the battery is in the long CSV either way (`--which headline|all`).
 
 The claim the table is built to support: our method makes a receptor representation
 ADAPTED TO BINDING, while a pretrained protein embedding -- however large the model
@@ -95,10 +97,18 @@ def load(root, dataset, regime):
 def metrics_of(df, dataset, which):
     """The metric columns this cell carries, in the repository's canonical order.
 
+    `which="primary"` is the default and the one the paper's table uses: the metric of
+    record alone (AUROC on the binary pool, R2 on the continuous panels). Six panels
+    times four columns is a table nobody reads across; the rest of the battery lives in
+    the long CSV, where deciding later is free.
+
     `alpha_grid.metrics_available` selects on a `dataset` COLUMN, which a prot_floor
     CSV does not have -- the dataset is in its filename. Adding it here keeps one
     definition of "which metrics does this task emit" instead of a second copy.
     """
+    if which == "primary":
+        m = ag.OF_RECORD[ag.TASK[dataset]]
+        return [m] if m in df.columns else []
     want = ag.metrics_available(df.assign(dataset=dataset), dataset=dataset,
                                 which=which)
     return [m for m in want if m in df.columns]
@@ -209,7 +219,10 @@ def parser():
     ap.add_argument("--dataset", nargs="+", default=["m2or"],
                     choices=["m2or", "cc", "hc"])
     ap.add_argument("--regime", nargs="+", default=["transductive", "inductive"])
-    ap.add_argument("--which", default="headline", choices=["headline", "all"])
+    ap.add_argument("--which", default="primary",
+                    choices=["primary", "headline", "all"],
+                    help="primary = the metric of record only, which is what the "
+                         "paper's table shows; the full battery is in the long CSV")
     ap.add_argument("--level", type=float, default=0.95)
     ap.add_argument("--root", default="results/tables",
                     help="where prot_floor_sweep.py wrote its CSVs")

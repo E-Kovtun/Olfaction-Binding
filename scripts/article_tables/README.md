@@ -18,7 +18,7 @@ Run from the repo root with `.venv/bin/python`.
 | `05a_onehot_boost.py` | (compute) the boosting head over [one-hot receptor ‖ molecule] — the row no sweep writes | the sweep's own fold prep, `fit_boost` and metric battery |
 | `05_alpha0_vs_boost.py` | the identity control: our graph at alpha=0 vs boost over ESM and vs the one-hot boost | sweep + `05a`'s CSVs |
 | `06_alpha_choice.py` | how alpha was chosen: mean rank on validation + the chosen alpha read once on test, with the optimism avoided | the sweep's `val_metrics_*` AND `metrics_*` |
-| `07_protein_sources.py` | what the receptor side has to be: our graph, pLMs, the classical floor and the one-hot controls under one head | `prot_floor_sweep.py --gnn` CSVs under `results/tables/` |
+| `07_protein_sources.py` | what the receptor side has to be: our graph, pLMs, the classical floor and the one-hot controls under one head; metric of record only by default | `prot_floor_sweep.py --gnn` CSVs under `results/tables/` |
 
 Every table takes `--dataset` from `paper_tables.DATASET_ORDER`, which includes the
 shrunk insect panels (`cc_shrinked`, `hc_shrinked`, `*_shrinked50`). Their graph rows

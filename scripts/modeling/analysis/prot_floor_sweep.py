@@ -425,10 +425,16 @@ def write_sidecar(out, args, rows):
                                         encoding="utf-8")
 
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--dataset", default="m2or", choices=sorted(DATASETS))
-    ap.add_argument("--regime", default="transductive",
+def parser():
+    ap = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    # Lists, not single values: the table is six cells and they must be fitted the
+    # same way. A cell a dataset cannot do (HC ships no cold_receptor) is skipped with
+    # a note rather than killing the run.
+    ap.add_argument("--dataset", nargs="+", default=["m2or", "cc", "hc"],
+                    choices=sorted(DATASETS))
+    ap.add_argument("--regime", nargs="+", default=["transductive", "inductive"],
                     choices=["transductive", "inductive", "cold_receptor"])
     ap.add_argument("--folds", type=int, nargs="+", default=[1, 2, 3, 4, 5])
     # The boost's own seed (subsample/colsample draws), NOT the split: the main
@@ -458,14 +464,18 @@ def main():
     ap.add_argument("--gnn-n-models", type=int, default=1)
     ap.add_argument("--out", default=None,
                     help="default: results/tables/prot_floor_<dataset>_<regime>.csv")
-    args = ap.parse_args()
+    return ap
 
-    cfg = DATASETS[args.dataset]
+
+def run_cell(args, dataset, regime):
+    """One (dataset, regime) cell, end to end. Returns the CSV it wrote, or None."""
+
+    cfg = DATASETS[dataset]
     task = cfg["task"]; primary = cfg["primary"]
     metric_fn = D.METRICS[task]
 
-    print(f"[{args.dataset} / {args.regime}] loading pairs + embeddings ...", flush=True)
-    pairs, _ = load_pairs(args.dataset)
+    print(f"[{dataset} / {regime}] loading pairs + embeddings ...", flush=True)
+    pairs, _ = load_pairs(dataset)
     recs = pd.unique(pairs["receptor"]); mols = pd.unique(pairs["inchikey"])
     rec_i = {r: i for i, r in enumerate(recs)}; mol_i = {m: i for i, m in enumerate(mols)}
     row_r = pairs["receptor"].map(rec_i).to_numpy()
@@ -513,10 +523,10 @@ def main():
     specs += [(n, n, True) for n in DESC]                # classical floor
     specs += [("onehot_only", "onehot", False), ("mol_only", None, True)]
 
-    splits = make_splits(args.dataset, pairs, y_all, args.regime, args.folds)
+    splits = make_splits(dataset, pairs, y_all, regime, args.folds)
 
     out = pathlib.Path(args.out) if args.out else pathlib.Path(
-        f"results/tables/prot_floor_{args.dataset}_{args.regime}.csv")
+        f"results/tables/prot_floor_{dataset}_{regime}.csv")
     if not out.is_absolute():
         out = _root / out
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -557,8 +567,8 @@ def main():
             pd.DataFrame(rows).to_csv(out, index=False)
 
     if args.gnn is not None:
-        if args.dataset not in GNN_VARIANT:
-            raise SystemExit(f"no edge variant recorded for {args.dataset}; add one to "
+        if dataset not in GNN_VARIANT:
+            raise SystemExit(f"no edge variant recorded for {dataset}; add one to "
                              f"GNN_VARIANT before asking for GNN rows")
         specs = [parse_gnn_spec(x, plm_specs) for x in (args.gnn or DEFAULT_GNN)]
         missing = [(n, p) for n, p, _ in specs
@@ -567,7 +577,7 @@ def main():
         if missing:
             raise SystemExit("--gnn: missing npz -> " +
                              ", ".join(f"{n} ({p})" for n, p in missing))
-        print(f"\nGNN rows: {[n for n, _, _ in specs]}  variant={GNN_VARIANT[args.dataset]}"
+        print(f"\nGNN rows: {[n for n, _, _ in specs]}  variant={GNN_VARIANT[dataset]}"
               f"  graph seeds={args.gnn_seeds}", flush=True)
         for spec in specs:
             new = gnn_rows(args, spec, pairs, splits, y_all, Xmol, row_m, task,
@@ -590,7 +600,7 @@ def main():
     # right -- the unit of evidence is the fold, whatever produced the features
     g = per_fold.groupby("prot")
     print("\n" + "=" * 96)
-    print(f"{args.dataset.upper()} / {args.regime.upper()} -- protein floor "
+    print(f"{dataset.upper()} / {regime.upper()} -- protein floor "
           f"(mol=ChemBERTa), train only, seeds {args.seeds} averaged per fold, "
           f"{len(args.folds)} folds, sorted by {primary}")
     print("mean ± std over folds (the main tables' convention)   [ci95 = 1.96*std/sqrt(n)]")
@@ -605,6 +615,36 @@ def main():
         print(f"{name:12} pdim={int(s['pdim'].iloc[0]):5}  {cells}   "
               f"[ci95 {primary} ±{1.96 * x.std(ddof=1) / len(x) ** 0.5:.3f}]")
     print(f"\nwrote -> {out}")
+
+
+    return out
+
+
+def main():
+    args = parser().parse_args()
+    if args.out and (len(args.dataset) > 1 or len(args.regime) > 1):
+        raise SystemExit("--out names ONE file; drop it to write the default path per "
+                         "cell, or ask for a single --dataset/--regime")
+    done, skipped = [], []
+    for dataset in args.dataset:
+        for regime in args.regime:
+            print(f"\n{'#' * 78}\n# {dataset} / {regime}\n{'#' * 78}", flush=True)
+            try:
+                done.append(run_cell(args, dataset, regime))
+            except SystemExit as e:
+                # A dataset that ships no such split family is not a failure of the
+                # run -- HC has no cold_receptor at all. Say so and keep going, or a
+                # six-cell command dies on the one cell that was never possible.
+                print(f"  [skip {dataset}/{regime}] {e}", flush=True)
+                skipped.append((dataset, regime, str(e)))
+    print(f"\n{'=' * 78}\nwrote {len(done)} cell(s):")
+    for o in done:
+        print(f"  {o}")
+    for d, r, why in skipped:
+        print(f"  [skipped] {d}/{r}: {why}")
+    print("\nNow render the table:\n"
+          "  .venv/bin/python scripts/article_tables/07_protein_sources.py "
+          f"--dataset {' '.join(args.dataset)} --regime {' '.join(args.regime)}")
 
 
 if __name__ == "__main__":

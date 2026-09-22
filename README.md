@@ -568,17 +568,21 @@ what adds a protein source generated after those files were written:
 
 ### F. The protein-representation table — and our rows inside it
 
-One command per (dataset, regime). It fits every row of the table: the classical
+One command for the whole table --- `--dataset` and `--regime` take lists. It fits every row: the classical
 amino-acid descriptors, the one-hot controls, each pLM whose npz covers the pool, and
 — with `--gnn` — our own graph, boosted as `[refined receptor ‖ ChemBERTa]`, which is
 our `cls+mol`.
 
 ```bash
+# the whole table in one go: 3 datasets x 2 regimes, reusing whatever is already
+# fitted. A cell a dataset cannot do is skipped with a note, not a crash.
 .venv/bin/python scripts/modeling/analysis/prot_floor_sweep.py \
-    --dataset m2or --regime transductive \
+    --dataset m2or cc hc --regime transductive inductive \
     --gnn esm3@1 esm3@0 prott5@1
+
+# the table: the metric of record only (the full battery stays in the long CSV)
 .venv/bin/python scripts/article_tables/07_protein_sources.py \
-    --dataset m2or --regime transductive inductive
+    --dataset m2or cc hc --regime transductive inductive
 ```
 
 **Why our rows are fitted HERE and not imported from the sweep.** The refined receptor

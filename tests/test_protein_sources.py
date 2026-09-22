@@ -232,3 +232,13 @@ def test_a_csv_in_the_old_row_format_is_refused_with_a_reason(sweep, tmp_path):
     out.with_suffix(".json").write_text('{"dataset": "m2or"}', encoding="utf-8")
     with pytest.raises(SystemExit, match="predates the current row format"):
         sweep.load_existing(out, _args())
+
+
+def test_the_default_table_shows_the_metric_of_record_only():
+    """Six panels times a four-metric battery is unreadable, and the battery survives
+    in the long CSV. The default must therefore be one column, per task."""
+    df = frame()
+    assert T.metrics_of(df, "m2or", "primary") == ["AUROC"]
+    assert len(T.metrics_of(df, "m2or", "headline")) > 1
+    reg = frame().rename(columns={"AUROC": "R2"})
+    assert T.metrics_of(reg, "cc", "primary") == ["R2"]

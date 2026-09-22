@@ -314,8 +314,8 @@ def parse_gnn_spec(spec, plm_specs):
     return f"GNN[{name}]@a{alpha:g}", plm_specs[name], alpha
 
 
-def gnn_rows(args, spec, pairs, splits, y_all, Xmol, row_m, task, metric_fn, mol_path,
-             done=frozenset()):
+def gnn_rows(args, dataset, spec, pairs, splits, y_all, Xmol, row_m, task, metric_fn,
+             mol_path, done=frozenset()):
     """One `--gnn` spec, every fold: train the graph, boost [refined || molecule].
 
     Everything here is deliberate and worth stating once:
@@ -332,7 +332,7 @@ def gnn_rows(args, spec, pairs, splits, y_all, Xmol, row_m, task, metric_fn, mol
     from orbind.gnn_extractor import GnnSignedExtractor
 
     row_name, prot_path, alpha = spec
-    variant = GNN_VARIANT[args.dataset]
+    variant = GNN_VARIANT[dataset]
     rows = []
     for f in args.folds:
         tr, te = splits[f]
@@ -379,7 +379,7 @@ def cell_key(row):
     return (str(row["prot"]), int(row["fold"]), int(row["seed"]), g)
 
 
-def load_existing(out, args):
+def load_existing(out, args, dataset, regime):
     """(rows kept from disk, their keys). Empty unless a resume is allowed.
 
     The sidecar is the whole safety mechanism here. Rows written before it existed may
@@ -404,8 +404,8 @@ def load_existing(out, args):
             f"was produced after that fix.")
     if side.exists():
         old = json.loads(side.read_text(encoding="utf-8"))
-        moved = [k for k in ("dataset", "regime", "mol")
-                 if str(old.get(k)) != str(getattr(args, k, None))]
+        want = {"dataset": dataset, "regime": regime, "mol": args.mol}
+        moved = [k for k, v in want.items() if str(old.get(k)) != str(v)]
         if moved:
             raise SystemExit(f"{side.name} says {moved} differ from this run -- that is "
                              f"a different table, not more rows of this one. Use --out.")
@@ -414,10 +414,16 @@ def load_existing(out, args):
     return rows, {cell_key(r) for r in rows}
 
 
-def write_sidecar(out, args, rows):
-    """Provenance beside the CSV: what produced these rows, and with what."""
+def write_sidecar(out, args, rows, dataset, regime):
+    """Provenance beside the CSV: what produced THESE rows, and with what.
+
+    `dataset`/`regime` are passed, never read off `args`: after the run learned to
+    walk every cell those are the whole LIST, and a sidecar claiming all three would
+    pass the very check it exists to fail.
+    """
     import xgboost
     body = {**{k: v for k, v in vars(args).items()},
+            "dataset": dataset, "regime": regime,
             "python": sys.executable, "xgboost": xgboost.__version__,
             "n_rows": len(rows),
             "written": time.strftime("%Y-%m-%dT%H:%M:%S")}
@@ -531,7 +537,7 @@ def run_cell(args, dataset, regime):
         out = _root / out
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    rows, done = load_existing(out, args)
+    rows, done = load_existing(out, args, dataset, regime)
     skipped = 0
     for name, pm, use_mol in specs:
         pdim = protmats[pm].shape[1] if pm is not None else 0
@@ -580,8 +586,8 @@ def run_cell(args, dataset, regime):
         print(f"\nGNN rows: {[n for n, _, _ in specs]}  variant={GNN_VARIANT[dataset]}"
               f"  graph seeds={args.gnn_seeds}", flush=True)
         for spec in specs:
-            new = gnn_rows(args, spec, pairs, splits, y_all, Xmol, row_m, task,
-                           metric_fn, mol_path, done)
+            new = gnn_rows(args, dataset, spec, pairs, splits, y_all, Xmol, row_m,
+                           task, metric_fn, mol_path, done)
             rows += new
             done |= {cell_key(r) for r in new}
             pd.DataFrame(rows).to_csv(out, index=False)
@@ -589,7 +595,7 @@ def run_cell(args, dataset, regime):
     if skipped:
         print(f"\nreused {skipped} cell(s) already on disk (--force refits them)",
               flush=True)
-    write_sidecar(out, args, rows)
+    write_sidecar(out, args, rows, dataset, regime)
     df = pd.DataFrame(rows)
     metric_cols = [c for c in df.columns
                    if c not in ("prot", "fold", "seed", "gnn_seed", "pdim", "dim",

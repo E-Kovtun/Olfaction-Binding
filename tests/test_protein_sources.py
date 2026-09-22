@@ -192,7 +192,7 @@ def test_existing_rows_are_reused_when_provenance_is_there(sweep, tmp_path):
     frame(with_gnn=False).to_csv(out, index=False)
     out.with_suffix(".json").write_text(
         '{"dataset": "m2or", "regime": "transductive", "mol": null}', encoding="utf-8")
-    rows, done = sweep.load_existing(out, _args())
+    rows, done = sweep.load_existing(out, _args(), "m2or", "transductive")
     assert len(rows) == len(frame(with_gnn=False))
     assert ("esm3", 1, 42, -1) in done
 
@@ -203,8 +203,9 @@ def test_a_csv_without_provenance_is_refused_by_default(sweep, tmp_path):
     out = tmp_path / "prot_floor_m2or_transductive.csv"
     frame(with_gnn=False).to_csv(out, index=False)
     with pytest.raises(SystemExit, match="sidecar"):
-        sweep.load_existing(out, _args())
-    rows, done = sweep.load_existing(out, _args(trust_existing=True))
+        sweep.load_existing(out, _args(), "m2or", "transductive")
+    rows, done = sweep.load_existing(out, _args(trust_existing=True),
+                                     "m2or", "transductive")
     assert rows and done
 
 
@@ -212,7 +213,7 @@ def test_force_ignores_what_is_on_disk(sweep, tmp_path):
     out = tmp_path / "prot_floor_m2or_transductive.csv"
     frame().to_csv(out, index=False)
     out.with_suffix(".json").write_text('{"dataset": "m2or"}', encoding="utf-8")
-    assert sweep.load_existing(out, _args(force=True)) == ([], set())
+    assert sweep.load_existing(out, _args(force=True), "m2or", "transductive")         == ([], set())
 
 
 def test_a_sidecar_from_another_cell_is_an_error_not_a_merge(sweep, tmp_path):
@@ -221,7 +222,7 @@ def test_a_sidecar_from_another_cell_is_an_error_not_a_merge(sweep, tmp_path):
     out.with_suffix(".json").write_text(
         '{"dataset": "cc", "regime": "transductive", "mol": null}', encoding="utf-8")
     with pytest.raises(SystemExit, match="different table"):
-        sweep.load_existing(out, _args())
+        sweep.load_existing(out, _args(), "m2or", "transductive")
 
 
 def test_a_csv_in_the_old_row_format_is_refused_with_a_reason(sweep, tmp_path):
@@ -231,7 +232,7 @@ def test_a_csv_in_the_old_row_format_is_refused_with_a_reason(sweep, tmp_path):
     pd.DataFrame([{"prot": "esm1b", "AUROC": 0.9}]).to_csv(out, index=False)
     out.with_suffix(".json").write_text('{"dataset": "m2or"}', encoding="utf-8")
     with pytest.raises(SystemExit, match="predates the current row format"):
-        sweep.load_existing(out, _args())
+        sweep.load_existing(out, _args(), "m2or", "transductive")
 
 
 def test_the_default_table_shows_the_metric_of_record_only():
@@ -242,3 +243,41 @@ def test_the_default_table_shows_the_metric_of_record_only():
     assert len(T.metrics_of(df, "m2or", "headline")) > 1
     reg = frame().rename(columns={"AUROC": "R2"})
     assert T.metrics_of(reg, "cc", "primary") == ["R2"]
+
+
+def test_no_helper_reaches_for_args_dataset(sweep):
+    """`--dataset` and `--regime` are LISTS since the run walks every cell. A helper
+    that still reads them off `args` gets a list where it wants a key -- which is
+    exactly how a six-cell run died on its first graph (`GNN_VARIANT[args.dataset]`,
+    TypeError: unhashable type: 'list'). Only the loop itself may touch them.
+    """
+    import ast
+    import inspect
+    tree = ast.parse(inspect.getsource(sweep))
+    bad = []
+    for fn in [n for n in tree.body if isinstance(n, ast.FunctionDef)]:
+        if fn.name in ("main", "parser"):
+            continue
+        for node in ast.walk(fn):
+            if (isinstance(node, ast.Attribute) and node.attr in ("dataset", "regime")
+                    and isinstance(node.value, ast.Name) and node.value.id == "args"):
+                bad.append(f"{fn.name}: args.{node.attr}")
+    assert not bad, f"these must take the cell as an argument instead: {bad}"
+
+
+def test_the_sidecar_describes_the_cell_not_the_whole_run(sweep, tmp_path):
+    """One run writes six CSVs. A sidecar that copied `args` verbatim would claim all
+    three datasets in each of them, and the resume check it exists for would pass on
+    a file belonging to another cell."""
+    out = tmp_path / "prot_floor_cc_inductive.csv"
+    sweep.write_sidecar(out, _args(dataset=["m2or", "cc", "hc"],
+                                   regime=["transductive", "inductive"]),
+                        [], dataset="cc", regime="inductive")
+    import json
+    side = json.loads(out.with_suffix(".json").read_text(encoding="utf-8"))
+    assert side["dataset"] == "cc" and side["regime"] == "inductive"
+    # ... and that sidecar must then be accepted by a run of that same cell
+    frame(with_gnn=False).to_csv(out, index=False)
+    rows, done = sweep.load_existing(out, _args(dataset=["m2or", "cc", "hc"]),
+                                     "cc", "inductive")
+    assert rows and ("esm3", 1, 42, -1) in done

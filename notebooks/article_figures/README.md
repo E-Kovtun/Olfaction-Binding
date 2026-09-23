@@ -8,10 +8,20 @@ written to *show* it, on one sweep, with one visual contract.
 figkit.py             the visual contract: rcParams, palette, panels, bands, legends
 geometry_dial.ipynb   alignment with structure vs function, along alpha
 prediction_dial.ipynb predictive metrics and the paired advantage over the base
+alpha_rank_dial.ipynb where the dial puts us in the RANKING, both heads, + slope test
+quantile_criteria.ipynb  the construction sweep: criterion x coverage quantile
 ```
 
-Both notebooks read the ESM3 sweep (`results/graph/v13_esm3`) by default; the root is
-the first knob in each.
+They read the ESM3 sweep (`results/graph/v13_esm3`) by default; the root is the first
+knob in each.
+
+`alpha_rank_dial.ipynb` is the one exception to the rule below, and deliberately: it
+aggregates nothing new either --- the places come from
+[`scripts/analysis/alpha_choice.py`](../../scripts/analysis/alpha_choice.py), the same
+module the (unused) choice script reads --- but it does *test*, because "is this dial a
+slope or a flat surface" is a question a figure can pose and only a test can answer.
+The alpha-choice table it replaced is kept at
+`scripts/article_tables/06_alpha_choice_not_used.py` and is not in the runbook.
 
 ## The rule these notebooks are built around
 

@@ -17,7 +17,8 @@ Run from the repo root with `.venv/bin/python`.
 | `04_compare_runs.py` | two table runs side by side: value, place and what moved | the `main_long.csv` of each run |
 | `05a_onehot_boost.py` | (compute) the boosting head over [one-hot receptor ‖ molecule] — the row no sweep writes | the sweep's own fold prep, `fit_boost` and metric battery |
 | `05_alpha0_vs_boost.py` | the identity control: our graph at alpha=0 vs boost over ESM and vs the one-hot boost | sweep + `05a`'s CSVs |
-| `06_alpha_choice.py` | how alpha was chosen: mean rank on validation + the chosen alpha read once on test, with the optimism avoided | the sweep's `val_metrics_*` AND `metrics_*` |
+| `06_alpha_choice_not_used.py` | **not in the paper** (22.09): the alpha choice as three typeset panels. The argument is made by `notebooks/article_figures/alpha_rank_dial.ipynb` instead; kept because it is the long form of the same protocol | the sweep's `val_metrics_*` AND `metrics_*` |
+| `08_architecture.py` | the architecture table (`tab:arch`): one row per message-passing operator, six columns (dataset x regime), the boosting base as the anchor | `run_architecture.py`'s CSVs under results/article_sweeps/architecture |
 | `07_protein_sources.py` | what the receptor side has to be: our graph, pLMs, the classical floor and the one-hot controls under one head; metric of record only by default | `prot_floor_sweep.py --gnn` CSVs under `results/tables/` |
 
 Every table takes `--dataset` from `paper_tables.DATASET_ORDER`, which includes the

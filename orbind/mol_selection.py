@@ -18,13 +18,25 @@ Criteria (higher = kept first), ported verbatim from the study notebook:
   idf_coverage      sum of protein IDF over the proteins it touches
   composite         balance_bits * idf_coverage
   greedy_pair_cover greedy max protein-pair-coverage ordering (rank, 0 = best)
+
+And one that is not a criterion at all:
+  random            K eligible molecules drawn uniformly, `select_seed` deciding the
+                    draw. It is the CONTROL the criterion axis is read against: if a
+                    ranked criterion does not beat molecules picked at random, then
+                    what the graph buys is message passing per se and not the choice
+                    of hubs, which is a different claim from the one we make. Draw it
+                    with several seeds -- one draw is an anecdote, not a control.
 """
 from __future__ import annotations
 
 import numpy as np
 
 CRITERIA = ["coverage", "balance_bits", "entropy_bits", "disc_pairs",
-            "idf_coverage", "composite", "greedy_pair_cover"]
+            "idf_coverage", "composite", "greedy_pair_cover", "random"]
+
+#: `random` is a control, not a ranking: it has no score vector, it needs a seed, and
+#: it belongs on a figure as a reference rather than as an eighth competitor.
+CONTROL_CRITERIA = ("random",)
 
 # criteria whose per-molecule score is a plain "higher is better" vector
 _VECTOR_CRITERIA = ["coverage", "balance_bits", "entropy_bits", "disc_pairs",
@@ -165,14 +177,27 @@ def resolve_K(cov, q: float, k_mode: str = "coverage_quantile") -> int:
     return int((cov >= np.quantile(cov, q)).sum())
 
 
-def keep_mask(criterion: str, scores: dict, K: int, n_mol: int) -> np.ndarray:
+def keep_mask(criterion: str, scores: dict, K: int, n_mol: int,
+              select_seed: int = 0) -> np.ndarray:
     """Boolean [n_mol] mask of the K molecules to keep for message passing,
     chosen by `criterion` (top-K by its score among coverage>0; greedy uses its
-    own order). Ties/coverage handling mirrors the study's `select`."""
+    own order). Ties/coverage handling mirrors the study's `select`.
+
+    `select_seed` is read by `random` only, and every other criterion ignores it --
+    they are deterministic given the train edges, which is why no existing number
+    moves when this argument appears."""
     if criterion not in CRITERIA:
         raise ValueError(f"unknown criterion {criterion!r}, have {CRITERIA}")
     cov = scores["cov"]
-    if criterion == "greedy_pair_cover":
+    if criterion == "random":
+        # The control: K of the ELIGIBLE molecules, uniformly. Eligibility is the one
+        # thing it shares with the ranked criteria -- a molecule with no train
+        # coverage carries no edges, so drawing it would quietly shrink K and make the
+        # control a smaller graph rather than a differently chosen one.
+        eligible = np.flatnonzero(np.asarray(cov) > 0)
+        rng = np.random.default_rng(int(select_seed))
+        kept = rng.permutation(eligible)[:K]
+    elif criterion == "greedy_pair_cover":
         order = scores["g_order"]
         if order is None:
             raise ValueError("greedy_pair_cover needs g_order (need_greedy=True)")
@@ -186,13 +211,18 @@ def keep_mask(criterion: str, scores: dict, K: int, n_mol: int) -> np.ndarray:
 
 
 def select_keep_mask(criterion, mol_ids, prot_ids, y, n_mol, n_prot, q,
-                     k_mode: str = "coverage_quantile", pos_threshold=None):
+                     k_mode: str = "coverage_quantile", pos_threshold=None,
+                     select_seed: int = 0):
     """One-shot convenience: TRAIN edges + (criterion, q) -> boolean keep mask
     [n_mol]. `q` sets K (see `resolve_K` for the two readings); the criterion
     picks which K. With the default k_mode and criterion='coverage' this
-    reproduces `counts >= quantile(counts, q)` bit-for-bit."""
+    reproduces `counts >= quantile(counts, q)` bit-for-bit.
+
+    K is the SAME for every criterion including `random`, which is what makes the
+    control a control: the graphs being compared differ in which molecules carry the
+    messages and in nothing else -- not in how many, and not in how many edges."""
     sc = compute_mol_scores(mol_ids, prot_ids, y, n_mol, n_prot,
                             need_greedy=(criterion == "greedy_pair_cover"),
                             pos_threshold=pos_threshold)
     K = resolve_K(sc["cov"], q, k_mode)
-    return keep_mask(criterion, sc, K, n_mol)
+    return keep_mask(criterion, sc, K, n_mol, select_seed=select_seed)

@@ -1,5 +1,21 @@
 #!/usr/bin/env python
-"""The alpha we report, as a table: chosen on validation, confirmed once on test.
+"""NOT USED IN THE PAPER (decided 22.09.2026). Kept, not deleted.
+
+The alpha argument is made by a FIGURE, not by this table:
+`notebooks/article_figures/alpha_rank_dial.ipynb` draws mean rank against the dial for
+both boosting heads and fits a line through it, and the slope test there answers the
+same question -- is the dial a slope or a flat line -- in a form a reader can check by
+eye. Three typeset panels of ranks answered it in numbers nobody was going to read.
+
+Nothing here is wrong and nothing here is deprecated code: the protocol it implements
+(choose on validation, read test once, print the optimism) is still the protocol. It
+stays on disk because the figure's aggregation and this file's come from the same
+module, so if the figure is ever challenged this is the long form of the answer. It is
+not in the README runbook on purpose.
+
+--- what it does, if you do run it -------------------------------------------------
+
+The alpha we report, as a table: chosen on validation, confirmed once on test.
 
 Alpha is a hyperparameter -- fixed before training, used unchanged at inference, like a
 learning rate. So the curve it is CHOSEN on must not be the curve it is DEFENDED with,

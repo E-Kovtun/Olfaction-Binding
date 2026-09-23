@@ -10,9 +10,9 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from orbind.mol_selection import (CRITERIA, K_MODES, compute_mol_scores, h2,
-                                   keep_mask, quality_K, resolve_K,
-                                   select_keep_mask)
+from orbind.mol_selection import (CONTROL_CRITERIA, CRITERIA, K_MODES,
+                                   compute_mol_scores, h2, keep_mask, quality_K,
+                                   resolve_K, select_keep_mask)
 
 
 # --------------------------------------------------------------------- fixtures
@@ -187,9 +187,61 @@ def test_greedy_needs_its_order_precomputed():
         keep_mask("greedy_pair_cover", sc, 2, n_mol)
 
 
-def test_criteria_list_is_the_documented_seven():
-    assert len(CRITERIA) == 7
-    assert CRITERIA[-1] == "greedy_pair_cover"
+def test_criteria_list_is_the_documented_seven_plus_the_control():
+    assert len(CRITERIA) == 8
+    assert CRITERIA[-2] == "greedy_pair_cover"
+    assert CONTROL_CRITERIA == ("random",)
+    assert CRITERIA[-1] == CONTROL_CRITERIA[0]
+
+
+# ------------------------------------------------------------ the random control
+
+def test_random_keeps_exactly_K_eligible_molecules():
+    """The control differs from a criterion in WHICH molecules carry messages and in
+    nothing else -- not in how many, or it would be a smaller graph instead."""
+    mol_ids, prot_ids, y, n_mol, n_prot = binary_edges()
+    sc = compute_mol_scores(mol_ids, prot_ids, y, n_mol, n_prot, need_greedy=False)
+    for K in (1, 2, 3):
+        m = keep_mask("random", sc, K, n_mol, select_seed=0)
+        assert m.sum() == K
+
+
+def test_random_never_draws_a_molecule_with_no_train_coverage():
+    """mol3 has no edges: drawing it would silently shrink the graph."""
+    mol_ids, prot_ids, y, n_mol, n_prot = binary_edges()
+    sc = compute_mol_scores(mol_ids, prot_ids, y, n_mol, n_prot, need_greedy=False)
+    for seed in range(25):
+        assert not keep_mask("random", sc, 3, n_mol, select_seed=seed)[3]
+
+
+def test_random_is_reproducible_and_moves_with_the_seed():
+    """One draw is an anecdote. The seed is what turns it into a control, so it has
+    to be both fixed given the seed and different across seeds."""
+    mol_ids, prot_ids, y, n_mol, n_prot = ladder_edges()
+    sc = compute_mol_scores(mol_ids, prot_ids, y, n_mol, n_prot, need_greedy=False)
+    a = keep_mask("random", sc, 2, n_mol, select_seed=7)
+    assert (a == keep_mask("random", sc, 2, n_mol, select_seed=7)).all()
+    assert any(not (a == keep_mask("random", sc, 2, n_mol, select_seed=s)).all()
+               for s in range(20))
+
+
+def test_the_seed_is_ignored_by_every_ranked_criterion():
+    """Adding the control must not have moved a single existing number."""
+    mol_ids, prot_ids, y, n_mol, n_prot = ladder_edges()
+    sc = compute_mol_scores(mol_ids, prot_ids, y, n_mol, n_prot, need_greedy=True)
+    for crit in [c for c in CRITERIA if c not in CONTROL_CRITERIA]:
+        base = keep_mask(crit, sc, 2, n_mol)
+        assert (base == keep_mask(crit, sc, 2, n_mol, select_seed=99)).all()
+
+
+def test_random_goes_through_select_keep_mask_with_the_same_K():
+    """The one-shot path must give the control the K the criteria get."""
+    mol_ids, prot_ids, y, n_mol, n_prot = ladder_edges()
+    cov = np.bincount(mol_ids, minlength=n_mol)
+    K = resolve_K(cov, 0.5, "coverage_quantile")
+    m = select_keep_mask("random", mol_ids, prot_ids, y, n_mol, n_prot, 0.5,
+                         select_seed=3)
+    assert m.sum() == K
 
 
 # ------------------------------------------------------------ select_keep_mask

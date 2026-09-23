@@ -36,7 +36,12 @@ def _stub_torch_geometric():
     import torch
     tg = types.ModuleType("torch_geometric")
     nn = types.ModuleType("torch_geometric.nn")
-    for cls in ("HeteroConv", "MessagePassing", "SAGEConv"):
+    for cls in ("HeteroConv", "MessagePassing", "SAGEConv",
+                # the architecture ablation's operators: named here so `_make_conv`
+                # imports instead of raising an AttributeError that reads like a bug.
+                # They are no-op layers like the rest of the stub -- a test that runs
+                # one skips on `torch_geometric_is_stubbed()`.
+                "GATConv", "GraphConv", "GINConv"):
         setattr(nn, cls, type(cls, (torch.nn.Module,), {}))
     # marked, so a test that needs a WORKING graph skips instead of failing on the
     # stub's no-op layers. The stub buys importability, not execution.

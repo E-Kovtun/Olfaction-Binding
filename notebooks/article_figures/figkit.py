@@ -62,10 +62,15 @@ CRIT = {
     "idf_coverage": "#56B4E9",        # sky blue
     "composite": "#E69F00",           # orange
     "greedy_pair_cover": "#000000",   # black -- the criterion the paper reports
+    # `random` is the CONTROL, not a competitor: grey, so it reads as a reference the
+    # others are measured against rather than as an eighth thing to compare. The
+    # Okabe-Ito set is exhausted at seven anyway, and inventing an eighth hue is how a
+    # colour-safe palette stops being one.
+    "random": "#6b7280",
 }
 CRIT_MARKER = {"coverage": "o", "balance_bits": "s", "entropy_bits": "^",
                "disc_pairs": "D", "idf_coverage": "v", "composite": "P",
-               "greedy_pair_cover": "*"}
+               "greedy_pair_cover": "*", "random": "x"}
 
 
 def crit_style(name, highlight=None):

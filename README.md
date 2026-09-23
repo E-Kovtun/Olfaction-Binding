@@ -543,11 +543,18 @@ can run while 1.1 is still going.
     --dataset m2or cc hc \
     --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz'
 
-# for A4.2: the construction sweep, criterion x quantile (see A4.2 for the insects)
+# for A4: the construction sweep, criterion x quantile (see A4 for the insects)
 .venv/bin/python scripts/article_sweeps/run_quantile_criteria.py \
     --dataset m2or --regime inductive transductive \
     --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz' \
     --seeds 42 43 --max-parallel 4 --gpus 0 1 2 3
+
+# for A5: the architecture sweep. The graph is PINNED per dataset at the paper's
+# construction -- this moves the operator and nothing else
+.venv/bin/python scripts/article_sweeps/run_architecture.py \
+    --dataset m2or cc hc --regime transductive inductive \
+    --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz' \
+    --seeds 42 43 44 45 46 --seed-graph --max-parallel 4 --gpus 0 1 2 3
 
 # for A3.2, ONLY for a root made before Sep 2026: score that root's validation split.
 # The head is refit on the same train rows with the same seed and asked for the val
@@ -579,11 +586,10 @@ the supplementary ablations as the argument needs them.
 | A1 | baselines as `cls` vs the boosting base | `01_main_tables.py --baseline-combo cls --no-ours` | 1.1 + 1.2 |
 | A2 | protein representations + our rows (`tab:t4`) | `07_protein_sources.py` | 1.4 (`prot_floor_sweep`) |
 | A3.1 | the alpha dial, as a figure | `notebooks/article_figures/prediction_dial.ipynb` | 1.1, dense grid |
-| A3.2 | how alpha was chosen | `06_alpha_choice.py` | 1.1, dense grid + its `val_metrics_*` |
+| A3.2 | mean rank against the dial, both heads | `notebooks/article_figures/alpha_rank_dial.ipynb` | 1.1, dense grid + its `val_metrics_*` |
 | A3.3 | identity control (`tab:alpha0`) | `05_alpha0_vs_boost.py` | 1.1 + 1.4 (`05a`) |
-| A4.1 | other graph constructions | — not built | — |
-| A4.2 | criterion × quantile | `notebooks/article_figures/quantile_criteria.ipynb` | 1.4 (`run_quantile_criteria`) |
-| A5 | architecture (SAGE/GAT/GCN) | — not built | — |
+| A4 | criterion × quantile, + the random control | `notebooks/article_figures/quantile_criteria.ipynb` | 1.4 (`run_quantile_criteria`) |
+| A5 | architecture: which operator | `08_architecture.py` | 1.4 (`run_architecture`) |
 | A6 | molecule ablation | `03_molecule_ablation.py` | 1.1 (all three `--mol-source`) + 1.3 |
 
 #### M1 — the main battery
@@ -662,39 +668,33 @@ Read by eye from the dense grid of 1.1; there is no text reader:
 jupyter lab notebooks/article_figures/prediction_dial.ipynb
 ```
 
-#### A3.2 — how alpha was chosen (`tab:alphachoice`, `tab:alphaconfirm`)
+#### A3.2 — where the dial puts us: mean rank against $\alpha$
 
-Ranked on validation, then read once on test. It only READS a run, and **which** run is
-an argument with no default — the same command with `--sweep-root results/graph/v9_seeded`
-renders the ESM-1b grid instead. Without `--out` the table lands in
-`results/article_tables/<run>/alpha_choice`, named after the root, so two runs never
-overwrite each other.
+Two panels side by side, one per boosting head: `cls+mol` on the left (the construction
+the paper reports, where the refined receptor replaces the protein vector) and
+`cls+prot+mol` on the right (where it is added beside it, so its features are nested in
+the base's). Each point is one dial position, its height is the mean rank across cells
+on validation, the bars are the spread across cells, the dashed line is where the
+boosting base sits on the same scale, and a fitted straight line asks the only question
+that matters here: is the dial a slope or a flat surface?
 
 ```bash
-.venv/bin/python scripts/article_tables/06_alpha_choice.py \
-    --sweep-root results/graph/v13_esm3 --nodes nodedial --mol-source chemberta
+jupyter lab notebooks/article_figures/alpha_rank_dial.ipynb
 ```
 
-`--mol-source chemberta` is not cosmetic: the dense dial grid exists only there, so
-without it the mean ranks are averaged over cells holding 13 competitors and cells
-holding 3, which is not one scale. A head the run never fitted is skipped with a note.
+A separate cell tests the slope against zero three ways — an ordinary fit through the
+dial positions, a per-cell fit whose sample is the cells, and a permutation test that
+shuffles the dial labels inside each cell. Read the last two: the dial positions inside
+one cell are ranked against each other, so they are not independent points and the
+first fit's p-value is descriptive only.
 
-**Both boosting heads are rendered, each as its own panel** — `cls+mol` (the
-construction the paper reports, where the refined receptor replaces the protein vector)
-and `cls+prot+mol` (where it is added beside it, so its features are nested in the
-base's). They sit on the same trained graph and can prefer different dial positions;
-`--at-alpha 1` confirms one alpha in both, which is how a single reported alpha is
-defended.
+The notebook reads validation, and the sweep writes it (`val_metrics_*`); a root made
+before Sep 2026 gets those rows from `val_rescore.py` (1.4).
 
-Each panel prints three things: the leader board on validation with the 1-SE tie set,
-the **dial trend** — Spearman between the dial position and the score, computed inside
-each cell and summarised across cells with a one-sample t-test of the null that it is
-zero — and the confirmation on test with `optimism`. A flat dial is a result: it is what
-licenses reporting the end of the scale instead of an argmax.
-
-It refuses to run without that root's `val_metrics_*` rather than quietly choosing on
-the rows it reports. A sweep run from Sep 2026 writes them itself; an older root gets
-them from `val_rescore.py` (1.4), pointed at that same root.
+The dense dial grid exists only for `chemberta`, and the knob `MOL_SOURCE` says so: on
+the other molecule sources only $\alpha \in \{0, 1\}$ was run, and a mean rank taken
+over cells holding 13 competitors and cells holding 3 is not one scale. The notebook
+prints the per-competitor cell counts and says so out loud if they differ.
 
 #### A3.3 — the identity control (`tab:alpha0`)
 
@@ -707,11 +707,21 @@ caches; `05` only reads, so it is safe to re-run while tweaking a label.
     --sweep-root results/graph/v13_esm3
 ```
 
-#### A4.2 — the construction ablation, criterion × quantile
+#### A4 — the construction ablation, criterion × quantile
 
 A different knob from the dial: not what the receptor vector is mixed from, but which
 molecules carry the messages at all. `scripts/article_sweeps/` owns it, imports the
 alpha sweep as a module for the folds and the metric battery, and touches none of it.
+
+**This is the whole construction ablation, and there is no second one.** Our edges
+*are* the measured pairs, so the only knob over that graph is which molecules may carry
+messages: the full graph is `q = 0`, a point in this grid, and an IDF-weighted
+construction is the `idf_coverage` / `composite` criterion, a curve in it. The grid
+also carries `random` — K molecules drawn uniformly from the same eligible set, at the
+same K — which is the control the criteria are read against: if a ranked criterion does
+not beat a random draw, what the graph buys is message passing and not the choice of
+hubs. Its draw follows the cell's seed, so what the figure shows is its spread and not
+one lucky set.
 
 ```bash
 # the producer. Quantiles are FRACTIONS, and the cell the paper reports
@@ -737,6 +747,61 @@ jupyter lab notebooks/article_figures/quantile_criteria.ipynb
 Resumable: re-running the same command continues it. See
 `scripts/article_sweeps/README.md` for what `--k-mode` changes and why a failed cell is
 written down rather than dropped.
+
+#### A5 — the architecture table (`tab:arch`)
+
+One row per message-passing operator, one column per (dataset, regime), each column
+that panel's metric of record — six numbers per row, which is the whole table. The
+boosting base is the anchor row, because "our graph against the base" is the comparison
+every other table here makes.
+
+```bash
+# trains: four operators on the paper's own graph, five folds, five seeds
+.venv/bin/python scripts/article_sweeps/run_architecture.py \
+    --dataset m2or cc hc --regime transductive inductive \
+    --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz' \
+    --seeds 42 43 44 45 46 --seed-graph --max-parallel 4 --gpus 0 1 2 3
+
+# renders: one combined table, six columns, the metric of record only
+.venv/bin/python scripts/article_tables/08_architecture.py \
+    --dataset m2or cc hc --regime transductive inductive
+```
+
+**The graph does not move when the operator does.** The construction is pinned per
+dataset in `VARIANT` (M2OR's hub core, the insects' complete matrix) and is deliberately
+not a command-line flag: an operator comparison run on two different graphs is not one.
+Everything else is held too — the signed two-stack structure, the subtraction, the
+decoder, the epoch budget, the folds, the head.
+
+**The `:paper` rows.** `sage:paper` and `gat:paper` run those two operators the way
+their papers do: **neighbour sampling** (fan-out 25 then 10, redrawn every epoch;
+inference stays full-neighbourhood, as in the paper) and **per-layer L2
+normalisation** — the two things our encoder took from neither. They are extra rows,
+not a change to ours: both are opt-in fields on the extractor (`fanout`,
+`normalize_layers`), off everywhere else, so no reported number moves. What they
+answer is how much of the distance between "GraphSAGE" and "our GraphSAGE" is the
+operator and how much is the regime around it. `--fanout L1 L2` overrides the setting.
+
+So the table is seven rows: four operators, two `:paper` variants, and the boosting
+anchor.
+
+**The four operators** (`orbind.gnn_extractor.CONVS`): `sage` is ours; `gat` is the
+attention epoch of this project, ported from `orbind/legacy/hetero_gat.py` with the two
+details that make attention work on a bipartite graph (`add_self_loops=False`,
+multi-head concat on layer 1 and a single head on layer 2); `graphconv` is the
+GCN-shaped operator that is actually defined on two node sets — plain `GCNConv` is not
+here and cannot be, since its symmetric normalisation and mandatory self-loops assume
+one; `gin` is the molecular domain's standard and the most expressive of the four.
+
+**Width is free, depth is not.** `--hidden 128 256 512` adds one row per width with no
+new code. Depth is not a knob: the encoder is two layers by construction, and making
+that variable is a refactor of the module rather than a flag — it is out of this sweep
+deliberately.
+
+`--seed-graph` matters more here than anywhere else: with four operators landing close
+together, the initialisation lottery is the noise most likely to be mistaken for a
+winner. The reader marks the best operator per column, never the anchor, and names in
+words any column where our interval overlaps the marked one.
 
 #### A6 — the molecule ablation
 

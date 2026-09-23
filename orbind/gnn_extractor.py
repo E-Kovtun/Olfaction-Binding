@@ -251,7 +251,8 @@ def _build_universe(pairs: pd.DataFrame, all_idx, proteins: dict, molecules: dic
 def _mp_edges(pairs: pd.DataFrame, train_idx, mol_to_i, prot_to_i, q: float,
               criterion: str = "coverage", edge_threshold: float = 0.0,
               k_mode: str = "coverage_quantile", task: str = "classification",
-              edge_center: str = "global", edge_weight_mode: str = "none"):
+              edge_center: str = "global", edge_weight_mode: str = "none",
+              select_seed: int = 0):
     """Train split's own pairs -> (pos, neg) local (mol_id, prot_id[, weight])
     arrays, optionally dropping molecules below the q-th quantile from message
     passing only -- every train row still gets decoded/supervised regardless.
@@ -285,7 +286,8 @@ def _mp_edges(pairs: pd.DataFrame, train_idx, mol_to_i, prot_to_i, q: float,
         # positives at the very same threshold the edge signs use below.
         keep = mol_selection.select_keep_mask(
             criterion, mol_ids, prot_ids, y, len(mol_to_i), len(prot_to_i), q, k_mode,
-            pos_threshold=(edge_threshold if task == "regression" else None))
+            pos_threshold=(edge_threshold if task == "regression" else None),
+            select_seed=select_seed)
         mask = keep[mol_ids]
         mol_ids, prot_ids, y = mol_ids[mask], prot_ids[mask], y[mask]
     # Deviation that decides an edge's sign. "global": y itself (so `y > 0` is
@@ -446,6 +448,155 @@ class _WSAGE(MessagePassing):
         return x_j if edge_weight is None else x_j * edge_weight.view(-1, 1)
 
 
+#: The message-passing operators this encoder can be built from. Everything else --
+#: the signed two-stack structure, the subtraction, the decoder, the training loop --
+#: is held fixed, so a row of the architecture table differs from ours in the operator
+#: and in nothing else.
+#:
+#: Why these four and not the textbook list:
+#:   sage        ours. Mean-aggregation GraphSAGE, the operator every number in this
+#:               paper was produced with. It is stock `SAGEConv` at its defaults
+#:               (mean aggregation, a root weight for the node's own state, no
+#:               post-normalisation), but see WHAT "GRAPHSAGE" MEANS HERE below --
+#:               the operator is Hamilton et al.'s, the algorithm around it is not.
+#:   gat         attention. Ported from the v1--v5 GAT epoch (orbind/legacy/hetero_gat)
+#:               including the two details that make it work on a bipartite graph:
+#:               `add_self_loops=False` (a molecule has no molecule neighbours, so PyG's
+#:               default self-loop is a type error waiting to happen) and multi-head
+#:               concat on layer 1, single head on layer 2.
+#:   graphconv   the GCN-shaped one. Plain `GCNConv` is NOT here and cannot be: its
+#:               symmetric normalisation and mandatory self-loops assume one node set,
+#:               and our graph has two. `GraphConv` is the same idea (sum over
+#:               neighbours + a self term) that is defined on a bipartite graph.
+#:   gin         the molecular-domain standard (Xu et al. 2019) -- the operator behind
+#:               the GIN molecule embeddings this repo already uses as a molecule
+#:               source. Sum aggregation and an MLP, which is the most expressive of
+#:               the four in the WL sense.
+CONVS = ("sage", "gat", "graphconv", "gin")
+
+#: Layer 1 concatenates `heads` of `hidden // heads`; layer 2 is single-head, so the
+#: width the decoder sees is `hidden` for every operator. Comparing operators at
+#: different widths would compare widths.
+GAT_HEADS = 4
+
+# WHAT "GRAPHSAGE" MEANS HERE, AND WHERE IT DEPARTS FROM THE PAPER
+# ---------------------------------------------------------------
+# Hamilton, Ying & Leskovec (NeurIPS 2017) is two things: a convolution and a training
+# regime. We take the first and not the second, and a reviewer who asks "is this
+# GraphSAGE?" deserves the list rather than the label.
+#
+# THE SAME
+#   * the operator: h_v' = W_root x_v + W_neigh MEAN_{u in N(v)} x_u, which is PyG's
+#     SAGEConv at its defaults and the paper's mean aggregator in its CONCAT form;
+#   * depth 2, which is what the paper uses and recommends.
+#
+# DIFFERENT, AND THE FIRST ONE IS THE BIG ONE
+#   * NO NEIGHBOURHOOD SAMPLING. The paper's defining mechanism is fixed-size sampled
+#     neighbourhoods per layer (25 then 10) in minibatches; we run FULL BATCH over the
+#     whole graph every epoch, because this graph fits. Consequence worth stating out
+#     loud: every training pair is simultaneously a message-passing edge and a
+#     supervision target, so the encoder sees the label it is asked to predict through
+#     the graph. That is the coupling the edge-sampling line of work is about, and it
+#     is a known open direction, not an oversight.
+#   * NO PER-LAYER L2 NORMALISATION. The paper normalises h_v to unit norm after each
+#     layer; we do not, and the final layer has no activation either -- which is why
+#     `_dgi_pool` has to normalise by hand before it touches a sigmoid.
+#   * THE SIGN. Positive and negative edges flow through separate stacks and are
+#     SUBTRACTED. There is no such thing in GraphSAGE; it is this project's own
+#     construction and the reason the encoder is called signed.
+#   * HETEROGENEOUS AND BIPARTITE. Two node types, separate weights per direction
+#     (molecule->receptor, receptor->molecule), combined by `HeteroConv(aggr="sum")`.
+#     The paper is homogeneous; this is the standard PyG extension of it.
+#   * LeakyReLU(0.1) rather than ReLU, from the collapse fix: a unit driven negative
+#     under plain ReLU gets zero gradient and never comes back.
+#   * SUPERVISION AND READOUT. The paper's headline loss is unsupervised with negative
+#     sampling; ours is BCE (or regression) on decoded pairs through a 3-layer MLP
+#     over the concatenated (molecule, receptor) embeddings, at a fixed epoch budget
+#     with no early stopping and no scheduler.
+#
+# So the architecture row labelled "ours" compares OPERATORS inside one fixed
+# algorithm. It is not a claim that we reproduced GraphSAGE the paper.
+
+
+def _make_conv(kind: str, hidden: int, layer: int, heads: int, dropout: float,
+               weighted: bool):
+    """One message-passing operator for one edge type.
+
+    `layer` is 1 or 2 and only GAT reads it (multi-head then single-head). Lazy
+    `(-1, -1)` input dims everywhere they are supported, because layer 1 sees the two
+    projected node types and layer 2 sees the subtraction's output.
+    """
+    if kind == "sage":
+        return _WSAGE(hidden) if weighted else SAGEConv((-1, -1), hidden)
+    if weighted:
+        # `edge_weight_mode="magnitude"` is implemented by _WSAGE alone; silently
+        # ignoring the weights under another operator would report a weighted run that
+        # was not one.
+        raise ValueError(f"edge_weight_mode='magnitude' is implemented for conv='sage' "
+                         f"only, got conv={kind!r}")
+    if kind == "gat":
+        from torch_geometric.nn import GATConv
+        if layer == 1:
+            return GATConv((-1, -1), hidden // heads, heads=heads, dropout=dropout,
+                           add_self_loops=False)
+        return GATConv((-1, -1), hidden, heads=1, dropout=dropout,
+                       add_self_loops=False)
+    if kind == "graphconv":
+        from torch_geometric.nn import GraphConv
+        return GraphConv((-1, -1), hidden, aggr="mean")
+    if kind == "gin":
+        from torch_geometric.nn import GINConv
+        # GIN has no lazy input, which is fine: both node types are `hidden`-wide from
+        # the input projections onward, and the subtraction keeps them there.
+        return GINConv(nn.Sequential(nn.Linear(hidden, hidden),
+                                     nn.LeakyReLU(_SignedSage.LEAK),
+                                     nn.Linear(hidden, hidden)), train_eps=True)
+    raise ValueError(f"conv must be one of {CONVS}, got {kind!r}")
+
+
+def sample_neighbours(eidx, fanout, generator=None):
+    """Keep at most `fanout` incoming edges per DESTINATION node, drawn uniformly.
+
+    This is GraphSAGE's mechanism, brought into a full-batch loop: the paper samples a
+    fixed-size neighbourhood per layer (25 then 10) inside a minibatch, and what the
+    sampling actually does is bound how much of the graph any one node sees per layer
+    and resample it every step. Resampling each EPOCH over the whole graph gives the
+    same two effects -- a bounded receptive field and stochastic message passing --
+    without the minibatch machinery.
+
+    Sampled WITHOUT replacement, so a thin neighbourhood is kept whole rather than
+    padded with duplicates: duplicating an edge would reweight that neighbour in a
+    mean aggregation, which is the opposite of what a fan-out is for.
+
+    Each edge TYPE is sampled independently, and in the signed encoder that matters:
+    positive and negative edges live in different dicts, so each sign keeps its own
+    fan-out and the pos/neg balance a receptor sees is not rewritten by the draw.
+
+    `edge_index[0]` is the source and `edge_index[1]` the destination, which is the
+    direction messages travel -- sampling by source would bound how much each node
+    SENDS, and a hub would still flood its neighbours.
+    """
+    if not fanout or fanout <= 0:
+        return eidx
+    out = {}
+    for k, e in eidx.items():
+        n_edges = e.shape[1]
+        if n_edges == 0:
+            out[k] = e
+            continue
+        perm = torch.randperm(n_edges, generator=generator, device=e.device)
+        dst = e[1, perm]
+        order = torch.argsort(dst, stable=True)
+        dst_sorted = dst[order]
+        counts = torch.bincount(dst_sorted)
+        # rank of each edge inside its destination's group, after the shuffle: the
+        # shuffle is what makes "the first `fanout` of the group" a uniform draw
+        starts = torch.cumsum(counts, 0) - counts
+        rank = torch.arange(n_edges, device=e.device) - starts[dst_sorted]
+        out[k] = e[:, perm[order[rank < fanout]]]
+    return out
+
+
 class _SignedSage(nn.Module):
     """Two-layer heterogeneous GraphSAGE. Positive and negative edges are
     message-passed through separate SAGEConv stacks per layer, then
@@ -463,18 +614,30 @@ class _SignedSage(nn.Module):
 
     def __init__(self, mol_dim: int, prot_dim: int, hidden: int, dropout: float,
                  weighted: bool = False, pca_mol=None, pca_prot=None,
-                 alpha=None, s_prot=None):
+                 alpha=None, s_prot=None, conv: str = "sage", heads: int = GAT_HEADS,
+                 normalize: bool = False):
         super().__init__()
         self.weighted = weighted
+        self.conv_kind = conv
+        # GraphSAGE normalises h_v to unit norm after every layer; we historically did
+        # not, and every reported number is un-normalised. Opt-in, so the default path
+        # is byte-identical.
+        self.normalize = bool(normalize)
         # v8 hard gate. `alpha=None` is the historical model, untouched: no branch,
         # no normalisation, every pre-v8 number reproduces byte-for-byte.
         self.alpha = None if alpha is None else float(alpha)
         self.register_buffer("s_prot", None if s_prot is None else _rms(s_prot),
                              persistent=False)   # frozen; never in a state_dict
         # weighted mode swaps SAGEConv for the edge-weight-aware _WSAGE; the
-        # default (weighted=False) keeps PyG's SAGEConv byte-for-byte.
-        def mk():
-            return _WSAGE(hidden) if weighted else SAGEConv((-1, -1), hidden)
+        # default (conv="sage", weighted=False) keeps PyG's SAGEConv byte-for-byte,
+        # and the parameters are still created in the same order, so a seeded init
+        # reproduces every number made before this switch existed.
+        if conv == "gat" and hidden % heads:
+            raise ValueError(f"hidden={hidden} must divide by heads={heads}: layer 1 "
+                             f"concatenates the heads back to `hidden`")
+
+        def mk(layer=1):
+            return _make_conv(conv, hidden, layer, heads, dropout, weighted)
         self.proj_mol = nn.Linear(mol_dim, hidden)
         self.proj_prot = nn.Linear(prot_dim, hidden)
         # dummy_compression: freeze the two input projections to a fixed PCA basis
@@ -483,10 +646,10 @@ class _SignedSage(nn.Module):
             _freeze_pca(self.proj_mol, *pca_mol)
         if pca_prot is not None:
             _freeze_pca(self.proj_prot, *pca_prot)
-        self.conv1 = HeteroConv({ETYPE: mk(), RTYPE: mk()}, aggr="sum")
-        self.conv1_neg = HeteroConv({ETYPE_NEG: mk(), RTYPE_NEG: mk()}, aggr="sum")
-        self.conv2 = HeteroConv({ETYPE: mk(), RTYPE: mk()}, aggr="sum")
-        self.conv2_neg = HeteroConv({ETYPE_NEG: mk(), RTYPE_NEG: mk()}, aggr="sum")
+        self.conv1 = HeteroConv({ETYPE: mk(1), RTYPE: mk(1)}, aggr="sum")
+        self.conv1_neg = HeteroConv({ETYPE_NEG: mk(1), RTYPE_NEG: mk(1)}, aggr="sum")
+        self.conv2 = HeteroConv({ETYPE: mk(2), RTYPE: mk(2)}, aggr="sum")
+        self.conv2_neg = HeteroConv({ETYPE_NEG: mk(2), RTYPE_NEG: mk(2)}, aggr="sum")
         self.dec = nn.Sequential(
             nn.Linear(2 * hidden, hidden), nn.LeakyReLU(self.LEAK), nn.Dropout(dropout),
             nn.Linear(hidden, hidden // 2), nn.LeakyReLU(self.LEAK), nn.Dropout(dropout),
@@ -494,16 +657,31 @@ class _SignedSage(nn.Module):
         )
 
     def encode(self, x_mol, x_prot, pos_eidx, neg_eidx, pos_ew=None, neg_ew=None):
+        """`pos_eidx`/`neg_eidx` are one edge dict, or a PAIR of them -- layer 1's and
+        layer 2's. The pair is what neighbour sampling needs: the paper draws a
+        different fan-out per layer (25 then 10), and one dict for both would be a
+        single draw applied twice."""
+        def per_layer(e):
+            return e if isinstance(e, (list, tuple)) else (e, e)
+
+        pos1, pos2 = per_layer(pos_eidx)
+        neg1, neg2 = per_layer(neg_eidx)
         x = {MOL: F.leaky_relu(self.proj_mol(x_mol), self.LEAK),
              PROT: F.leaky_relu(self.proj_prot(x_prot), self.LEAK)}
         kp = {"edge_weight_dict": pos_ew} if (self.weighted and pos_ew is not None) else {}
         kn = {"edge_weight_dict": neg_ew} if (self.weighted and neg_ew is not None) else {}
-        x_p = self.conv1(x, pos_eidx, **kp)
-        x_n = self.conv1_neg(x, neg_eidx, **kn)
+        x_p = self.conv1(x, pos1, **kp)
+        x_n = self.conv1_neg(x, neg1, **kn)
         x = {k: F.leaky_relu(x_p[k] - x_n.get(k, torch.zeros_like(x_p[k])), self.LEAK) for k in x_p}
-        x_p = self.conv2(x, pos_eidx, **kp)
-        x_n = self.conv2_neg(x, neg_eidx, **kn)
+        if self.normalize:
+            x = {k: F.normalize(v, dim=-1) for k, v in x.items()}
+        x_p = self.conv2(x, pos2, **kp)
+        x_n = self.conv2_neg(x, neg2, **kn)
         z = {k: x_p[k] - x_n.get(k, torch.zeros_like(x_p[k])) for k in x_p}
+        if self.normalize:
+            # before the alpha gate, which does its own RMS scaling: normalising after
+            # it would undo the mixture it was set to produce
+            z = {k: F.normalize(v, dim=-1) for k, v in z.items()}
         if self.alpha is not None and self.s_prot is not None and PROT in z:
             # The receptor readout is a FIXED convex mix of a frozen structural
             # branch and the trained graph. alpha is set before training and used
@@ -544,7 +722,7 @@ def _dgi_loss(weight_mat, z_pos, z_neg):
 def _train_one(build_model, x_mol, x_prot, pos_eidx, neg_eidx,
                 mol_idx_train, prot_idx_train, y_train, hp, device, checkpoint_path=None,
                 dgi_weight=0.0, dgi_scope="shared", hidden=None, pos_ew=None, neg_ew=None,
-                deterministic_init=False):
+                deterministic_init=False, fanout=None):
     """Full-batch training loop (the whole graph is small enough to fit in
     one forward/backward per epoch): BCE loss on train-row decodes, fixed
     epoch count, no early stopping, no LR scheduler -- matches the actual v5
@@ -613,20 +791,41 @@ def _train_one(build_model, x_mol, x_prot, pos_eidx, neg_eidx,
         params = params + [dgi_w]
     opt = torch.optim.Adam(params, lr=hp["lr"], weight_decay=hp["weight_decay"])
 
+    # Neighbour sampling: a fresh draw every epoch, one fan-out per layer. Its own
+    # generator, seeded from the model seed, so the draw is reproducible and does not
+    # consume the global RNG the rest of the run depends on. Edge weights are NOT
+    # sampled with the edges, which is why `--edge-weight-mode magnitude` and fanout
+    # are refused together upstream.
+    gen = None
+    if fanout:
+        gen = torch.Generator(device=device)
+        gen.manual_seed(int(hp["seed"]))
+
+    def sampled():
+        if not fanout:
+            return pos_eidx_d, neg_eidx_d
+        p = [sample_neighbours(pos_eidx_d, f, gen) for f in fanout]
+        n = [sample_neighbours(neg_eidx_d, f, gen) for f in fanout]
+        return p, n
+
     for _ in range(hp["epochs"]):
         model.train()
         opt.zero_grad(set_to_none=True)
-        z = model.encode(x_mol_d, x_prot_d, pos_eidx_d, neg_eidx_d, pos_ew_d, neg_ew_d)
+        pe, ne = sampled()
+        z = model.encode(x_mol_d, x_prot_d, pe, ne, pos_ew_d, neg_ew_d)
         loss = loss_fn(model.decode(z, mi_tr, pi_tr), y_tr)
         if dgi_w is not None:
             x_mol_c = x_mol_d[torch.randperm(x_mol_d.shape[0], device=device)]
             x_prot_c = x_prot_d[torch.randperm(x_prot_d.shape[0], device=device)]
-            z_c = model.encode(x_mol_c, x_prot_c, pos_eidx_d, neg_eidx_d, pos_ew_d, neg_ew_d)
+            z_c = model.encode(x_mol_c, x_prot_c, pe, ne, pos_ew_d, neg_ew_d)
             loss = loss + dgi_weight * _dgi_loss(dgi_w, _dgi_pool(z, dgi_scope), _dgi_pool(z_c, dgi_scope))
         loss.backward()
         nn.utils.clip_grad_norm_(params, hp["clip_grad"])
         opt.step()
 
+    # INFERENCE IS FULL-NEIGHBOURHOOD, sampling or not -- the paper does the same.
+    # Sampling is a training-time device; emitting embeddings from one random draw
+    # would make the row we report depend on which draw happened last.
     model.eval()
     with torch.no_grad():
         z = model.encode(x_mol_d, x_prot_d, pos_eidx_d, neg_eidx_d, pos_ew_d, neg_ew_d)
@@ -640,7 +839,7 @@ def _train_one(build_model, x_mol, x_prot, pos_eidx, neg_eidx,
 # by newly covered protein PAIRS, built from `prof`/`active` only. The other five
 # are functions of npos/nneg (`y == 1` / `y == 0`) and collapse to zeros on a
 # continuous target. See orbind/mol_selection.compute_mol_scores.
-_LABEL_AGNOSTIC_CRITERIA = {"coverage", "greedy_pair_cover"}
+_LABEL_AGNOSTIC_CRITERIA = {"coverage", "greedy_pair_cover", "random"}
 
 
 def _run_models(ext, pairs: pd.DataFrame, train_idx, val_idx, test_idx, seed: int, checkpoint_dir=None):
@@ -732,7 +931,8 @@ def _run_models(ext, pairs: pd.DataFrame, train_idx, val_idx, test_idx, seed: in
                          getattr(ext, "edge_threshold", 0.0),
                          getattr(ext, "k_mode", "coverage_quantile"), ext.task,
                          getattr(ext, "edge_center", "global"),
-                         getattr(ext, "edge_weight_mode", "none"))
+                         getattr(ext, "edge_weight_mode", "none"),
+                         getattr(ext, "select_seed", 0))
     n_pos, n_neg = len(pos[0]), len(neg[0])
     print(f"  {ext.name}: MP graph {n_pos} positive / {n_neg} negative edges "
           f"(q={ext.q}, criterion={getattr(ext, 'criterion', 'greedy_pair_cover')}, "
@@ -759,7 +959,8 @@ def _run_models(ext, pairs: pd.DataFrame, train_idx, val_idx, test_idx, seed: in
                                            dgi_scope=getattr(ext, "dgi_scope", "shared"),
                                            hidden=ext.hidden, pos_ew=pos_ew, neg_ew=neg_ew,
                                            deterministic_init=getattr(
-                                               ext, "deterministic_init", False))
+                                               ext, "deterministic_init", False),
+                                           fanout=getattr(ext, "fanout", ()))
         return m, z_mol, z_prot, model
 
     with ThreadPoolExecutor(max_workers=ext.n_models) as pool:
@@ -815,6 +1016,10 @@ class GnnSignedExtractor:
     # re-running an old command now reproduces a DIFFERENT model. Name the
     # criterion explicitly in commands whose numbers you intend to keep.
     criterion: str = "greedy_pair_cover"
+    # Which draw the `random` CONTROL criterion makes; ignored by every other
+    # criterion, which are deterministic given the train edges. Set it per graph seed
+    # when sweeping, or the control is one lucky draw reported as a baseline.
+    select_seed: int = 0
     # How `q` turns into K (mol_selection.resolve_K). "coverage_quantile" is the
     # M2OR-era reading and stays the default so every existing number
     # reproduces. On Carey/Hallem it is a NO-OP -- those matrices are complete,
@@ -904,6 +1109,20 @@ class GnnSignedExtractor:
     # atomic and reorders between runs. It removes the init lottery, which is the large
     # half.
     deterministic_init: bool = False
+    # WHICH message-passing operator the signed stacks are built from
+    # (orbind.gnn_extractor.CONVS). "sage" is ours and is what every reported number
+    # uses; the others exist for the architecture ablation and change nothing else
+    # about the model -- same signed structure, same decoder, same training loop.
+    conv: str = "sage"
+    # GAT only: heads on layer 1, concatenated back to `hidden`. Ignored otherwise.
+    heads: int = GAT_HEADS
+    # The two things our encoder historically did NOT take from GraphSAGE, both
+    # opt-in so every reported number is untouched (see WHAT "GRAPHSAGE" MEANS HERE):
+    #   fanout=(25, 10)   sample at most this many incoming edges per node per layer,
+    #                     redrawn each epoch; inference stays full-neighbourhood
+    #   normalize_layers  L2-normalise the node embeddings after every layer
+    fanout: tuple = ()
+    normalize_layers: bool = False
     pooling: str = "signed_sage"
     dgi_weight: float = 0.0            # >0 enables the DeepGraphInfomax auxiliary loss
     dgi_scope: str = "shared"          # "shared" (mol+prot) or "prot"
@@ -916,6 +1135,22 @@ class GnnSignedExtractor:
         if self.criterion not in mol_selection.CRITERIA:
             raise ValueError(f"criterion must be one of {mol_selection.CRITERIA}, "
                              f"got {self.criterion!r}")
+        if self.fanout:
+            self.fanout = tuple(int(f) for f in self.fanout)
+            if any(f <= 0 for f in self.fanout):
+                raise ValueError(f"fanout entries must be positive, got {self.fanout}")
+            if len(self.fanout) != 2:
+                raise ValueError(f"the encoder has two layers, so fanout needs two "
+                                 f"entries, got {self.fanout}")
+            if self.edge_weight_mode != "none":
+                # the sampler drops edges but not their weights, so the two would
+                # silently disagree about which edge a weight belongs to
+                raise ValueError("fanout and edge_weight_mode='magnitude' cannot be "
+                                 "combined: the sampler does not carry edge weights")
+        if self.conv not in CONVS:
+            raise ValueError(f"conv must be one of {CONVS}, got {self.conv!r}")
+        if self.conv == "gat" and self.hidden % self.heads:
+            raise ValueError(f"hidden={self.hidden} must divide by heads={self.heads}")
         if self.k_mode not in mol_selection.K_MODES:
             raise ValueError(f"k_mode must be one of {mol_selection.K_MODES}, "
                              f"got {self.k_mode!r}")
@@ -953,7 +1188,9 @@ class GnnSignedExtractor:
         return _SignedSage(mol_dim, prot_dim, self.hidden, self.dropout,
                            weighted=(self.edge_weight_mode != "none"),
                            pca_mol=self._pca_mol, pca_prot=self._pca_prot,
-                           alpha=self.alpha, s_prot=self._s_prot)
+                           alpha=self.alpha, s_prot=self._s_prot,
+                           conv=self.conv, heads=self.heads,
+                           normalize=self.normalize_layers)
 
     def _hp(self, seed):
         return dict(lr=self.lr, weight_decay=self.weight_decay, clip_grad=self.clip_grad,

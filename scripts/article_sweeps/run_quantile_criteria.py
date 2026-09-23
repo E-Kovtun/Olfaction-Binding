@@ -181,7 +181,11 @@ def graph_rows(ds, regime, fold, seed, crit, q, sw, args, P):
         name="cls", protein_path=pp, molecule_path=mp,
         q=float(q), criterion=crit, k_mode=args.k_mode,
         task=task, n_models=args.n_models, epochs=args.epochs, emit="prot",
-        alpha=args.alpha, deterministic_init=args.seed_graph)
+        alpha=args.alpha, deterministic_init=args.seed_graph,
+        # the `random` control draws a different set of hubs per seed, so its spread
+        # over seeds is visible instead of one lucky draw standing in for a baseline.
+        # Every other criterion ignores this.
+        select_seed=int(seed))
     t0 = time.time()
     Z = dict(zip(("tr", "va", "te"),
                  ext.fit_transform(P["pairs"], P["tr"], P["va"], P["te"], seed)))

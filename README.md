@@ -548,7 +548,7 @@ can run while 1.1 is still going.
 # for A2 (tab:t4): fits every row of the protein-representation table, ours included
 .venv/bin/python scripts/modeling/analysis/prot_floor_sweep.py \
     --dataset m2or cc hc --regime transductive inductive \
-    --gnn esm3@1 esm3@0 prott5@1 --gnn-seeds 42 43 44 45 46
+    --gnn esm3@1 esm3@0 prott5@1 --seeds 42 43 44 45 46
 
 # for A3.3 (tab:alpha0): the one-hot boosting heads. Pass the SAME protein npz the
 # sweep used -- it decides the coverage mask even though one-hot replaces ESM
@@ -642,10 +642,11 @@ lists, so the whole six-cell table is one invocation of each.
 # fits: classical amino-acid descriptors, the one-hot controls, each pLM whose npz
 # covers the pool, and -- with --gnn -- our graph, boosted as
 # [refined receptor || ChemBERTa], which is our cls+mol.
-# Five graph seeds, to match the five the main tables average.
+# Five seeds, as everywhere: one seed initialises the graph AND seeds the head,
+# so a row is (fold, seed) exactly as in 1.1. There is no separate graph-seed axis.
 .venv/bin/python scripts/modeling/analysis/prot_floor_sweep.py \
     --dataset m2or cc hc --regime transductive inductive \
-    --gnn esm3@1 esm3@0 prott5@1 --gnn-seeds 42 43 44 45 46
+    --gnn esm3@1 esm3@0 prott5@1 --seeds 42 43 44 45 46
 
 # renders: one combined table, a column per cell, the metric of record only
 .venv/bin/python scripts/article_tables/s2_protein_sources.py \

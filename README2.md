@@ -268,7 +268,7 @@ construction:
 ```bash
 .venv/bin/python scripts/modeling/analysis/prot_floor_sweep.py \
     --dataset m2or cc hc --regime transductive inductive \
-    --gnn esm3@1 esm3@0 prott5@1 --gnn-seeds 42 43 44 45 46
+    --gnn esm3@1 esm3@0 prott5@1 --seeds 42 43 44 45 46
 ```
 
 `name@alpha` is a protein source and a position on the node dial: `1` is the ordinary

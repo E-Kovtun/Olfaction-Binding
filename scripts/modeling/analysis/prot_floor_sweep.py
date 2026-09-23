@@ -327,7 +327,8 @@ def gnn_rows(args, dataset, spec, pairs, splits, y_all, Xmol, row_m, task, metri
     * the molecule embedding is the SAME npz the boost's molecule half uses, so the
       only thing that changes between this row and `esm3` above is the receptor side;
     * `deterministic_init=True` removes the initialisation lottery, which is what the
-      paper's own runs do (`--seed-graph`);
+      paper's own runs do (`--seed-graph`) -- and the seed it is tied to is the ROW's
+      seed, so one number covers the graph and the head, exactly as there;
     * the training REGIME -- neighbour sampling and per-layer L2 normalisation -- is
       passed explicitly rather than inherited from the extractor's default, because
       that default moved on 23.09.2026 and a table whose rows silently changed model
@@ -341,10 +342,13 @@ def gnn_rows(args, dataset, spec, pairs, splits, y_all, Xmol, row_m, task, metri
     for f in args.folds:
         tr, te = splits[f]
         empty = np.empty(0, dtype=np.int64)
-        for gseed in args.gnn_seeds:
-            if all(cell_key({"prot": row_name, "fold": f, "seed": sd,
-                             "gnn_seed": gseed}) in done for sd in args.seeds):
-                continue          # this graph is already fitted for every boost seed
+        # ONE seed per row: it initialises the graph AND seeds the boosting head, which
+        # is what `--seed-graph` does in the main sweep. A separate graph-seed axis would
+        # make a row here mean something different from a row there.
+        for seed in args.seeds:
+            if cell_key({"prot": row_name, "fold": f, "seed": seed,
+                         "gnn_seed": seed}) in done:
+                continue
             ext = GnnSignedExtractor(
                 name="cls", protein_path=prot_path, molecule_path=mol_path,
                 task=task, emit="prot", prot_mix=alpha,
@@ -352,25 +356,24 @@ def gnn_rows(args, dataset, spec, pairs, splits, y_all, Xmol, row_m, task, metri
                 deterministic_init=True, fanout=gnn_regime(args)[0],
                 normalize_layers=gnn_regime(args)[1], **variant)
             t0 = time.time()
-            Zp_tr, _Zp_va, Zp_te = ext.fit_transform(pairs, tr, empty, te, gseed)
+            Zp_tr, _Zp_va, Zp_te = ext.fit_transform(pairs, tr, empty, te, seed)
             t_graph = time.time() - t0
             Xtr = np.concatenate([Zp_tr, Xmol[row_m[tr]]], 1).astype(np.float32)
             Xte = np.concatenate([Zp_te, Xmol[row_m[te]]], 1).astype(np.float32)
-            for seed in args.seeds:
-                if cell_key({"prot": row_name, "fold": f, "seed": seed,
-                             "gnn_seed": gseed}) in done:
-                    continue
-                model = fit_boost(Xtr, y_all[tr], seed=seed, task=task)
-                m = metric_fn(y_all[te], predict_scores(model, Xte, task=task))
-                fan, norm = gnn_regime(args)
-                rows.append({"prot": row_name, "fold": f, "seed": seed,
-                             "gnn_seed": gseed, "pdim": int(Zp_tr.shape[1]),
-                             "dim": int(Xtr.shape[1]), "n_train": len(tr),
-                             "t_graph": t_graph,
-                             "gnn_regime": regime_tag(fan, norm), **m})
-                print(f"{row_name:22} fold{f} gseed{gseed} seed{seed} "
-                      f"pdim={Zp_tr.shape[1]:5} " +
-                      "  ".join(f"{k}={m[k]:.3f}" for k in list(m)[:2]), flush=True)
+            model = fit_boost(Xtr, y_all[tr], seed=seed, task=task)
+            m = metric_fn(y_all[te], predict_scores(model, Xte, task=task))
+            fan, norm = gnn_regime(args)
+            # `gnn_seed` is kept in the row, equal to `seed`, so that `cell_key` still
+            # separates a graph row from a descriptor row (which carries no graph and
+            # keys as -1) and so that older CSVs stay readable.
+            rows.append({"prot": row_name, "fold": f, "seed": seed,
+                         "gnn_seed": seed, "pdim": int(Zp_tr.shape[1]),
+                         "dim": int(Xtr.shape[1]), "n_train": len(tr),
+                         "t_graph": t_graph,
+                         "gnn_regime": regime_tag(fan, norm), **m})
+            print(f"{row_name:22} fold{f} seed{seed} "
+                  f"pdim={Zp_tr.shape[1]:5} " +
+                  "  ".join(f"{k}={m[k]:.3f}" for k in list(m)[:2]), flush=True)
     return rows
 
 
@@ -516,11 +519,9 @@ def parser():
                     help="add OUR graph as rows: name@alpha, alpha on the v9 NODE "
                          f"dial (1 = plain graph on that source, 0 = receptor identity "
                          f"alone). Bare --gnn means {' '.join(DEFAULT_GNN)}")
-    ap.add_argument("--gnn-seeds", type=int, nargs="+", default=[42],
-                    help="GRAPH seeds (each trains a graph). One by default: a graph "
-                         "per fold per seed per spec is the expensive part of this "
-                         "table, and the boost seeds below already average inside "
-                         "each fold")
+    ap.add_argument("--gnn-seeds", type=int, nargs="+", default=None,
+                    help="REMOVED 23.09.2026. The graph seed is the row's seed now, so "
+                         "there is one seed axis, as in the main sweep. Use --seeds")
     ap.add_argument("--gnn-fanout", type=int, nargs=2, default=[25, 10],
                     metavar=("L1", "L2"),
                     help="neighbour sampling for OUR rows, layer 1 then layer 2, "
@@ -536,6 +537,17 @@ def parser():
     ap.add_argument("--out", default=None,
                     help="default: results/tables/prot_floor_<dataset>_<regime>.csv")
     return ap
+
+
+def refuse_retired_flags(args):
+    """`--gnn-seeds` used to cross a graph-seed axis with the boost-seed axis. Ignoring
+    it silently would quietly run a fifth of the work the caller asked for, and the old
+    runbook command still passes it -- so it fails, loudly, with the replacement."""
+    if getattr(args, "gnn_seeds", None):
+        raise SystemExit(
+            "--gnn-seeds is gone: the graph seed IS the row seed now, one axis, as in "
+            "the main sweep. Drop the flag and pass those numbers to --seeds instead:\n"
+            f"    --seeds {' '.join(str(s) for s in args.gnn_seeds)}")
 
 
 def run_cell(args, dataset, regime):
@@ -693,6 +705,7 @@ def run_cell(args, dataset, regime):
 
 def main():
     args = parser().parse_args()
+    refuse_retired_flags(args)
     if args.out and (len(args.dataset) > 1 or len(args.regime) > 1):
         raise SystemExit("--out names ONE file; drop it to write the default path per "
                          "cell, or ask for a single --dataset/--regime")

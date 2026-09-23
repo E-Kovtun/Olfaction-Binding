@@ -28,7 +28,8 @@ sys.path.insert(0, str(_repo))
 #: Columns worth reporting, in the order a reader cares about them. Missing ones are
 #: skipped rather than faked: an older series genuinely has no `seeded_graph`, and
 #: printing "False" for it would assert something the file does not say.
-FIELDS = ["alpha", "seed", "fold", "seeded_graph", "dial", "mol_source", "variant"]
+FIELDS = ["alpha", "seed", "fold", "seeded_graph", "dial", "mol_source", "variant",
+          "fanout", "normalize_layers"]
 
 
 def summarise(root: pathlib.Path) -> dict:

@@ -93,6 +93,30 @@ def test_alpha_outside_the_unit_interval_is_refused():
         parse_source_arg("cls=gnn_signed::::::::::::1.5")
 
 
+def test_the_graphsage_regime_is_fields_16_and_17_and_off_by_default():
+    """`:paper` from the architecture sweep, reachable from an ensemble command. Off
+    unless asked: every battery run before these fields existed is unaffected."""
+    ex = parse_source_arg("cls=gnn_signed")[1]
+    assert ex.fanout == () and ex.normalize_layers is False
+    _, ex = parse_source_arg("cls=gnn_signed::::::::::::::::25-10:1")
+    assert ex.fanout == (25, 10)
+    assert ex.normalize_layers is True
+    assert (ex.q, ex.criterion, ex.n_models) == (0.99, "greedy_pair_cover", 1)
+
+
+def test_the_fanout_accepts_commas_too():
+    """A dash is the documented separator because a colon splits the spec; a comma is
+    what a hand reaches for anyway, and silently meaning something else would be worse
+    than accepting it."""
+    assert parse_source_arg("cls=gnn_signed::::::::::::::::25,10")[1].fanout == (25, 10)
+
+
+def test_a_one_layer_fanout_is_refused_by_the_extractor():
+    """The encoder has two layers; one number would silently mean 'both'."""
+    with pytest.raises(ValueError, match="two entries"):
+        parse_source_arg("cls=gnn_signed::::::::::::::::25")
+
+
 def test_the_name_is_the_extractors_name():
     _, ex = parse_source_arg("refined=gnn_signed")
     assert ex.name == "refined"

@@ -585,7 +585,11 @@ def _train_graph(arm, alpha, fold, seed, ds, P, args):
         # the v9 dial replaces the node features itself, so `onehot_nodes` must be off
         # there -- its rho=0 end IS the one-hot arm, and the extractor refuses both
         onehot_nodes=(args.nodes == "onehot" and dial == "gate"),
-        deterministic_init=args.seed_graph, **knob)
+        deterministic_init=args.seed_graph,
+        # The GraphSAGE regime, off unless asked (see --fanout). A root produced
+        # without these flags is bit-identical to one produced before they existed.
+        fanout=tuple(getattr(args, "fanout", None) or ()),
+        normalize_layers=bool(getattr(args, "normalize_layers", False)), **knob)
     t0 = time.time()
     Zp_tr, Zp_va, Zp_te = ext.fit_transform(P["pairs"], P["tr"], P["va"], P["te"], seed)
     return {"tr": Zp_tr, "va": Zp_va, "te": Zp_te}, ext, time.time() - t0
@@ -706,6 +710,11 @@ def _graph_rows(arm, alpha, fold, seed, ds, P, args, spec=None):
                 mol_source=args.mol_source, nodes=args.nodes, dial=dial,
                 mix_seed=(args.mix_seed if dial == "nodes" else ""),
                 seeded_graph=bool(args.seed_graph), z_source=source,
+                # Stamped per row, not just printed: a root that cannot say whether it
+                # was trained in the sampled regime is two different models in one CSV
+                # as soon as someone tops it up with different flags.
+                fanout="-".join(map(str, getattr(args, "fanout", None) or ())),
+                normalize_layers=bool(getattr(args, "normalize_layers", False)),
                 t_graph=t_graph, **provenance(args), **geo)
     rows, dump = [], {}
     for combo in combos:
@@ -1028,6 +1037,8 @@ def sweep(ds, regime, args, dash=None):
             tmp.replace(path)
 
     pp, mp = paths(ds, args)
+    _fan = tuple(getattr(args, "fanout", None) or ())
+    _norm = bool(getattr(args, "normalize_layers", False))
     ends = ("a=0 structure alone -> a=1 the graph alone" if args.dial == "gate"
             else "a=0 receptor identity alone -> a=1 the legacy graph (ESM nodes)")
     print(f"\n=== {ds.upper()} / {regime} ({FAMILY[ds][regime]}) ===\n"
@@ -1038,6 +1049,8 @@ def sweep(ds, regime, args, dash=None):
           f"{VARIANTS[args._variant]}\n"
           f"    mol {args.mol_source}: {mp.rsplit('/', 1)[-1]}   "
           f"prot: {pp.rsplit('/', 1)[-1]}\n"
+          f"    regime {'sampled ' + '-'.join(map(str, _fan)) if _fan else 'full-neighbourhood'}"
+          f"{', L2-normalised per layer' if _norm else ', un-normalised'}\n"
           f"    graph init {'SEEDED from --seeds' if args.seed_graph else 'unseeded (global RNG)'}"
           f"   splits scored: {'train+' if args.score_train else ''}val+test\n"
           f"    heads {', '.join(combos_wanted(args))}   backfill "
@@ -1243,6 +1256,17 @@ def main():
                     help="skip the per-pair prediction dump. ~50 MB for the grid, and "
                          "without it no analysis can be stratified by receptor or by "
                          "odorant after the fact -- only a rerun can")
+    ap.add_argument("--fanout", type=int, nargs=2, default=None,
+                    metavar=("L1", "L2"),
+                    help="NEIGHBOUR SAMPLING, layer 1 then layer 2: keep at most this "
+                         "many incoming edges per node, redrawn every epoch; inference "
+                         "stays full-neighbourhood. GraphSAGE's own setting is 25 10. "
+                         "Off by default, which is how every root before Sep 2026 was "
+                         "trained")
+    ap.add_argument("--normalize-layers", action="store_true",
+                    help="L2-normalise node embeddings after every layer, as GraphSAGE "
+                         "does. Off by default. Belongs with --fanout: the two together "
+                         "are the ':paper' rows of the architecture table")
     ap.add_argument("--n-models", type=int, default=1)
     ap.add_argument("--epochs", type=int, default=900)
     ap.add_argument("--n-perm", type=int, default=200,

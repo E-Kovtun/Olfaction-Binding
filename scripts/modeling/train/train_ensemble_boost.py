@@ -190,7 +190,9 @@ _FACTORY_SPEC = {
     # emit: "prot" (default, v5 probe shape) or "both". gnn_signed_dgi adds a
     # DeepGraphInfomax auxiliary loss (shared scope, lambda=0.5). Field 12 is the
     # v8 alpha gate (blank = off): 12 colons is a lot to type by hand, which is why
-    # scripts/modeling/train/run_alpha_gate_sweep.py exists.
+    # scripts/modeling/train/run_alpha_gate_sweep.py exists. Fields 16-17 are the two
+    # GraphSAGE-regime additions (neighbour sampling, per-layer L2), both off by
+    # default -- see scripts/article_sweeps/run_architecture.py for what they buy.
     "gnn_signed": ("orbind.gnn_extractor", "GnnSignedExtractor"),
     "gnn_signed_dgi": ("orbind.gnn_extractor", "GnnSignedDgiExtractor"),
     # TWO-STAGE signed GNN: stage 1 fine-tunes LoRA-ChemBERTa the LORAX way and
@@ -331,6 +333,17 @@ def parse_source_arg(raw: str):
         # field 15: which draw of the identity vectors (default 0).
         if len(parts) > 15 and parts[15]:
             kwargs["mix_seed"] = int(parts[15])
+        # Fields 16-17: the two things our encoder did NOT take from GraphSAGE, so
+        # that a battery can be run in the paper's regime instead of ours without a
+        # second code path. Field 16 is the per-layer fan-out, written with a dash
+        # because the spec separator is a colon: "25-10" = 25 on layer 1, 10 on layer
+        # 2, redrawn every epoch, inference still full-neighbourhood. Field 17 is the
+        # per-layer L2 normalisation. Blank leaves both off, so every command written
+        # before this line means exactly what it meant.
+        if len(parts) > 16 and parts[16]:
+            kwargs["fanout"] = tuple(int(f) for f in parts[16].replace(",", "-").split("-"))
+        if len(parts) > 17 and parts[17]:
+            kwargs["normalize_layers"] = parts[17] not in ("0", "false", "False")
         return name, _factory(type_)(name=name, **kwargs)
 
     if type_ in _GNNLORA_TYPES:

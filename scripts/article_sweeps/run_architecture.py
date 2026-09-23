@@ -373,11 +373,16 @@ def sweep(ds, regime, sw, args, xgb_version):
             state["n"] += 1
             el = time.time() - t0
             eta = el / state["n"] * (heavy - state["n"])
-            head = new[0]
+            # THE TEST ROW, not new[0]. `splits_wanted` returns train FIRST when
+            # train scoring is on, so printing new[0] printed the TRAINING score --
+            # which on this graph is ~0.999 and reads either as a triumph or as a
+            # leak, being neither. The CSV always held every split; only this line
+            # was lying, and a progress line nobody can trust is worse than none.
+            head = next((r for r in new if str(r.get("split")) == "test"), new[0])
             body = head["status"] if str(head["status"]).startswith("failed") else \
                 " ".join(f"{m}={head[m]:.3f}" for m in sw.TASK_METRICS[sw.TASK[ds]]
                          if m in head and np.isfinite(head[m]))
-            print(f"  f{head['fold']} s{head['seed']} {head['arch']:<14} {body}   "
+            print(f"  f{head['fold']} s{head['seed']} {head['arch']:<14} [{head['split']}] {body}   "
                   f"[{state['n']}/{heavy} {_fmt(el)} elapsed, ETA {_fmt(eta)}]",
                   flush=True)
 

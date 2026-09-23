@@ -349,11 +349,14 @@ def sweep(ds, regime, sw, args, xgb_version):
             state["n"] += 1
             el = time.time() - t0
             eta = el / state["n"] * (heavy - state["n"])
-            head = new[0]
+            # THE TEST ROW, not new[0]: `splits_wanted` puts train first when train
+            # scoring is on, and a progress line showing the training score reads as
+            # a result when it is not one.
+            head = next((r for r in new if str(r.get("split")) == "test"), new[0])
             body = head["status"] if str(head["status"]).startswith("failed") else \
                 " ".join(f"{m}={head[m]:.3f}" for m in sw.TASK_METRICS[sw.TASK[ds]]
                          if m in head and np.isfinite(head[m]))
-            print(f"  f{head['fold']} s{head['seed']} q={head['quantile']:<5g} "
+            print(f"  f{head['fold']} s{head['seed']} [{head['split']}] q={head['quantile']:<5g} "
                   f"{head['criterion']:<18} K={head['K']:<4} {body}   "
                   f"[{state['n']}/{heavy} {_fmt(el)} elapsed, ETA {_fmt(eta)}]",
                   flush=True)

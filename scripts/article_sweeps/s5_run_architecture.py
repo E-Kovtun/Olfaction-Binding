@@ -88,9 +88,12 @@ PAPER_SUFFIX = ":paper"
 #: and the un-suffixed rows are the historical encoder. The suffix is kept because the
 #: numbers already on disk carry it in their `arch` column, and renaming it would make
 #: every cached cell look missing.
-#: The rows this sweep trains by default: four operators as we run them, plus the two
-#: whose papers define a regime we could adopt.
-DEFAULT_SPECS = ("sage", "gat", "graphconv", "gin", "sage:paper", "gat:paper")
+#: The rows this sweep trains by default: the four operators, each in the regime this
+#: project reports -- which since 23.09.2026 is GraphSAGE's own (sampled, normalised),
+#: hence the suffix on all four. The un-suffixed specs still work and train the
+#: historical encoder; they are simply not part of the table any more, because there is
+#: no longer a variant of ours to contrast with.
+DEFAULT_SPECS = ("sage:paper", "gat:paper", "graphconv:paper", "gin:paper")
 
 #: The head the paper compares on: our refined receptor beside the raw molecule.
 DEFAULT_COMBOS = ("cls+mol",)
@@ -200,7 +203,11 @@ def graph_rows(ds, regime, fold, seed, spec, hidden, sw, args, P):
         q=float(v["q"]), criterion=v["criterion"], k_mode=v["k_mode"],
         conv=conv, heads=args.heads, hidden=int(hidden),
         task=task, n_models=args.n_models, epochs=args.epochs, emit="prot",
-        alpha=args.alpha, deterministic_init=args.seed_graph, **extra)
+        # prot_mix=1.0 is written out rather than left implicit: the main sweep
+        # always passes it (`--dial nodes --alphas 1.0`) and rho=1 short-circuits to the
+        # embedding file itself, so this is the same call and not merely the same model.
+        alpha=args.alpha, prot_mix=1.0,
+        deterministic_init=args.seed_graph, **extra)
     t0 = time.time()
     Z = dict(zip(("tr", "va", "te"),
                  ext.fit_transform(P["pairs"], P["tr"], P["va"], P["te"], seed)))
@@ -454,14 +461,17 @@ def parser():
                     help="literal fold ids; cannot be mixed across datasets")
     ap.add_argument("--n-folds", type=int, default=None,
                     help="the first N folds of whatever this cell uses")
-    ap.add_argument("--seeds", type=int, nargs="+", default=[42],
-                    help="MODEL seeds, averaged inside a fold by the reader")
+    ap.add_argument("--seeds", type=int, nargs="+", default=[42, 43, 44, 45, 46],
+                    help="MODEL seeds, as in the main tables: one seed initialises the "
+                         "graph AND seeds the boosting head, and the reader averages "
+                         "them inside each fold before taking any interval")
     ap.add_argument("--alpha", type=float, default=None,
                     help="v8 gate on the graph output. Default None = the pipeline "
                          "graph, which is what an architecture sweep should keep")
-    ap.add_argument("--seed-graph", action="store_true",
-                    help="seed the graph init from the model seed. Worth it here: the "
-                         "init lottery is the noise this table is most exposed to")
+    ap.add_argument("--no-seed-graph", dest="seed_graph", action="store_false",
+                    help="leave the graph initialisation to the global RNG. ON by "
+                         "default since 23.09.2026, because the main tables are seeded "
+                         "and an unseeded row here would be a different experiment")
     ap.add_argument("--n-models", type=int, default=1)
     ap.add_argument("--epochs", type=int, default=900)
     ap.add_argument("--mol-source", default="chemberta",

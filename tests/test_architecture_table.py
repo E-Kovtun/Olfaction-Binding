@@ -46,7 +46,7 @@ def reader():
 
 # ----------------------------------------------------------------- fixtures
 
-ARCHS = ["sage:paper", "sage", "gat", "graphconv", "gin"]
+ARCHS = ["sage:paper", "gat:paper", "graphconv:paper", "gin:paper", "sage"]
 
 
 def frame(dataset="m2or", metric="AUROC", base=0.80, step=0.01, folds=(1, 2, 3, 4, 5),
@@ -101,8 +101,11 @@ def test_every_operator_is_offered(sweep):
     """Four operators as we run them, plus the two whose papers define a regime."""
     from orbind.gnn_extractor import CONVS
     specs = sweep.parser().parse_args([]).conv
-    assert [s for s in specs if ":" not in s] == list(CONVS)
-    assert specs[-2:] == ["sage:paper", "gat:paper"]
+    assert [s.split(":")[0] for s in specs] == list(CONVS)
+    assert all(s.endswith(":paper") for s in specs), (
+        "every default row trains in the regime the project reports; an un-suffixed "
+        "spec is the historical encoder and does not belong in the table")
+    assert specs[0] == "sage:paper", "ours leads the list, as it leads the table"
 
 
 def test_a_spec_is_parsed_and_a_bad_one_is_refused(sweep):
@@ -239,8 +242,8 @@ def test_a_cell_missing_an_operator_keeps_the_row_visible(reader):
     b, mb = reader.cell_table(frame(archs=["sage", "gat"]), "m2or", "cls+mol")
     rows, cols, wide, labels, ranks = reader.combine(
         [("m2or", "transductive", ma, a), ("m2or", "inductive", mb, b)])
-    assert "gin" in rows
-    assert reader.fmt(wide["gin"].get(cols[1])) == "--"
+    assert "gin:paper" in rows
+    assert reader.fmt(wide["gin:paper"].get(cols[1])) == "--"
 
 
 def test_overlap_is_computed_and_not_asserted(reader):
@@ -268,9 +271,18 @@ def test_the_width_row_is_labelled_as_a_width(reader):
     assert reader.label("sage") == "GraphSAGE (full neighbourhood, un-normalised)"
 
 
-def test_the_paper_row_says_what_it_added(reader):
-    assert reader.label("sage:paper") == "GraphSAGE (sampled + normalised, ours)"
-    assert reader.label("gat@512:paper") == "GAT, width 512 (sampled + normalised, ours)"
+def test_the_reported_regime_is_not_announced_in_the_label(reader):
+    """It is the only regime in the table, so naming it on every row would be noise --
+    and calling it "ours" would claim a variant this project no longer has."""
+    assert reader.label("sage:paper") == "GraphSAGE"
+    assert reader.label("gat@512:paper") == "GAT, width 512"
+
+
+def test_a_historical_row_is_marked_if_one_turns_up(reader):
+    """The un-suffixed rows are a different encoder. They are not in the default table,
+    but a CSV can still hold them, and an unmarked row would make the table read as a
+    comparison of operators when it was partly a comparison of regimes."""
+    assert reader.label("sage") == "GraphSAGE (full neighbourhood, un-normalised)"
 
 
 def test_nothing_on_disk_prints_the_command_and_fails(reader, tmp_path, capsys):
@@ -291,4 +303,5 @@ def test_the_end_to_end_render_writes_its_three_files(reader, tmp_path):
         assert (out / name).exists()
     tex = (out / "architecture.tex").read_text(encoding="utf-8")
     assert r"\label{tab:arch}" in tex
-    assert "GraphSAGE (sampled + normalised, ours)" in tex
+    assert "GraphSAGE" in tex
+    assert "ours" not in tex

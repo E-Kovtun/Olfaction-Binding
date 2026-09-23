@@ -41,18 +41,19 @@ from scripts.analysis import alpha_grid as ag  # noqa: E402
 #: The anchor, and the operator the paper reports. Everything else is printed in the
 #: order the sweep produced it, so a new operator does not need a code change here.
 ANCHOR = "boost_full"
+#: The operator this project uses. It carries the `:paper` suffix only because that is
+#: how the regime is named on disk; the table prints it as plain GraphSAGE.
 OURS = "sage:paper"
 
 LABEL = {"boost_full": "Boosting base (no graph)", "sage": "GraphSAGE",
          "gat": "GAT", "graphconv": "GraphConv", "gin": "GIN"}
-#: `:paper` = that operator run the way its paper runs it -- neighbour sampling plus
-#: per-layer L2 normalisation, the two things our encoder took from neither.
+#: `:paper` marks the regime this project now trains in -- neighbour sampling plus
+#: per-layer L2 normalisation, GraphSAGE's own. Since it is the only regime the table
+#: reports, it is NOT printed: a suffixed row is just that operator. An un-suffixed row
+#: is the historical encoder, and if one turns up it says so, because a table mixing the
+#: two would be comparing regimes while claiming to compare operators.
 PAPER_SUFFIX = ":paper"
-PAPER_NOTE = "sampled + normalised"
-#: Which row the paper reports. Until 23.09.2026 this was the un-suffixed `sage`; the
-#: ablation moved the default, so it is now the sampled + normalised one, and the plain
-#: rows are the historical encoder kept for the comparison.
-OURS_NOTE = "ours"
+HISTORICAL_NOTE = "full neighbourhood, un-normalised"
 #: Compact names for a header that has to fit six times across a terminal.
 SHORT_DS = {"m2or": "M2OR", "cc": "Carey", "hc": "Hallem"}
 SHORT_REG = {"transductive": "trans", "inductive": "cold mol",
@@ -70,10 +71,9 @@ def label(arch):
     out = LABEL.get(base, base)
     if width:
         out += f", width {width}"
-    if base == "boost_full":
+    if base == "boost_full" or paper:
         return out
-    note = f"{PAPER_NOTE}, {OURS_NOTE}" if paper else "full neighbourhood, un-normalised"
-    return f"{out} ({note})"
+    return f"{out} ({HISTORICAL_NOTE})"
 
 
 def row_order(arch):

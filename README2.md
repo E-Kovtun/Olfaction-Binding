@@ -276,6 +276,15 @@ graph over that source, `0` is a graph told only which receptor this is and noth
 its sequence. It writes one CSV per cell under `results/tables/`, plus a provenance
 sidecar beside each.
 
+`--seeds` means the same thing here as everywhere: **one** seed per row, initialising the
+graph and seeding the boosting head, so a row is (split, seed) and our rows are averaged
+over exactly as many draws as every row they are compared with.
+
+Our rows are fitted on this script's own folds, which are the project's folds with the
+validation split left unscored -- so they land within about a thousandth of the same
+graph's row in the main battery (§4.1). That agreement is worth checking when you have
+both: it is the cheapest evidence that the two chains are reading the same model.
+
 This run is resumable per cell. It refuses to resume a table whose graph rows were
 trained under a different encoder configuration than the one you are asking for now, and
 says so by name — two encoders in one column is not a table.

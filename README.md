@@ -388,58 +388,52 @@ baselines on another.
 
 #### 1.1 The sweep — our graph and the boosting base
 
-One command per protein source, and the run name is the thing every later command
-points back at. Both commands must carry the **same** dial flags or their cells are not
-comparable: `--dial nodes` is the v9 parameterisation (alpha moves the graph's *input*),
-and `--seed-graph` removes the initialisation lottery. Turning either on or off makes a
-new series, not more folds of an old one.
+The run name is the thing every later command points back at, and every command writing
+into one root must carry the **same** dial flags or its cells are not comparable:
+`--dial nodes` is the v9 parameterisation (alpha moves the graph's *input*), and
+`--seed-graph` ties the initialisation to the row's seed. Turning either on or off makes
+a new series, not more folds of an old one.
+
+Two commands, in this order. The first is what five artifacts wait on; the second is
+small and feeds only A6, so it can be left until just before that table.
 
 ```bash
-# ESM-1b -- the tables' default root. Omitting --prot-embeddings selects PROT_SOURCE,
-# whose M2OR entry has no dataset suffix.
-.venv/bin/python scripts/modeling/train/run_alpha_gate_sweep.py \
-    --dataset m2or cc hc --regime transductive inductive \
-    --mol-source chemberta gin ecfp --alphas 1.0 \
-    --dial nodes --seed-graph --seeds 42 43 44 45 46 \
-    --out results/graph/v9_seeded \
-    --max-parallel 4 --gpus 0 1 2 3
-
-# ESM3 -- the same command with two flags changed.
-.venv/bin/python scripts/modeling/train/run_alpha_gate_sweep.py \
-    --dataset m2or cc hc --regime transductive inductive \
-    --mol-source chemberta gin ecfp --alphas 1.0 \
-    --dial nodes --seed-graph --seeds 42 43 44 45 46 \
-    --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz' \
-    --out results/graph/v14_esm3_paper \
-    --max-parallel 4 --gpus 0 1 2 3
-```
-
-Both commands train the encoder in **GraphSAGE's own regime** — neighbour sampling
-(fan-out 25 then 10, redrawn every epoch, inference still full-neighbourhood) and
-per-layer L2 normalisation. That is the default since 23.09.2026; `--fanout 0 0
---no-normalize-layers` gives the historical encoder back. **Consequence for the ESM-1b
-root:** re-running the first command as written tops `v9_seeded` up with rows from a
-different model than the ones already in it. Either give the new regime its own `--out`,
-or add the two flags above.
-
-Quote `'…{ds}.npz'`: the placeholder belongs to the script and an unquoted brace
-belongs to the shell. ESM3's files are named uniformly (`esm3_m2or.npz`,
-`esm3_cc.npz`, `esm3_hc.npz`), so one template covers all three.
-
-`--alphas 1.0` is the only point the main tables read. **The dial artefacts (A3.1,
-A3.2) need the wider grid**, which is the same command with more alphas — a longer run,
-so it is worth starting early:
-
-```bash
+# (a) THE DIAL, chemberta. Long: 11 positions x 6 cells x 5 folds x 5 seeds of graph.
+#     Feeds M1 and A1 (the alpha=1 end), A3.1 and A3.2 (every position, incl. the val
+#     files), A3.3 (the alpha=0 end). This is the command currently defining the root.
 .venv/bin/python scripts/modeling/train/run_alpha_gate_sweep.py \
     --dataset m2or cc hc --regime transductive inductive \
     --mol-source chemberta \
-    --alphas 0 0.05 0.1 0.15 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 1.0 \
+    --alphas 0 0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 1.0 \
+    --dial nodes --seed-graph --seeds 42 43 44 45 46 \
+    --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz' \
+    --out results/graph/v14_esm3_paper \
+    --max-parallel 4 --gpus 0 1 2 3
+
+# (b) THE OTHER MOLECULE SOURCES, one position each. Feeds A6 and nothing else.
+.venv/bin/python scripts/modeling/train/run_alpha_gate_sweep.py \
+    --dataset m2or cc hc --regime transductive inductive \
+    --mol-source gin ecfp --alphas 1.0 \
     --dial nodes --seed-graph --seeds 42 43 44 45 46 \
     --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz' \
     --out results/graph/v14_esm3_paper \
     --max-parallel 4 --gpus 0 1 2 3
 ```
+
+Both go into ONE root and cannot collide: the molecule source is part of each cell's
+filename, the dial position is part of the cell key inside it. (a) therefore subsumes any
+earlier `--alphas 1.0` chemberta run — those rows count as done.
+
+Both train the encoder in **GraphSAGE's own regime** — neighbour sampling (fan-out 25
+then 10, redrawn every epoch, inference still full-neighbourhood) and per-layer L2
+normalisation, the default since 23.09.2026. `--fanout 0 0 --no-normalize-layers` gives
+the historical encoder back. **Consequence for the ESM-1b root `v9_seeded`:** re-running
+either command against it tops it up with rows from a different model than the ones
+already there. Give the new regime its own `--out`, or pass those two flags.
+
+Quote `'…{ds}.npz'`: the placeholder belongs to the script and an unquoted brace belongs
+to the shell. ESM3's files are named uniformly (`esm3_m2or.npz`, `esm3_cc.npz`,
+`esm3_hc.npz`), so one template covers all three.
 
 The sweep is resumable — it reads what is already in the CSV and fits only the missing
 heads — so the commands above are also the commands that top a series up, and the dense
@@ -667,6 +661,32 @@ p = sys.argv[1]
 d = pd.read_csv(p)
 keep = d["gnn_seed"].isna() if "gnn_seed" in d.columns else d.index == d.index
 print(f"{p}: {len(d)} rows -> {int(keep.sum())} kept")
+d[keep].to_csv(p, index=False)
+PY
+done
+```
+
+`s2_protein_sources.py` also needs `--root results/tables` only if you moved the
+fitter's output; the default is that path.
+
+**Keeping what is still valid.** The resume key is `(representation, fold, seed,
+gnn_seed)` and `gnn_seed == seed` now, so a graph row from a run that predates the
+single-seed rule is reusable exactly when it sits on that diagonal. This keeps those and
+drops the rest, including anything whose regime stamp is not the current one:
+
+```bash
+for f in results/tables/prot_floor_*.csv(N); do
+  python - "${f}" <<'PY'
+import sys, pandas as pd
+p = sys.argv[1]
+d = pd.read_csv(p)
+if "gnn_seed" not in d.columns:
+    print(f"{p}: no graph rows, left alone"); raise SystemExit
+g = d["gnn_seed"].notna()
+tag = d.get("gnn_regime", pd.Series(index=d.index, dtype=object)) == "sampled25-10+norm"
+keep = (~g) | (g & (d["gnn_seed"] == d["seed"]) & tag)
+print(f"{p}: {len(d)} -> {int(keep.sum())}   graph {int(g.sum())} -> "
+      f"{int((keep & g).sum())}")
 d[keep].to_csv(p, index=False)
 PY
 done

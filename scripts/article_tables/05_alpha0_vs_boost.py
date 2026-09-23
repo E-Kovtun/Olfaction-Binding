@@ -19,7 +19,7 @@ response profile, and one that beats boost-over-ESM while tying one-hot says the
 was never about sequence.
 
     python scripts/article_tables/05_alpha0_vs_boost.py \
-        --sweep-root results/graph/v13_esm3
+        --sweep-root results/graph/main
 
 READ-ONLY. The one-hot heads are fitted by `05a_onehot_boost.py`, which writes one
 CSV per (dataset, regime) under results/article_tables/onehot_boost/; this script only
@@ -215,7 +215,9 @@ def latex(t, a):
 def parser():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--sweep-root", default="results/graph/v13_esm3")
+    ap.add_argument("--sweep-root", default=None,
+                    help="the run this table is rendered from; required, because "
+                         "two runs of this project are two different models")
     ap.add_argument("--nodes", default="nodedial",
                     help="which dial the sweep is; the two must never mix")
     ap.add_argument("--alpha", type=float, default=0.0,

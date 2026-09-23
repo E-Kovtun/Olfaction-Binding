@@ -37,7 +37,12 @@ for _p in (str(ROOT), str(HERE)):
 from scripts.analysis import alpha_grid as ag      # noqa: E402
 from scripts.analysis import paper_tables as pt    # noqa: E402
 
-SWEEP_ROOT = "results/graph/v9_seeded"
+#: NO DEFAULT, deliberately (23.09.2026). This used to name a specific run, and a
+#: reader invoked without `--sweep-root` then rendered a table from whichever series
+#: that happened to be -- a different protein source, a different encoder, silently.
+#: A missing root is now an error with a sentence, which is the only safe behaviour
+#: for a value that decides which model the table is about.
+SWEEP_ROOT = None
 ENSEMBLE_ROOT = pt.ENSEMBLE_ROOT
 OUT_ROOT = "results/article_tables"
 
@@ -133,8 +138,21 @@ def clear_cache():
     _RUNS.clear()
 
 
+def require_root(root):
+    """A sweep root the caller actually chose. See SWEEP_ROOT for why there is no
+    default to fall back on."""
+    if not root:
+        raise SystemExit(
+            "--sweep-root is required: it names the run this table is rendered from, "
+            "and there is no default because two runs of this project are two "
+            "different models. Pass the directory the sweep wrote, e.g.\n"
+            "    --sweep-root results/graph/main")
+    return root
+
+
 def sweep_frame(root=SWEEP_ROOT, combo="cls+mol"):
     """Every nodedial row under `root` holding ONE graph head, or an empty frame."""
+    root = require_root(root)
     key = (str(root), combo)
     if key not in _SWEEP:
         try:

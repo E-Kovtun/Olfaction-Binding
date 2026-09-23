@@ -137,9 +137,29 @@ def flat_criteria(P, task, criteria):
 
 # ------------------------------------------------------------------ one cell
 
+def gnn_regime(args):
+    """(fanout, normalize_layers) for this run's graphs. `--fanout 0 0` switches
+    sampling off, because a zero entry is refused by the extractor itself."""
+    fan = tuple(f for f in (getattr(args, "fanout", None) or ()) if f > 0)
+    return fan, bool(getattr(args, "normalize_layers", True))
+
+
+def regime_tag(fanout, normalize):
+    """One short string per encoder regime, stamped on every row.
+
+    Every other producer in this project records it, and this one has to as well: the
+    encoder's default moved once already, and a CSV that cannot say which model wrote
+    it is a table of numbers rather than evidence.
+    """
+    return ("sampled" + "-".join(map(str, fanout)) if fanout else "full") + \
+           ("+norm" if normalize else "")
+
+
 def _base(ds, regime, args, P, **rest):
+    fan, norm = gnn_regime(args)
     return dict(dataset=ds, regime=regime, mol_source=args.mol_source,
                 k_mode=args.k_mode, n_models=args.n_models, epochs=args.epochs,
+                gnn_regime=regime_tag(fan, norm),
                 n_receptors=len(P["order"]), status="ok", **rest)
 
 
@@ -180,6 +200,7 @@ def graph_rows(ds, regime, fold, seed, crit, q, sw, args, P):
     ext = GnnSignedExtractor(
         name="cls", protein_path=pp, molecule_path=mp,
         q=float(q), criterion=crit, k_mode=args.k_mode,
+        fanout=gnn_regime(args)[0], normalize_layers=gnn_regime(args)[1],
         task=task, n_models=args.n_models, epochs=args.epochs, emit="prot",
         alpha=args.alpha, deterministic_init=args.seed_graph,
         # the `random` control draws a different set of hubs per seed, so its spread
@@ -423,6 +444,14 @@ def parser():
     ap.add_argument("--seed-graph", action="store_true",
                     help="seed the graph init from the model seed (removes the init "
                          "lottery; changes numbers against older unseeded runs)")
+    ap.add_argument("--fanout", type=int, nargs=2, default=[25, 10],
+                    metavar=("L1", "L2"),
+                    help="neighbour sampling, layer 1 then layer 2, redrawn every "
+                         "epoch; inference stays full-neighbourhood. `--fanout 0 0` "
+                         "switches it off")
+    ap.add_argument("--no-normalize-layers", dest="normalize_layers",
+                    action="store_false",
+                    help="do NOT L2-normalise node embeddings after every layer")
     ap.add_argument("--n-models", type=int, default=1)
     ap.add_argument("--epochs", type=int, default=900)
     ap.add_argument("--mol-source", default="chemberta", choices=["chemberta", "gin", "ecfp"])

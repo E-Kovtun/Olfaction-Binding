@@ -220,7 +220,17 @@ def test_sampling_and_edge_weights_are_refused_together(tmp_path):
                            edge_weight_mode="magnitude")
 
 
-def test_both_additions_are_off_by_default(tmp_path):
-    """Every reported number is un-normalised and full-neighbourhood."""
+def test_both_additions_are_on_by_default(tmp_path):
+    """DEFAULT MOVED 23.09.2026. The encoder now trains in GraphSAGE's own regime,
+    because the architecture ablation measured the two additions and they won every
+    paired comparison it made, on validation. A root trained before that date is a
+    different model, which is why this assertion is worth a test of its own."""
     ext = GnnSignedExtractor(**npz_pair(tmp_path))
+    assert ext.fanout == (25, 10) and ext.normalize_layers is True
+
+
+def test_the_historical_encoder_is_still_reachable(tmp_path):
+    """The architecture table's un-suffixed rows ARE this configuration; if it could
+    not be asked for, that table would become seven copies of one regime."""
+    ext = GnnSignedExtractor(**npz_pair(tmp_path), fanout=(), normalize_layers=False)
     assert ext.fanout == () and ext.normalize_layers is False

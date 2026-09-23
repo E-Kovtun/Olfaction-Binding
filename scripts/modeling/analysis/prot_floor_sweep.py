@@ -327,7 +327,11 @@ def gnn_rows(args, dataset, spec, pairs, splits, y_all, Xmol, row_m, task, metri
     * the molecule embedding is the SAME npz the boost's molecule half uses, so the
       only thing that changes between this row and `esm3` above is the receptor side;
     * `deterministic_init=True` removes the initialisation lottery, which is what the
-      paper's own runs do (`--seed-graph`).
+      paper's own runs do (`--seed-graph`);
+    * the training REGIME -- neighbour sampling and per-layer L2 normalisation -- is
+      passed explicitly rather than inherited from the extractor's default, because
+      that default moved on 23.09.2026 and a table whose rows silently changed model
+      between two runs is worse than one that fails.
     """
     from orbind.gnn_extractor import GnnSignedExtractor
 
@@ -345,7 +349,8 @@ def gnn_rows(args, dataset, spec, pairs, splits, y_all, Xmol, row_m, task, metri
                 name="cls", protein_path=prot_path, molecule_path=mol_path,
                 task=task, emit="prot", prot_mix=alpha,
                 n_models=args.gnn_n_models, epochs=args.gnn_epochs,
-                deterministic_init=True, **variant)
+                deterministic_init=True, fanout=gnn_regime(args)[0],
+                normalize_layers=gnn_regime(args)[1], **variant)
             t0 = time.time()
             Zp_tr, _Zp_va, Zp_te = ext.fit_transform(pairs, tr, empty, te, gseed)
             t_graph = time.time() - t0
@@ -357,14 +362,51 @@ def gnn_rows(args, dataset, spec, pairs, splits, y_all, Xmol, row_m, task, metri
                     continue
                 model = fit_boost(Xtr, y_all[tr], seed=seed, task=task)
                 m = metric_fn(y_all[te], predict_scores(model, Xte, task=task))
+                fan, norm = gnn_regime(args)
                 rows.append({"prot": row_name, "fold": f, "seed": seed,
                              "gnn_seed": gseed, "pdim": int(Zp_tr.shape[1]),
                              "dim": int(Xtr.shape[1]), "n_train": len(tr),
-                             "t_graph": t_graph, **m})
+                             "t_graph": t_graph,
+                             "gnn_regime": regime_tag(fan, norm), **m})
                 print(f"{row_name:22} fold{f} gseed{gseed} seed{seed} "
                       f"pdim={Zp_tr.shape[1]:5} " +
                       "  ".join(f"{k}={m[k]:.3f}" for k in list(m)[:2]), flush=True)
     return rows
+
+
+def gnn_regime(args):
+    """(fanout, normalize_layers) for this run's graphs. `--gnn-fanout 0 0` is how
+    sampling is switched off, because a zero entry is refused by the extractor."""
+    fan = tuple(f for f in (getattr(args, "gnn_fanout", None) or ()) if f > 0)
+    return fan, bool(getattr(args, "gnn_normalize_layers", True))
+
+
+def regime_tag(fanout, normalize):
+    """One short string per encoder regime, stamped on every GNN row.
+
+    It exists so that "which model is this row" is answerable from the CSV alone.
+    A row written before 23.09.2026 has no such column; that silence means the
+    historical encoder, and `HISTORICAL_TAG` is what it is read as.
+    """
+    return ("sampled" + "-".join(map(str, fanout)) if fanout else "full") + \
+           ("+norm" if normalize else "")
+
+
+#: What a missing `gnn_regime` column means: full neighbourhood, un-normalised.
+HISTORICAL_TAG = "full"
+
+
+def gnn_regimes_on_disk(rows):
+    """Every regime tag among the GNN rows already in the CSV."""
+    seen = set()
+    for r in rows:
+        g = r.get("gnn_seed", None)
+        if g is None or (isinstance(g, float) and np.isnan(g)):
+            continue                      # a descriptor row: no graph, no regime
+        tag = r.get("gnn_regime", None)
+        seen.add(HISTORICAL_TAG if tag is None or
+                 (isinstance(tag, float) and np.isnan(tag)) else str(tag))
+    return seen
 
 
 def cell_key(row):
@@ -410,6 +452,19 @@ def load_existing(out, args, dataset, regime):
             raise SystemExit(f"{side.name} says {moved} differ from this run -- that is "
                              f"a different table, not more rows of this one. Use --out.")
     rows = prev.to_dict("records")
+    if getattr(args, "gnn", None) is not None:
+        want = regime_tag(*gnn_regime(args))
+        stale = gnn_regimes_on_disk(rows) - {want}
+        if stale:
+            raise SystemExit(
+                f"{out.name} already holds GNN rows trained in regime(s) "
+                f"{sorted(stale)}, and this run would add {want!r}. Two encoders in "
+                f"one column is not a table.\n"
+                f"Drop the graph rows and keep everything else -- the descriptor rows "
+                f"cost nothing to keep and are unaffected:\n"
+                f"    python -c \"import pandas as pd; d=pd.read_csv(r'{out}'); "
+                f"d[d.gnn_seed.isna()].to_csv(r'{out}', index=False)\"\n"
+                f"then re-run this command. `--force` instead refits the whole table.")
     print(f"resuming: {len(rows)} row(s) already in {out.name}", flush=True)
     return rows, {cell_key(r) for r in rows}
 
@@ -466,6 +521,16 @@ def parser():
                          "per fold per seed per spec is the expensive part of this "
                          "table, and the boost seeds below already average inside "
                          "each fold")
+    ap.add_argument("--gnn-fanout", type=int, nargs=2, default=[25, 10],
+                    metavar=("L1", "L2"),
+                    help="neighbour sampling for OUR rows, layer 1 then layer 2, "
+                         "redrawn every epoch; inference stays full-neighbourhood. "
+                         "GraphSAGE's own 25 10 is the default since 23.09.2026; "
+                         "`--gnn-fanout 0 0` restores the historical encoder")
+    ap.add_argument("--gnn-no-normalize-layers", dest="gnn_normalize_layers",
+                    action="store_false",
+                    help="do NOT L2-normalise after each layer (on by default since "
+                         "23.09.2026, together with --gnn-fanout)")
     ap.add_argument("--gnn-epochs", type=int, default=900)
     ap.add_argument("--gnn-n-models", type=int, default=1)
     ap.add_argument("--out", default=None,

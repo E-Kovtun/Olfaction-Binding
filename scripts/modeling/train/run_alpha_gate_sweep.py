@@ -588,8 +588,10 @@ def _train_graph(arm, alpha, fold, seed, ds, P, args):
         deterministic_init=args.seed_graph,
         # The GraphSAGE regime, off unless asked (see --fanout). A root produced
         # without these flags is bit-identical to one produced before they existed.
-        fanout=tuple(getattr(args, "fanout", None) or ()),
-        normalize_layers=bool(getattr(args, "normalize_layers", False)), **knob)
+        # `--fanout 0 0` is how sampling is turned off; a zero entry would be
+        # refused by the extractor, so it is translated here rather than there.
+        fanout=tuple(f for f in (getattr(args, "fanout", None) or ()) if f > 0),
+        normalize_layers=bool(getattr(args, "normalize_layers", True)), **knob)
     t0 = time.time()
     Zp_tr, Zp_va, Zp_te = ext.fit_transform(P["pairs"], P["tr"], P["va"], P["te"], seed)
     return {"tr": Zp_tr, "va": Zp_va, "te": Zp_te}, ext, time.time() - t0
@@ -713,8 +715,9 @@ def _graph_rows(arm, alpha, fold, seed, ds, P, args, spec=None):
                 # Stamped per row, not just printed: a root that cannot say whether it
                 # was trained in the sampled regime is two different models in one CSV
                 # as soon as someone tops it up with different flags.
-                fanout="-".join(map(str, getattr(args, "fanout", None) or ())),
-                normalize_layers=bool(getattr(args, "normalize_layers", False)),
+                fanout="-".join(str(f) for f in
+                                (getattr(args, "fanout", None) or ()) if f > 0),
+                normalize_layers=bool(getattr(args, "normalize_layers", True)),
                 t_graph=t_graph, **provenance(args), **geo)
     rows, dump = [], {}
     for combo in combos:
@@ -1037,8 +1040,8 @@ def sweep(ds, regime, args, dash=None):
             tmp.replace(path)
 
     pp, mp = paths(ds, args)
-    _fan = tuple(getattr(args, "fanout", None) or ())
-    _norm = bool(getattr(args, "normalize_layers", False))
+    _fan = tuple(f for f in (getattr(args, "fanout", None) or ()) if f > 0)
+    _norm = bool(getattr(args, "normalize_layers", True))
     ends = ("a=0 structure alone -> a=1 the graph alone" if args.dial == "gate"
             else "a=0 receptor identity alone -> a=1 the legacy graph (ESM nodes)")
     print(f"\n=== {ds.upper()} / {regime} ({FAMILY[ds][regime]}) ===\n"
@@ -1256,17 +1259,19 @@ def main():
                     help="skip the per-pair prediction dump. ~50 MB for the grid, and "
                          "without it no analysis can be stratified by receptor or by "
                          "odorant after the fact -- only a rerun can")
-    ap.add_argument("--fanout", type=int, nargs=2, default=None,
+    ap.add_argument("--fanout", type=int, nargs=2, default=[25, 10],
                     metavar=("L1", "L2"),
                     help="NEIGHBOUR SAMPLING, layer 1 then layer 2: keep at most this "
                          "many incoming edges per node, redrawn every epoch; inference "
-                         "stays full-neighbourhood. GraphSAGE's own setting is 25 10. "
-                         "Off by default, which is how every root before Sep 2026 was "
-                         "trained")
-    ap.add_argument("--normalize-layers", action="store_true",
-                    help="L2-normalise node embeddings after every layer, as GraphSAGE "
-                         "does. Off by default. Belongs with --fanout: the two together "
-                         "are the ':paper' rows of the architecture table")
+                         "stays full-neighbourhood. GraphSAGE's own setting, 25 10, is "
+                         "the default since 23.09.2026; `--fanout 0 0` turns sampling "
+                         "off and gives the encoder every root before that date used")
+    ap.add_argument("--no-normalize-layers", dest="normalize_layers",
+                    action="store_false",
+                    help="do NOT L2-normalise node embeddings after every layer. The "
+                         "normalisation is GraphSAGE's own and is on by default since "
+                         "23.09.2026; this flag and `--fanout 0 0` together restore the "
+                         "historical encoder")
     ap.add_argument("--n-models", type=int, default=1)
     ap.add_argument("--epochs", type=int, default=900)
     ap.add_argument("--n-perm", type=int, default=200,

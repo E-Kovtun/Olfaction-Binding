@@ -204,6 +204,30 @@ def test_existing_rows_are_reused_when_provenance_is_there(sweep, tmp_path):
     assert ("esm3", 1, 42, -1) in done
 
 
+def test_the_regime_tag_names_the_encoder(sweep):
+    """One string per encoder regime, so "which model is this row" is answerable from
+    the CSV alone rather than from shell history."""
+    assert sweep.regime_tag((25, 10), True) == "sampled25-10+norm"
+    assert sweep.regime_tag((), False) == "full"
+    assert sweep.regime_tag((25, 10), False) == "sampled25-10"
+
+
+def test_an_unstamped_graph_row_reads_as_the_historical_encoder(sweep):
+    """Rows written before 23.09.2026 carry no tag. Silence means the encoder of that
+    time -- full neighbourhood, un-normalised -- and never "whatever runs today"."""
+    rows = [{"prot": "esm3", "fold": 1, "seed": 42, "gnn_seed": 42},
+            {"prot": "esm3", "fold": 1, "seed": 42},
+            {"prot": "esm3", "fold": 2, "seed": 42, "gnn_seed": 42,
+             "gnn_regime": "sampled25-10+norm"}]
+    assert sweep.gnn_regimes_on_disk(rows) == {"full", "sampled25-10+norm"}
+
+
+def test_descriptor_rows_carry_no_regime_at_all(sweep):
+    """A row with no graph must never contribute a regime: it would make a pure
+    boosting table look like a mixture of two encoders."""
+    assert sweep.gnn_regimes_on_disk([{"prot": "esm3", "fold": 1, "seed": 42}]) == set()
+
+
 def test_a_csv_without_provenance_is_refused_by_default(sweep, tmp_path):
     """It may predate the fix that stopped folding val into train, and rows fitted on
     more data than everyone else saw must not quietly join fresh ones."""

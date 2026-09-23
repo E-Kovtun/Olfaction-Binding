@@ -84,6 +84,10 @@ VARIANT = {
 #: from their plain rows in exactly this and nothing else.
 PAPER = dict(fanout=(25, 10), normalize_layers=True)
 PAPER_SUFFIX = ":paper"
+#: Since 23.09.2026 `PAPER` is the extractor's default, so the `:paper` rows are OURS
+#: and the un-suffixed rows are the historical encoder. The suffix is kept because the
+#: numbers already on disk carry it in their `arch` column, and renaming it would make
+#: every cached cell look missing.
 #: The rows this sweep trains by default: four operators as we run them, plus the two
 #: whose papers define a regime we could adopt.
 DEFAULT_SPECS = ("sage", "gat", "graphconv", "gin", "sage:paper", "gat:paper")
@@ -186,7 +190,11 @@ def graph_rows(ds, regime, fold, seed, spec, hidden, sw, args, P):
     pp, mp = sw.paths(ds, args)
     v = VARIANT[ds]
     conv, paper = parse_spec(spec)
-    extra = dict(fanout=tuple(args.fanout), normalize_layers=True) if paper else {}
+    # Both arms are pinned explicitly. Since 23.09.2026 the extractor's DEFAULT is the
+    # sampled + normalised regime, so leaving the plain rows to the default would make
+    # every row of this table the same regime and the comparison would evaporate.
+    extra = (dict(fanout=tuple(args.fanout), normalize_layers=True) if paper else
+             dict(fanout=(), normalize_layers=False))
     ext = GnnSignedExtractor(
         name="cls", protein_path=pp, molecule_path=mp,
         q=float(v["q"]), criterion=v["criterion"], k_mode=v["k_mode"],

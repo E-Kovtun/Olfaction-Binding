@@ -1116,13 +1116,21 @@ class GnnSignedExtractor:
     conv: str = "sage"
     # GAT only: heads on layer 1, concatenated back to `hidden`. Ignored otherwise.
     heads: int = GAT_HEADS
-    # The two things our encoder historically did NOT take from GraphSAGE, both
-    # opt-in so every reported number is untouched (see WHAT "GRAPHSAGE" MEANS HERE):
+    # DEFAULT CHANGED 23.09.2026: these two were opt-in and are now ON, because the
+    # architecture ablation measured them and they won every paired comparison it
+    # made -- 24 of 24 deltas positive across two operators, four panels and both
+    # splits, decided on VALIDATION. They are the two things our encoder had NOT
+    # taken from GraphSAGE:
     #   fanout=(25, 10)   sample at most this many incoming edges per node per layer,
     #                     redrawn each epoch; inference stays full-neighbourhood
     #   normalize_layers  L2-normalise the node embeddings after every layer
-    fanout: tuple = ()
-    normalize_layers: bool = False
+    # Consequence: a root trained before this date is a DIFFERENT model from one
+    # trained after it, and the two must never be mixed in one table. Pass
+    # `fanout=(), normalize_layers=False` to get the historical encoder back --
+    # scripts/article_sweeps/run_architecture.py does exactly that for its
+    # un-suffixed rows, which is what keeps that table a comparison.
+    fanout: tuple = (25, 10)
+    normalize_layers: bool = True
     pooling: str = "signed_sage"
     dgi_weight: float = 0.0            # >0 enables the DeepGraphInfomax auxiliary loss
     dgi_scope: str = "shared"          # "shared" (mol+prot) or "prot"

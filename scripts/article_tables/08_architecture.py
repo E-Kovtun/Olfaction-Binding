@@ -41,14 +41,18 @@ from scripts.analysis import alpha_grid as ag  # noqa: E402
 #: The anchor, and the operator the paper reports. Everything else is printed in the
 #: order the sweep produced it, so a new operator does not need a code change here.
 ANCHOR = "boost_full"
-OURS = "sage"
+OURS = "sage:paper"
 
-LABEL = {"boost_full": "Boosting base (no graph)", "sage": "GraphSAGE (ours)",
+LABEL = {"boost_full": "Boosting base (no graph)", "sage": "GraphSAGE",
          "gat": "GAT", "graphconv": "GraphConv", "gin": "GIN"}
 #: `:paper` = that operator run the way its paper runs it -- neighbour sampling plus
 #: per-layer L2 normalisation, the two things our encoder took from neither.
 PAPER_SUFFIX = ":paper"
 PAPER_NOTE = "sampled + normalised"
+#: Which row the paper reports. Until 23.09.2026 this was the un-suffixed `sage`; the
+#: ablation moved the default, so it is now the sampled + normalised one, and the plain
+#: rows are the historical encoder kept for the comparison.
+OURS_NOTE = "ours"
 #: Compact names for a header that has to fit six times across a terminal.
 SHORT_DS = {"m2or": "M2OR", "cc": "Carey", "hc": "Hallem"}
 SHORT_REG = {"transductive": "trans", "inductive": "cold mol",
@@ -66,7 +70,10 @@ def label(arch):
     out = LABEL.get(base, base)
     if width:
         out += f", width {width}"
-    return out + f", {PAPER_NOTE}" if paper else out
+    if base == "boost_full":
+        return out
+    note = f"{PAPER_NOTE}, {OURS_NOTE}" if paper else "full neighbourhood, un-normalised"
+    return f"{out} ({note})"
 
 
 def row_order(arch):

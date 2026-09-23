@@ -368,11 +368,16 @@ fitters and every reader.
 
 | name | chosen by | what it is | ours |
 |---|---|---|---|
-| `<run>` | `--out results/graph/<run>` (1.1) | one sweep grid = one protein source + one set of dial flags | `v9_seeded` (ESM-1b), `v13_esm3` (ESM3) |
+| `<run>` | `--out results/graph/<run>` (1.1) | one sweep grid = one protein source + one set of dial flags + one encoder regime | `v9_seeded` (ESM-1b), `v14_esm3_paper` (ESM3) |
 | `<pool>` | `--out-dir results/ensemble_logs*/<pool>` (1.2) | one (dataset, regime, molecule source, protein source) of baselines | `m2or-transductive-chemberta-esm3`, `cc-ourind-esm3`, … |
 | `--out` | every reader | where a rendered table lands | `results/article_tables/esm3/…` |
 
-`<run>` and the ensemble root must be a **matched pair**: `v13_esm3` goes with
+A third root, `v13_esm3`, is the same ESM3 grid trained **before 23.09.2026**, when
+neighbour sampling and per-layer normalisation were off. It is kept for provenance and
+must not be mixed with `v14_esm3_paper` in one table -- the two are different models
+under one name. `--fanout 0 0 --no-normalize-layers` reproduces it.
+
+`<run>` and the ensemble root must be a **matched pair**: `v14_esm3_paper` goes with
 `results/ensemble_logs_esm3`, `v9_seeded` with `results/ensemble_logs`. Crossing them
 does not fail — it prints a table that compares a graph on one protein source against
 baselines on another.
@@ -405,9 +410,17 @@ new series, not more folds of an old one.
     --mol-source chemberta gin ecfp --alphas 1.0 \
     --dial nodes --seed-graph --seeds 42 43 44 45 46 \
     --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz' \
-    --out results/graph/v13_esm3 \
+    --out results/graph/v14_esm3_paper \
     --max-parallel 4 --gpus 0 1 2 3
 ```
+
+Both commands train the encoder in **GraphSAGE's own regime** — neighbour sampling
+(fan-out 25 then 10, redrawn every epoch, inference still full-neighbourhood) and
+per-layer L2 normalisation. That is the default since 23.09.2026; `--fanout 0 0
+--no-normalize-layers` gives the historical encoder back. **Consequence for the ESM-1b
+root:** re-running the first command as written tops `v9_seeded` up with rows from a
+different model than the ones already in it. Either give the new regime its own `--out`,
+or add the two flags above.
 
 Quote `'…{ds}.npz'`: the placeholder belongs to the script and an unquoted brace
 belongs to the shell. ESM3's files are named uniformly (`esm3_m2or.npz`,
@@ -424,7 +437,7 @@ so it is worth starting early:
     --alphas 0 0.05 0.1 0.15 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 1.0 \
     --dial nodes --seed-graph --seeds 42 43 44 45 46 \
     --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz' \
-    --out results/graph/v13_esm3 \
+    --out results/graph/v14_esm3_paper \
     --max-parallel 4 --gpus 0 1 2 3
 ```
 
@@ -441,7 +454,7 @@ To check that an existing root was produced the way the tables assume, read the 
 back out of the CSV rather than trusting shell history:
 
 ```bash
-.venv/bin/python scripts/analysis/sweep_provenance.py --root results/graph/v13_esm3
+.venv/bin/python scripts/analysis/sweep_provenance.py --root results/graph/v14_esm3_paper
 ```
 
 #### 1.2 The baselines — LORAX, ProSmith, MolOR, Hladiš
@@ -560,7 +573,7 @@ can run while 1.1 is still going.
 # The head is refit on the same train rows with the same seed and asked for the val
 # rows instead -- one XGBoost fit per cell, no message passing, no GPU, resumable,
 # and self-checking (it re-predicts test and compares against the recorded number)
-.venv/bin/python scripts/analysis/val_rescore.py --root results/graph/v13_esm3
+.venv/bin/python scripts/analysis/val_rescore.py --root results/graph/v14_esm3_paper
 ```
 
 #### 1.5 Before reading anything
@@ -570,7 +583,7 @@ between a table that is complete and one that merely printed:
 
 ```bash
 .venv/bin/python scripts/article_tables/00_inventory.py \
-    --sweep-root results/graph/v13_esm3 --ensemble-root results/ensemble_logs_esm3
+    --sweep-root results/graph/v14_esm3_paper --ensemble-root results/ensemble_logs_esm3
 ```
 
 ---
@@ -600,7 +613,7 @@ the supplementary ablations as the argument needs them.
     --sweep-root results/graph/v9_seeded --ensemble-root results/ensemble_logs \
     --out results/article_tables/esm1b
 .venv/bin/python scripts/article_tables/01_main_tables.py --no-val-cut \
-    --sweep-root results/graph/v13_esm3 --ensemble-root results/ensemble_logs_esm3 \
+    --sweep-root results/graph/v14_esm3_paper --ensemble-root results/ensemble_logs_esm3 \
     --out results/article_tables/esm3
 ```
 
@@ -616,7 +629,7 @@ to leave our graph out entirely:
 ```bash
 .venv/bin/python scripts/article_tables/01_main_tables.py --no-val-cut \
     --dataset m2or --baseline-combo cls --no-ours \
-    --sweep-root results/graph/v13_esm3 --ensemble-root results/ensemble_logs_esm3 \
+    --sweep-root results/graph/v14_esm3_paper --ensemble-root results/ensemble_logs_esm3 \
     --out results/article_tables/esm3/t1
 ```
 
@@ -638,6 +651,28 @@ lists, so the whole six-cell table is one invocation of each.
 .venv/bin/python scripts/article_tables/07_protein_sources.py \
     --dataset m2or cc hc --regime transductive inductive
 ```
+
+**Swapping only the graph rows.** Our three rows train in the sampled + normalised
+regime (the default since 23.09.2026) and each one stamps `gnn_regime` into the CSV. A
+resume that would mix two regimes in one table is refused by name. To replace the graph
+rows of a table already on disk while keeping every descriptor row -- no pLM boosting is
+refitted, and those are most of the table:
+
+```bash
+for f in results/tables/prot_floor_*.csv(N); do
+  python - "${f}" <<'PY'
+import sys, pandas as pd
+p = sys.argv[1]
+d = pd.read_csv(p)
+keep = d["gnn_seed"].isna() if "gnn_seed" in d.columns else d.index == d.index
+print(f"{p}: {len(d)} rows -> {int(keep.sum())} kept")
+d[keep].to_csv(p, index=False)
+PY
+done
+```
+
+then re-run the fitter above; it refits the graphs alone. `--gnn-fanout 0 0
+--gnn-no-normalize-layers` trains the historical encoder instead.
 
 **What comes out.** The fitter writes one CSV per (dataset, regime) under
 `results/tables/`, plus a provenance sidecar `prot_floor_<ds>_<regime>.json`. The reader
@@ -704,7 +739,7 @@ caches; `05` only reads, so it is safe to re-run while tweaking a label.
 
 ```bash
 .venv/bin/python scripts/article_tables/05_alpha0_vs_boost.py \
-    --sweep-root results/graph/v13_esm3
+    --sweep-root results/graph/v14_esm3_paper
 ```
 
 #### A4 — the construction ablation, criterion × quantile
@@ -809,7 +844,7 @@ ChemBERTa / GIN / ECFP × {graph, base, Hladiš}:
 
 ```bash
 .venv/bin/python scripts/article_tables/03_molecule_ablation.py \
-    --sweep-root results/graph/v13_esm3 --ensemble-root results/ensemble_logs_esm3 \
+    --sweep-root results/graph/v14_esm3_paper --ensemble-root results/ensemble_logs_esm3 \
     --out results/article_tables/esm3/molecule
 ```
 
@@ -830,7 +865,7 @@ protein source generated after those files were written:
 ```bash
 .venv/bin/python scripts/article_tables/02a_protein_geometry.py --dataset cc hc --force
 .venv/bin/python scripts/article_tables/02_geometry_table.py \
-    --sweep-root results/graph/v13_esm3 --out results/article_tables/esm3/geometry
+    --sweep-root results/graph/v14_esm3_paper --out results/article_tables/esm3/geometry
 ```
 
 ---

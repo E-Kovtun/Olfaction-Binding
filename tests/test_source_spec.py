@@ -93,15 +93,25 @@ def test_alpha_outside_the_unit_interval_is_refused():
         parse_source_arg("cls=gnn_signed::::::::::::1.5")
 
 
-def test_the_graphsage_regime_is_fields_16_and_17_and_off_by_default():
-    """`:paper` from the architecture sweep, reachable from an ensemble command. Off
-    unless asked: every battery run before these fields existed is unaffected."""
+def test_the_graphsage_regime_is_fields_16_and_17_and_on_by_default():
+    """DEFAULT MOVED 23.09.2026: a bare `gnn_signed` now trains in GraphSAGE's own
+    regime, because that is the model the paper reports. Fields 16-17 exist to say it
+    explicitly and to take it back."""
     ex = parse_source_arg("cls=gnn_signed")[1]
-    assert ex.fanout == () and ex.normalize_layers is False
+    assert ex.fanout == (25, 10) and ex.normalize_layers is True
     _, ex = parse_source_arg("cls=gnn_signed::::::::::::::::25-10:1")
     assert ex.fanout == (25, 10)
     assert ex.normalize_layers is True
     assert (ex.q, ex.criterion, ex.n_models) == (0.99, "greedy_pair_cover", 1)
+
+
+def test_the_historical_encoder_is_still_askable_from_a_spec():
+    """Reproducing a pre-23.09.2026 table needs the old encoder, and a spec that could
+    only turn the regime ON would make those numbers unreachable."""
+    _, ex = parse_source_arg("cls=gnn_signed::::::::::::::::0:0")
+    assert ex.fanout == () and ex.normalize_layers is False
+    _, ex = parse_source_arg("cls=gnn_signed::::::::::::::::none:0")
+    assert ex.fanout == () and ex.normalize_layers is False
 
 
 def test_the_fanout_accepts_commas_too():

@@ -46,7 +46,7 @@ def reader():
 
 # ----------------------------------------------------------------- fixtures
 
-ARCHS = ["sage", "gat", "graphconv", "gin"]
+ARCHS = ["sage:paper", "sage", "gat", "graphconv", "gin"]
 
 
 def frame(dataset="m2or", metric="AUROC", base=0.80, step=0.01, folds=(1, 2, 3, 4, 5),
@@ -209,7 +209,7 @@ def test_the_anchor_survives_the_head_filter(reader):
 
 def test_rows_are_ordered_base_then_ours_then_the_rest(reader):
     t, _ = reader.cell_table(frame(), "m2or", "cls+mol")
-    assert list(t["arch"])[:2] == ["boost_full", "sage"]
+    assert list(t["arch"])[:2] == ["boost_full", "sage:paper"]
 
 
 def test_the_anchor_is_never_marked_as_the_best_operator(reader):
@@ -264,13 +264,13 @@ def test_the_text_block_names_the_columns_that_separate_nothing(reader, capsys):
 
 
 def test_the_width_row_is_labelled_as_a_width(reader):
-    assert reader.label("gat@512") == "GAT, width 512"
-    assert reader.label("sage") == "GraphSAGE (ours)"
+    assert reader.label("gat@512") == "GAT, width 512 (full neighbourhood, un-normalised)"
+    assert reader.label("sage") == "GraphSAGE (full neighbourhood, un-normalised)"
 
 
 def test_the_paper_row_says_what_it_added(reader):
-    assert reader.label("sage:paper") == "GraphSAGE (ours), sampled + normalised"
-    assert reader.label("gat@512:paper") == "GAT, width 512, sampled + normalised"
+    assert reader.label("sage:paper") == "GraphSAGE (sampled + normalised, ours)"
+    assert reader.label("gat@512:paper") == "GAT, width 512 (sampled + normalised, ours)"
 
 
 def test_nothing_on_disk_prints_the_command_and_fails(reader, tmp_path, capsys):
@@ -291,4 +291,4 @@ def test_the_end_to_end_render_writes_its_three_files(reader, tmp_path):
         assert (out / name).exists()
     tex = (out / "architecture.tex").read_text(encoding="utf-8")
     assert r"\label{tab:arch}" in tex
-    assert "GraphSAGE (ours)" in tex
+    assert "GraphSAGE (sampled + normalised, ours)" in tex

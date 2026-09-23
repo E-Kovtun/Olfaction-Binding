@@ -333,15 +333,18 @@ def parse_source_arg(raw: str):
         # field 15: which draw of the identity vectors (default 0).
         if len(parts) > 15 and parts[15]:
             kwargs["mix_seed"] = int(parts[15])
-        # Fields 16-17: the two things our encoder did NOT take from GraphSAGE, so
-        # that a battery can be run in the paper's regime instead of ours without a
-        # second code path. Field 16 is the per-layer fan-out, written with a dash
-        # because the spec separator is a colon: "25-10" = 25 on layer 1, 10 on layer
-        # 2, redrawn every epoch, inference still full-neighbourhood. Field 17 is the
-        # per-layer L2 normalisation. Blank leaves both off, so every command written
-        # before this line means exactly what it meant.
+        # Fields 16-17: the GraphSAGE training regime. Field 16 is the per-layer
+        # fan-out, written with a dash because the spec separator is a colon:
+        # "25-10" = 25 on layer 1, 10 on layer 2, redrawn every epoch, inference still
+        # full-neighbourhood. Field 17 is the per-layer L2 normalisation. BLANK MEANS
+        # THE EXTRACTOR DEFAULT, which since 23.09.2026 is both of them ON -- to get
+        # the historical encoder back, say "0" (or "none"/"off") in field 16 and "0"
+        # in field 17. A command written before that date therefore means something
+        # different now, which is deliberate: the default is the model we report.
         if len(parts) > 16 and parts[16]:
-            kwargs["fanout"] = tuple(int(f) for f in parts[16].replace(",", "-").split("-"))
+            raw = parts[16].strip().lower()
+            kwargs["fanout"] = () if raw in ("0", "off", "none") else tuple(
+                int(f) for f in raw.replace(",", "-").split("-"))
         if len(parts) > 17 and parts[17]:
             kwargs["normalize_layers"] = parts[17] not in ("0", "false", "False")
         return name, _factory(type_)(name=name, **kwargs)

@@ -674,9 +674,13 @@ def run_cell(args, dataset, regime):
               flush=True)
     write_sidecar(out, args, rows, dataset, regime)
     df = pd.DataFrame(rows)
+    # NUMERIC columns only, and an allow-list by dtype rather than a deny-list by name:
+    # the deny-list broke the moment a text column (`gnn_regime`) was added to the row,
+    # and it would break again on the next one.
     metric_cols = [c for c in df.columns
                    if c not in ("prot", "fold", "seed", "gnn_seed", "pdim", "dim",
-                                "n_train", "t_graph")]
+                                "n_train", "t_graph")
+                   and pd.api.types.is_numeric_dtype(df[c])]
     # the split is the unit: seeds are averaged inside a fold first, as the main tables do
     per_fold = df.groupby(["prot", "fold"], as_index=False)[metric_cols + ["pdim"]].mean()
     # a GNN row carries extra keys (gnn_seed, t_graph); averaging them away here is
@@ -715,6 +719,15 @@ def main():
             print(f"\n{'#' * 78}\n# {dataset} / {regime}\n{'#' * 78}", flush=True)
             try:
                 done.append(run_cell(args, dataset, regime))
+            except Exception as e:                # noqa: BLE001
+                # Everything a cell produces is on disk before it prints anything, so a
+                # failure here must not cost the cells that have not run yet. The six-cell
+                # command is the normal way to use this script.
+                print(f"\n!! {dataset}/{regime} failed after writing its rows: "
+                      f"{type(e).__name__}: {e}", flush=True)
+                import traceback
+                traceback.print_exc()
+                continue
             except SystemExit as e:
                 # A dataset that ships no such split family is not a failure of the
                 # run -- HC has no cold_receptor at all. Say so and keep going, or a

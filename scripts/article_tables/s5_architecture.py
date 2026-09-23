@@ -94,7 +94,15 @@ def load(root, dataset, regime, mol_source):
     return df
 
 
-def cell_table(df, dataset, combo, level=0.95):
+def reported_only(d):
+    """Drop the historical-encoder rows, keep the anchor and the reported regime.
+
+    The anchor has no encoder at all, so it is kept by name rather than by suffix."""
+    arch = d["arch"].astype(str)
+    return d[arch.str.endswith(PAPER_SUFFIX) | arch.eq(ANCHOR)]
+
+
+def cell_table(df, dataset, combo, level=0.95, historical=False):
     """One row per operator: mean +- t half-width over FOLDS, on the test split.
 
     Model seeds are averaged inside each fold FIRST. The unit of evidence is the
@@ -108,6 +116,8 @@ def cell_table(df, dataset, combo, level=0.95):
     d = df[df["split"].astype(str).eq("test")]
     if "status" in d.columns:
         d = d[d["status"].astype(str).eq("ok")]
+    if not historical:
+        d = reported_only(d)
     d = d[d["combo"].astype(str).eq(combo) | d["conv"].astype(str).eq(ANCHOR)]
     metric = ag.OF_RECORD[ag.TASK[dataset]]
     if metric not in d.columns or d.empty:
@@ -266,6 +276,11 @@ def parser():
     ap.add_argument("--mol-source", default="chemberta",
                     choices=["chemberta", "gin", "ecfp"])
     ap.add_argument("--level", type=float, default=0.95)
+    ap.add_argument("--historical", action="store_true",
+                    help="also show the pre-23.09.2026 encoder rows (full "
+                         "neighbourhood, un-normalised). Off by default: they are a "
+                         "different model, and a table holding both compares regimes "
+                         "while claiming to compare operators")
     ap.add_argument("--root", default="results/article_sweeps/architecture",
                     help="where s5_run_architecture.py wrote its CSVs")
     ap.add_argument("--out", default="results/article_tables/architecture")
@@ -281,7 +296,7 @@ def main(argv=None):
             if df is None:
                 missing.append((ds, reg))
                 continue
-            t, metric = cell_table(df, ds, a.combo, a.level)
+            t, metric = cell_table(df, ds, a.combo, a.level, a.historical)
             if t is None or t.empty:
                 missing.append((ds, reg))
                 continue

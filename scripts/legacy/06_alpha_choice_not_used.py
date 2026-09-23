@@ -24,7 +24,7 @@ the decision lives in `scripts/analysis/alpha_choice.py` and is imported from th
 the paper's table and the command we actually run can never drift apart. What this adds
 is the rendering -- LaTeX, a CSV per panel, and a text block -- and nothing else.
 
-    .venv/bin/python scripts/article_tables/06_alpha_choice.py \
+    .venv/bin/python scripts/legacy/06_alpha_choice_not_used.py \
         --sweep-root results/graph/v13_esm3 --nodes nodedial
 
 THE RUN IS AN ARGUMENT, AND IT IS REQUIRED. This table belongs to one sweep root and

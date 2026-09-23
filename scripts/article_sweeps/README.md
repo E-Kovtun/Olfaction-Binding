@@ -4,11 +4,18 @@ Sweeps that exist **for the article's ablations** rather than for the pipeline. 
 train models, so they want a GPU and they cache; `scripts/article_tables/` reads results
 and this folder produces them.
 
+**The prefix is the registry item** (`paper/PLAN.md`), renamed 23.09.2026:
+`s4_run_quantile_criteria.py` and `s4_quantile_grid.py` belong to A4 (the graph's
+construction), `s5_run_architecture.py` to A5 (which operator). The readers with the
+same prefixes are in `../article_tables/`, except A4's, which is a notebook.
+
+
 Each sweep ships as a pair, the same convention the tables use:
 
 | computes (slow, cached) | reads (fast) | ablation |
 |---|---|---|
-| `run_quantile_criteria.py` | `notebooks/article_figures/quantile_criteria.ipynb`, over `quantile_grid.py` | how the graph is BUILT: molecule-ranking criterion x coverage quantile |
+| `s4_run_quantile_criteria.py` | `notebooks/article_figures/quantile_criteria.ipynb`, over `s4_quantile_grid.py` | how the graph is BUILT: molecule-ranking criterion x coverage quantile |
+| `s5_run_architecture.py` | `../article_tables/s5_architecture.py` | which message-passing OPERATOR: the graph pinned, only the operator moving |
 
 ## Why these live apart from `scripts/modeling/train/`
 
@@ -22,7 +29,7 @@ a row here is comparable with a row there, and nothing in the older code had to 
 ## The construction sweep
 
 ```
-.venv/bin/python scripts/article_sweeps/run_quantile_criteria.py \
+.venv/bin/python scripts/article_sweeps/s4_run_quantile_criteria.py \
     --dataset m2or --regime inductive transductive \
     --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz' \
     --seeds 42 43 --max-parallel 4 --gpus 0 1 2 3
@@ -39,7 +46,7 @@ Then look at it:
 jupyter lab notebooks/article_figures/quantile_criteria.ipynb
 ```
 
-That notebook is the only reader. `quantile_grid.py` is the aggregation layer it
+That notebook is the only reader. `s4_quantile_grid.py` is the aggregation layer it
 imports -- fold means, intervals, paired deltas -- and has no command line of its own:
 the artifact here is a figure, and a second text rendering of the same numbers would be
 one more thing to keep in agreement with it.

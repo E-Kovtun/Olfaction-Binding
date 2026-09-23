@@ -1,9 +1,9 @@
 #!/usr/bin/env python
 """Main tables: every method on every (dataset, regime), our graph at one dial position.
 
-    python scripts/article_tables/01_main_tables.py
-    python scripts/article_tables/01_main_tables.py --dataset cc hc
-    python scripts/article_tables/01_main_tables.py --baseline-combo cls hladis=cls+prot+mol
+    python scripts/article_tables/m1_main_tables.py
+    python scripts/article_tables/m1_main_tables.py --dataset cc hc
+    python scripts/article_tables/m1_main_tables.py --baseline-combo cls hladis=cls+prot+mol
 
 One table per dataset, the two regimes side by side (transductive | cold molecule):
 

@@ -552,19 +552,19 @@ can run while 1.1 is still going.
 
 # for A3.3 (tab:alpha0): the one-hot boosting heads. Pass the SAME protein npz the
 # sweep used -- it decides the coverage mask even though one-hot replaces ESM
-.venv/bin/python scripts/article_tables/05a_onehot_boost.py \
+.venv/bin/python scripts/article_tables/s3_onehot_boost.py \
     --dataset m2or cc hc \
     --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz'
 
 # for A4: the construction sweep, criterion x quantile (see A4 for the insects)
-.venv/bin/python scripts/article_sweeps/run_quantile_criteria.py \
+.venv/bin/python scripts/article_sweeps/s4_run_quantile_criteria.py \
     --dataset m2or --regime inductive transductive \
     --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz' \
     --seeds 42 43 --max-parallel 4 --gpus 0 1 2 3
 
 # for A5: the architecture sweep. The graph is PINNED per dataset at the paper's
 # construction -- this moves the operator and nothing else
-.venv/bin/python scripts/article_sweeps/run_architecture.py \
+.venv/bin/python scripts/article_sweeps/s5_run_architecture.py \
     --dataset m2or cc hc --regime transductive inductive \
     --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz' \
     --seeds 42 43 44 45 46 --seed-graph --max-parallel 4 --gpus 0 1 2 3
@@ -582,7 +582,7 @@ Inventory reports READY / PARTIAL / MISSING per input cell, which is the differe
 between a table that is complete and one that merely printed:
 
 ```bash
-.venv/bin/python scripts/article_tables/00_inventory.py \
+.venv/bin/python scripts/article_tables/inventory.py \
     --sweep-root results/graph/v14_esm3_paper --ensemble-root results/ensemble_logs_esm3
 ```
 
@@ -595,24 +595,24 @@ the supplementary ablations as the argument needs them.
 
 | # | artefact | reader | needs |
 |---|---|---|---|
-| M1 | main battery | `01_main_tables.py` | 1.1 + 1.2 |
-| A1 | baselines as `cls` vs the boosting base | `01_main_tables.py --baseline-combo cls --no-ours` | 1.1 + 1.2 |
-| A2 | protein representations + our rows (`tab:t4`) | `07_protein_sources.py` | 1.4 (`prot_floor_sweep`) |
+| M1 | main battery | `m1_main_tables.py` | 1.1 + 1.2 |
+| A1 | baselines as `cls` vs the boosting base | `m1_main_tables.py --baseline-combo cls --no-ours` | 1.1 + 1.2 |
+| A2 | protein representations + our rows (`tab:t4`) | `s2_protein_sources.py` | 1.4 (`prot_floor_sweep`) |
 | A3.1 | the alpha dial, as a figure | `notebooks/article_figures/prediction_dial.ipynb` | 1.1, dense grid |
 | A3.2 | mean rank against the dial, both heads | `notebooks/article_figures/alpha_rank_dial.ipynb` | 1.1, dense grid + its `val_metrics_*` |
-| A3.3 | identity control (`tab:alpha0`) | `05_alpha0_vs_boost.py` | 1.1 + 1.4 (`05a`) |
+| A3.3 | identity control (`tab:alpha0`) | `s3_alpha0_vs_boost.py` | 1.1 + 1.4 (`s3_onehot_boost`) |
 | A4 | criterion × quantile, + the random control | `notebooks/article_figures/quantile_criteria.ipynb` | 1.4 (`run_quantile_criteria`) |
-| A5 | architecture: which operator | `08_architecture.py` | 1.4 (`run_architecture`) |
-| A6 | molecule ablation | `03_molecule_ablation.py` | 1.1 (all three `--mol-source`) + 1.3 |
+| A5 | architecture: which operator | `s5_architecture.py` | 1.4 (`run_architecture`) |
+| A6 | molecule ablation | `s6_molecule_ablation.py` | 1.1 (all three `--mol-source`) + 1.3 |
 
 #### M1 — the main battery
 
 ```bash
 # one table per dataset, both regimes, one run per protein source
-.venv/bin/python scripts/article_tables/01_main_tables.py --no-val-cut \
+.venv/bin/python scripts/article_tables/m1_main_tables.py --no-val-cut \
     --sweep-root results/graph/v9_seeded --ensemble-root results/ensemble_logs \
     --out results/article_tables/esm1b
-.venv/bin/python scripts/article_tables/01_main_tables.py --no-val-cut \
+.venv/bin/python scripts/article_tables/m1_main_tables.py --no-val-cut \
     --sweep-root results/graph/v14_esm3_paper --ensemble-root results/ensemble_logs_esm3 \
     --out results/article_tables/esm3
 ```
@@ -627,7 +627,7 @@ The same reader, told to take each baseline in its own learned pair representati
 to leave our graph out entirely:
 
 ```bash
-.venv/bin/python scripts/article_tables/01_main_tables.py --no-val-cut \
+.venv/bin/python scripts/article_tables/m1_main_tables.py --no-val-cut \
     --dataset m2or --baseline-combo cls --no-ours \
     --sweep-root results/graph/v14_esm3_paper --ensemble-root results/ensemble_logs_esm3 \
     --out results/article_tables/esm3/t1
@@ -648,7 +648,7 @@ lists, so the whole six-cell table is one invocation of each.
     --gnn esm3@1 esm3@0 prott5@1 --gnn-seeds 42 43 44 45 46
 
 # renders: one combined table, a column per cell, the metric of record only
-.venv/bin/python scripts/article_tables/07_protein_sources.py \
+.venv/bin/python scripts/article_tables/s2_protein_sources.py \
     --dataset m2or cc hc --regime transductive inductive
 ```
 
@@ -734,11 +734,11 @@ prints the per-competitor cell counts and says so out loud if they differ.
 #### A3.3 — the identity control (`tab:alpha0`)
 
 Our graph with the receptor's sequence removed, against the boost over ESM and over a
-one-hot receptor. The `05a` half from 1.4 fits heads — minutes per fold on M2OR — and
+one-hot receptor. The `s3_onehot_boost` half from 1.4 fits heads — minutes per fold on M2OR — and
 caches; `05` only reads, so it is safe to re-run while tweaking a label.
 
 ```bash
-.venv/bin/python scripts/article_tables/05_alpha0_vs_boost.py \
+.venv/bin/python scripts/article_tables/s3_alpha0_vs_boost.py \
     --sweep-root results/graph/v14_esm3_paper
 ```
 
@@ -761,14 +761,14 @@ one lucky set.
 ```bash
 # the producer. Quantiles are FRACTIONS, and the cell the paper reports
 # (greedy_pair_cover at 0.99 on M2OR, coverage at 0 on the insects) must be in the grid
-.venv/bin/python scripts/article_sweeps/run_quantile_criteria.py \
+.venv/bin/python scripts/article_sweeps/s4_run_quantile_criteria.py \
     --dataset m2or --regime inductive transductive \
     --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz' \
     --seeds 42 43 --max-parallel 4 --gpus 0 1 2 3
 
 # the insect panels: their matrices are complete, so the coverage quantile cuts
 # nothing and --k-mode fraction is the knob that moves (the default switches for you)
-.venv/bin/python scripts/article_sweeps/run_quantile_criteria.py \
+.venv/bin/python scripts/article_sweeps/s4_run_quantile_criteria.py \
     --dataset cc hc --regime inductive transductive \
     --criteria coverage greedy_pair_cover \
     --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz' \
@@ -792,13 +792,13 @@ every other table here makes.
 
 ```bash
 # trains: four operators on the paper's own graph, five folds, five seeds
-.venv/bin/python scripts/article_sweeps/run_architecture.py \
+.venv/bin/python scripts/article_sweeps/s5_run_architecture.py \
     --dataset m2or cc hc --regime transductive inductive \
     --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz' \
     --seeds 42 43 44 45 46 --seed-graph --max-parallel 4 --gpus 0 1 2 3
 
 # renders: one combined table, six columns, the metric of record only
-.venv/bin/python scripts/article_tables/08_architecture.py \
+.venv/bin/python scripts/article_tables/s5_architecture.py \
     --dataset m2or cc hc --regime transductive inductive
 ```
 
@@ -843,7 +843,7 @@ words any column where our interval overlaps the marked one.
 ChemBERTa / GIN / ECFP × {graph, base, Hladiš}:
 
 ```bash
-.venv/bin/python scripts/article_tables/03_molecule_ablation.py \
+.venv/bin/python scripts/article_tables/s6_molecule_ablation.py \
     --sweep-root results/graph/v14_esm3_paper --ensemble-root results/ensemble_logs_esm3 \
     --out results/article_tables/esm3/molecule
 ```
@@ -853,7 +853,7 @@ ChemBERTa / GIN / ECFP × {graph, base, Hladiš}:
 Two runs side by side — value, place, and what moved between two `main_long.csv`:
 
 ```bash
-.venv/bin/python scripts/article_tables/04_compare_runs.py \
+.venv/bin/python scripts/legacy/04_compare_runs.py \
     --a results/article_tables/esm1b --a-label ESM-1b \
     --b results/article_tables/esm3  --b-label ESM3
 ```
@@ -863,8 +863,8 @@ still runs, and `02a` skips a CSV that already exists — `--force` is what adds
 protein source generated after those files were written:
 
 ```bash
-.venv/bin/python scripts/article_tables/02a_protein_geometry.py --dataset cc hc --force
-.venv/bin/python scripts/article_tables/02_geometry_table.py \
+.venv/bin/python scripts/legacy/02a_protein_geometry.py --dataset cc hc --force
+.venv/bin/python scripts/legacy/02_geometry_table.py \
     --sweep-root results/graph/v14_esm3_paper --out results/article_tables/esm3/geometry
 ```
 

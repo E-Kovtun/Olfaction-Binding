@@ -714,7 +714,7 @@ def main():
     for d, r, why in skipped:
         print(f"  [skipped] {d}/{r}: {why}")
     print("\nNow render the table:\n"
-          "  .venv/bin/python scripts/article_tables/07_protein_sources.py "
+          "  .venv/bin/python scripts/article_tables/s2_protein_sources.py "
           f"--dataset {' '.join(args.dataset)} --regime {' '.join(args.regime)}")
 
 

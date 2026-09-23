@@ -7,10 +7,10 @@ the anchor row, because "our graph beats/loses to the base" is the comparison ev
 other table in this paper makes, and an architecture table that dropped it would be a
 league of graphs with no ground under it.
 
-READ-ONLY. Everything is trained by `scripts/article_sweeps/run_architecture.py`,
+READ-ONLY. Everything is trained by `scripts/article_sweeps/s5_run_architecture.py`,
 which pins the graph per dataset and moves the operator alone.
 
-    .venv/bin/python scripts/article_tables/08_architecture.py \\
+    .venv/bin/python scripts/article_tables/s5_architecture.py \\
         --dataset m2or cc hc --regime transductive inductive
 
 WHAT THE TABLE IS FOR, AND WHAT IT IS NOT FOR. It is here to show that the receptor
@@ -267,7 +267,7 @@ def parser():
                     choices=["chemberta", "gin", "ecfp"])
     ap.add_argument("--level", type=float, default=0.95)
     ap.add_argument("--root", default="results/article_sweeps/architecture",
-                    help="where run_architecture.py wrote its CSVs")
+                    help="where s5_run_architecture.py wrote its CSVs")
     ap.add_argument("--out", default="results/article_tables/architecture")
     return ap
 
@@ -292,7 +292,7 @@ def main(argv=None):
         print("no rows yet for: " + ", ".join(f"{d}/{r}" for d, r in missing))
     if not cells:
         print("\nnothing to render. Train them first:\n"
-              "  .venv/bin/python scripts/article_sweeps/run_architecture.py \\\n"
+              "  .venv/bin/python scripts/article_sweeps/s5_run_architecture.py \\\n"
               "      --dataset m2or cc hc --regime transductive inductive \\\n"
               "      --seeds 42 43 44 45 46 --seed-graph")
         return 1

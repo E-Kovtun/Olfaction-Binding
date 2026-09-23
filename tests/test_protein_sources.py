@@ -28,7 +28,7 @@ def _mod(name, rel):
     return m
 
 
-T = _mod("_protsrc", "scripts/article_tables/07_protein_sources.py")
+T = _mod("_protsrc", "scripts/article_tables/s2_protein_sources.py")
 
 
 @pytest.fixture(scope="module")

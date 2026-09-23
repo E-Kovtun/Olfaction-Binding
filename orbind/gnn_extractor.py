@@ -940,6 +940,12 @@ def _run_models(ext, pairs: pd.DataFrame, train_idx, val_idx, test_idx, seed: in
           f"edge_threshold={getattr(ext, 'edge_threshold', 0.0)}, "
           f"edge_center={getattr(ext, 'edge_center', 'global')}, "
           f"edge_weight_mode={getattr(ext, 'edge_weight_mode', 'none')})", flush=True)
+    _fan = tuple(getattr(ext, "fanout", ()) or ())
+    print(f"  {ext.name}: encoder {'sampled ' + '-'.join(map(str, _fan)) if _fan else 'full neighbourhood'}"
+          f", {'L2-normalised per layer' if getattr(ext, 'normalize_layers', False) else 'un-normalised'}"
+          f", conv={getattr(ext, 'conv', 'sage')}, hidden={getattr(ext, 'hidden', '?')}"
+          f", epochs={getattr(ext, 'epochs', '?')}, bags={getattr(ext, 'n_models', 1)}",
+          flush=True)
     if n_pos == 0 or n_neg == 0:
         raise ValueError(
             f"{ext.name}: signed message passing needs both edge signs, got "
@@ -1127,7 +1133,7 @@ class GnnSignedExtractor:
     # Consequence: a root trained before this date is a DIFFERENT model from one
     # trained after it, and the two must never be mixed in one table. Pass
     # `fanout=(), normalize_layers=False` to get the historical encoder back --
-    # scripts/article_sweeps/run_architecture.py does exactly that for its
+    # scripts/article_sweeps/s5_run_architecture.py does exactly that for its
     # un-suffixed rows, which is what keeps that table a comparison.
     fanout: tuple = (25, 10)
     normalize_layers: bool = True

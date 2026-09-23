@@ -21,7 +21,7 @@ deliberate: the refined receptor is trained on its fold's train pairs, so a vect
 imported from another table's run would be a leak dressed up as a shortcut. If those
 rows are absent the table still prints, and the run says what to add.
 
-    .venv/bin/python scripts/article_tables/07_protein_sources.py \\
+    .venv/bin/python scripts/article_tables/s2_protein_sources.py \\
         --dataset m2or --regime transductive inductive
 
 Writes results/article_tables/protein_sources/: protein_long.csv, protein_sources.tex,

@@ -192,7 +192,7 @@ _FACTORY_SPEC = {
     # v8 alpha gate (blank = off): 12 colons is a lot to type by hand, which is why
     # scripts/modeling/train/run_alpha_gate_sweep.py exists. Fields 16-17 are the two
     # GraphSAGE-regime additions (neighbour sampling, per-layer L2), both off by
-    # default -- see scripts/article_sweeps/run_architecture.py for what they buy.
+    # default -- see scripts/article_sweeps/s5_run_architecture.py for what they buy.
     "gnn_signed": ("orbind.gnn_extractor", "GnnSignedExtractor"),
     "gnn_signed_dgi": ("orbind.gnn_extractor", "GnnSignedDgiExtractor"),
     # TWO-STAGE signed GNN: stage 1 fine-tunes LoRA-ChemBERTa the LORAX way and

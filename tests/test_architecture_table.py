@@ -36,12 +36,12 @@ def _spec(name, rel):
 def sweep():
     """The sweep module. It imports the extractor, hence torch; conftest stubs
     torch_geometric where it is missing."""
-    return _spec("_archsweep", "scripts/article_sweeps/run_architecture.py")
+    return _spec("_archsweep", "scripts/article_sweeps/s5_run_architecture.py")
 
 
 @pytest.fixture(scope="module")
 def reader():
-    return _spec("_archtable", "scripts/article_tables/08_architecture.py")
+    return _spec("_archtable", "scripts/article_tables/s5_architecture.py")
 
 
 # ----------------------------------------------------------------- fixtures
@@ -277,7 +277,7 @@ def test_nothing_on_disk_prints_the_command_and_fails(reader, tmp_path, capsys):
     rc = reader.main(["--root", str(tmp_path), "--out", str(tmp_path / "out"),
                       "--dataset", "m2or", "--regime", "transductive"])
     assert rc == 1
-    assert "run_architecture.py" in capsys.readouterr().out
+    assert "s5_run_architecture.py" in capsys.readouterr().out
 
 
 def test_the_end_to_end_render_writes_its_three_files(reader, tmp_path):

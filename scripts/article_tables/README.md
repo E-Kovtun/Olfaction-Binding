@@ -1,25 +1,36 @@
 # scripts/article_tables/
 
-Everything the article's tables are assembled from. All scripts **read** results already on
-disk and write LaTeX + a long CSV + a plain-text summary to `results/article_tables/`.
-The one exception is `02a_protein_geometry.py`, which computes geometry of frozen
-embeddings (CPU, no training).
+Everything the article's tables are assembled from. All scripts **read** results already
+on disk and write LaTeX + a long CSV + a plain-text summary to `results/article_tables/`.
+
+**The prefix is the registry item** (`paper/PLAN.md`), renamed 23.09.2026: `m1_` for the
+main-text battery, `s2_`/`s3_`/`s5_`/`s6_` for supplementary items A2, A3.3, A5 and A6,
+and no prefix for a tool that serves every table. The old prefixes (`00`, `01`, `03`,
+`05`, `05a`, `07`, `08`) were the order the scripts were written in -- they looked like a
+sequence and corresponded to nothing.
+
+Two gaps in the numbering are real and deliberate. There is no `s1_`: the supplementary
+baselines table is `m1_main_tables.py` with `--baseline-combo cls --no-ours`, the same
+reader answering a narrower question. There is no `s4_` here either: A4's reader is a
+notebook, and its compute half lives in `../article_sweeps/`. A3.1 and A3.2 are notebooks
+too, which is why `s3_` names only the identity control.
+
+Retired to `scripts/legacy/` on the same day, because no current table is built from
+them: `02a_protein_geometry.py` and `02_geometry_table.py` (the geometry line is parked)
+and `06_alpha_choice_not_used.py` (replaced by a figure). `04_compare_runs.py` went with
+them. All four still run; they are simply not in any chain.
 
 Run from the repo root with `.venv/bin/python`.
 
-| script | table | inputs |
-|---|---|---|
-| `00_inventory.py` | — | reports READY / PARTIAL / MISSING for every input cell of every table |
-| `01_main_tables.py` | main: all methods × {M2OR, Carey, Hallem} × {transductive, cold molecule} | sweep `results/graph/v9_seeded` (graph α=1, both heads; boost) + `results/ensemble_logs` (LORAX, ProSmith, MolOR, Hladiš) |
-| `02a_protein_geometry.py` | (compute) geometry of ESM-1b / ProtT5 / ESM-2 / ESM3 / classical descriptors / one-hot | the sweep's own fold preparation and geometry functions |
-| `02_geometry_table.py` | RSA / CCA / Procrustes vs the functional profile | sweep geometry columns at α + `02a` CSVs |
-| `03_molecule_ablation.py` | graph vs boost vs Hladiš × ChemBERTa / GIN / ECFP (successor of tab:t2m2or/t2cc/t2hc) | sweep + ensemble_logs |
-| `04_compare_runs.py` | two table runs side by side: value, place and what moved | the `main_long.csv` of each run |
-| `05a_onehot_boost.py` | (compute) the boosting head over [one-hot receptor ‖ molecule] — the row no sweep writes | the sweep's own fold prep, `fit_boost` and metric battery |
-| `05_alpha0_vs_boost.py` | the identity control: our graph at alpha=0 vs boost over ESM and vs the one-hot boost | sweep + `05a`'s CSVs |
-| `06_alpha_choice_not_used.py` | **not in the paper** (22.09): the alpha choice as three typeset panels. The argument is made by `notebooks/article_figures/alpha_rank_dial.ipynb` instead; kept because it is the long form of the same protocol | the sweep's `val_metrics_*` AND `metrics_*` |
-| `08_architecture.py` | the architecture table (`tab:arch`): one row per message-passing operator, six columns (dataset x regime), the boosting base as the anchor | `run_architecture.py`'s CSVs under results/article_sweeps/architecture |
-| `07_protein_sources.py` | what the receptor side has to be: our graph, pLMs, the classical floor and the one-hot controls under one head; metric of record only by default | `prot_floor_sweep.py --gnn` CSVs under `results/tables/` |
+| script | item | table | inputs |
+|---|---|---|---|
+| `inventory.py` | tool | — | reports READY / PARTIAL / MISSING for every input cell of every table |
+| `m1_main_tables.py` | **M1** + **A1** | main: all methods × {M2OR, Carey, Hallem} × {transductive, cold molecule} | sweep `results/graph/v9_seeded` (graph α=1, both heads; boost) + `results/ensemble_logs` (LORAX, ProSmith, MolOR, Hladiš) |
+| `s6_molecule_ablation.py` | **A6** | graph vs boost vs Hladiš × ChemBERTa / GIN / ECFP (successor of tab:t2m2or/t2cc/t2hc) | sweep + ensemble_logs |
+| `s3_onehot_boost.py` | **A3.3** | (compute) the boosting head over [one-hot receptor ‖ molecule] — the row no sweep writes | the sweep's own fold prep, `fit_boost` and metric battery |
+| `s3_alpha0_vs_boost.py` | **A3.3** | the identity control: our graph at alpha=0 vs boost over ESM and vs the one-hot boost | sweep + `s3_onehot_boost`'s CSVs |
+| `s5_architecture.py` | **A5** | the architecture table (`tab:arch`): one row per message-passing operator, six columns (dataset x regime), the boosting base as the anchor | `s5_run_architecture.py`'s CSVs under results/article_sweeps/architecture |
+| `s2_protein_sources.py` | **A2** | what the receptor side has to be: our graph, pLMs, the classical floor and the one-hot controls under one head; metric of record only by default | `prot_floor_sweep.py --gnn` CSVs under `results/tables/` |
 
 Every table takes `--dataset` from `paper_tables.DATASET_ORDER`, which includes the
 shrunk insect panels (`cc_shrinked`, `hc_shrinked`, `*_shrinked50`). Their graph rows
@@ -45,9 +56,9 @@ same assay-design contamination as M2OR's — they now have a measured-cell mask
 ## Typical order
 
 ```
-.venv/bin/python scripts/article_tables/00_inventory.py
-.venv/bin/python scripts/article_tables/01_main_tables.py
-.venv/bin/python scripts/article_tables/03_molecule_ablation.py
-.venv/bin/python scripts/article_tables/02a_protein_geometry.py --dataset cc hc
-.venv/bin/python scripts/article_tables/02_geometry_table.py
+.venv/bin/python scripts/article_tables/inventory.py
+.venv/bin/python scripts/article_tables/m1_main_tables.py
+.venv/bin/python scripts/article_tables/s6_molecule_ablation.py
+.venv/bin/python scripts/legacy/02a_protein_geometry.py --dataset cc hc
+.venv/bin/python scripts/legacy/02_geometry_table.py
 ```

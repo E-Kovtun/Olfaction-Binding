@@ -6,7 +6,9 @@ directory it asks you to create is named here, and every command names its input
 outputs explicitly rather than relying on a default.
 
 **Scope.** It currently covers the three tables listed below. The remaining ones are
-being converted to the same form and will appear here as they are.
+being converted to the same form and will appear here as they are; the first command in
+§[3.1](#31-our-graph--run-this-first-before-anything-else) already produces what they
+need, and that section says which artifact reads what.
 
 | Table | What it shows | Section |
 |---|---|---|
@@ -80,30 +82,97 @@ results/baselines/        the competitors, one directory per cell   (§3.2)
 results/tables/           the receptor-representation fits          (§3.3)
 ```
 
-### 3.1 Our graph
+### 3.1 Our graph — run this first, before anything else
 
-One command covers all six cells. It trains the graph inside each fold and scores the
-boosting head on top of it:
+Two commands, and they are not symmetric. The first is what almost every table waits
+on; the second is small, feeds exactly one table, and can be left until just before you
+render it.
+
+**(a) The receptor dial, on the reference molecule embedding.** This is the long one.
 
 ```bash
 .venv/bin/python scripts/modeling/train/run_alpha_gate_sweep.py \
     --dataset m2or cc hc --regime transductive inductive \
-    --mol-source chemberta --alphas 1.0 \
+    --mol-source chemberta \
+    --alphas 0 0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 1.0 \
     --dial nodes --seed-graph --seeds 42 43 44 45 46 \
     --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz' \
     --out results/graph/main \
     --max-parallel 4 --gpus 0 1 2 3
 ```
 
+`--alphas` are positions on the receptor **node dial**. At `1` the receptor nodes carry
+the sequence embedding and the graph is the model the tables report. At `0` they carry
+only *which receptor this is* — one fixed near-orthogonal vector each, no sequence at
+all — so the refined receptor holds nothing but what the response profile put there.
+The positions in between are what make the reported end a measured choice rather than
+an inherited one.
+
+Running the whole dial rather than only `1` costs about eleven times the graph training
+and nothing else; the boosting on top is minutes. It is the first command because five
+separate artifacts read it, and because a dial run interrupted halfway is still useful
+— the sweep resumes at cell granularity.
+
+What this one run feeds:
+
+| Artifact | What it takes from this run | Anything else needed |
+|---|---|---|
+| Main battery (§[4.1](#41-main-battery)) | the `1` end, both heads, all six cells | the competitors (§3.2) |
+| Baselines alone (§[4.2](#42-baselines-in-their-own-representation)) | the boosting base row | the competitors (§3.2) |
+| Dial figure | every position, test and validation | — |
+| Mean-rank-against-dial figure | every position, validation | — |
+| Identity control | the `0` end against the base | one extra fit, below |
+
+The receptor-representation table (§4.3) is deliberately absent from that list: it
+trains its own graphs inside its own folds, so that its row sits beside the descriptor
+rows as a like-for-like comparison rather than as an import from elsewhere. It reads
+nothing from this root.
+
+The identity control is the only one with a genuine dependency outside this run: it
+compares the dial's `0` end against a boosting head over a **one-hot** receptor block,
+which no sweep writes. That fit trains no graph, so it is unaffected by anything here
+and is cached once:
+
+```bash
+.venv/bin/python scripts/article_tables/s3_onehot_boost.py \
+    --dataset m2or cc hc \
+    --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz'
+```
+
+Pass it the same receptor file the sweep used even though one-hot replaces the
+embedding: that file decides which receptors are covered, and a different one would
+give the control a different set of rows than the thing it controls.
+
+**(b) The other molecule embeddings, at one position.** Small, and it feeds one table.
+
+```bash
+.venv/bin/python scripts/modeling/train/run_alpha_gate_sweep.py \
+    --dataset m2or cc hc --regime transductive inductive \
+    --mol-source gin ecfp --alphas 1.0 \
+    --dial nodes --seed-graph --seeds 42 43 44 45 46 \
+    --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz' \
+    --out results/graph/main \
+    --max-parallel 4 --gpus 0 1 2 3
+```
+
+The molecule-source table asks whether the conclusion survives replacing the molecule
+half, and it asks that at the position the paper reports — so there is no dial here,
+one point per source is the whole requirement. Nothing else reads these rows, which is
+why this command can wait until you are about to render that table.
+
+**Both write into the same root, safely.** The molecule source is part of each cell's
+filename and the dial position is part of the cell key inside it, so (b) cannot collide
+with (a), and re-running either skips what is already on disk. That also means command
+(a) subsumes a plain `--alphas 1.0` run: if you have one, its rows count as done.
+
 Quote `'…{ds}.npz'` — the placeholder is expanded by the script, not by the shell.
 
 `--seeds` are model seeds; five of them are averaged inside each fold before any
 interval is taken. `--seed-graph` ties the graph's initialisation to the model seed, so
-a rerun of this command reproduces itself.
+a rerun of these commands reproduces itself rather than drawing a new lottery ticket.
 
-The run is **resumable**: it reads what is already in its CSVs and fits only what is
-missing, so the same command is also the command that tops it up after an interruption.
-It writes, per cell, `metrics_*.csv` (test), `val_metrics_*.csv` (validation) and
+Each run writes, per cell, `metrics_*.csv` (test), `val_metrics_*.csv` (the same fitted
+heads scored on validation — the only split a dial position may be chosen on) and
 `records_*.csv` (everything, with wall clock and provenance).
 
 To check that a finished root was produced by the flags you think it was, read them back
@@ -221,7 +290,7 @@ takes the roots from §3 explicitly.
 ### 4.1 Main battery
 
 ```bash
-.venv/bin/python scripts/article_tables/01_main_tables.py --no-val-cut \
+.venv/bin/python scripts/article_tables/m1_main_tables.py --no-val-cut \
     --sweep-root results/graph/main \
     --ensemble-root results/baselines \
     --out results/paper/main-battery
@@ -238,7 +307,7 @@ The same reader, told to take each competitor in its `cls` form alone — its ow
 pair representation, with no raw vectors beside it — and to leave our graph out:
 
 ```bash
-.venv/bin/python scripts/article_tables/01_main_tables.py --no-val-cut \
+.venv/bin/python scripts/article_tables/m1_main_tables.py --no-val-cut \
     --dataset m2or --baseline-combo cls --no-ours \
     --sweep-root results/graph/main \
     --ensemble-root results/baselines \
@@ -252,7 +321,7 @@ representation at all.
 ### 4.3 Receptor representations
 
 ```bash
-.venv/bin/python scripts/article_tables/07_protein_sources.py \
+.venv/bin/python scripts/article_tables/s2_protein_sources.py \
     --dataset m2or cc hc --regime transductive inductive \
     --root results/tables \
     --out results/paper/receptor-representations

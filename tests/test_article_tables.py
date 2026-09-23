@@ -20,9 +20,9 @@ FOLDS = [1, 2, 3, 4, 5]
 SEEDS = [42, 43]
 
 
-def _script(name):
+def _script(name, folder="article_tables"):
     spec = importlib.util.spec_from_file_location(
-        f"_article_{name}", ROOT / "scripts" / "article_tables" / f"{name}.py")
+        f"_article_{name}", ROOT / "scripts" / folder / f"{name}.py")
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
     return m
@@ -135,7 +135,7 @@ def test_a_missing_combo_falls_back_and_says_so(trees):
 
 def test_main_table_end_to_end(trees):
     s, e, tmp = trees
-    m = _script("01_main_tables")
+    m = _script("m1_main_tables")
     out = tmp / "main"
     longs = m.main(["--dataset", "cc", "--sweep-root", str(s), "--ensemble-root", str(e),
                     "--out", str(out)])
@@ -161,7 +161,7 @@ def test_main_table_end_to_end(trees):
 
 def test_molecule_ablation_end_to_end(trees):
     s, e, tmp = trees
-    m = _script("03_molecule_ablation")
+    m = _script("s6_molecule_ablation")
     out = tmp / "mol"
     m.main(["--dataset", "cc", "--sweep-root", str(s), "--ensemble-root", str(e),
             "--out", str(out)])
@@ -181,7 +181,7 @@ def test_geometry_table_reads_the_sweep_and_the_frozen_embeddings(trees):
                        procrustes_fun=0.1, procrustes_fun_z=0.5)
                   for f in FOLDS for e, v, z in (("esm1b", 0.1, 3.0), ("onehot", np.nan, np.nan))]
                  ).to_csv(pg / "cc_transductive.csv", index=False)
-    m = _script("02_geometry_table")
+    m = _script("02_geometry_table", "legacy")
     out = tmp / "geo"
     cells = m.main(["--dataset", "cc", "--sweep-root", str(s), "--protein-geometry", str(pg),
                     "--out", str(out)])
@@ -206,7 +206,7 @@ def test_no_tests_drops_the_significance_marks_but_not_the_null_marks(trees):
                        procrustes_fun=0.1, procrustes_fun_z=0.5)
                   for f in FOLDS for e, v, z in (("esm1b", 0.1, 3.0),)]
                  ).to_csv(pg / "cc_transductive.csv", index=False)
-    m = _script("02_geometry_table")
+    m = _script("02_geometry_table", "legacy")
     args = ["--dataset", "cc", "--sweep-root", str(s), "--protein-geometry", str(pg)]
 
     on = tmp / "geo_on"
@@ -301,7 +301,7 @@ def test_the_val_cut_is_an_extra_column_and_never_replaces_the_0_5_one(m2or):
     rng = np.random.default_rng(0)
     _m2or_sweep(s, rng)
     _m2or_baseline(e, rng)
-    m = _script("01_main_tables")
+    m = _script("m1_main_tables")
     out = tmp / "main"
     longs = m.main(["--dataset", "m2or", "--baselines", "hladis", "--sweep-root", str(s),
                     "--ensemble-root", str(e), "--out", str(out)])
@@ -327,7 +327,7 @@ def test_one_row_without_scores_leaves_every_row_on_the_0_5_cut_alone(m2or):
     rng = np.random.default_rng(1)
     _m2or_sweep(s, rng)
     _m2or_baseline(e, rng, with_scores=False)      # the borrowed row has none
-    m = _script("01_main_tables")
+    m = _script("m1_main_tables")
     out = tmp / "main"
     longs = m.main(["--dataset", "m2or", "--baselines", "hladis", "--sweep-root", str(s),
                     "--ensemble-root", str(e), "--out", str(out)])
@@ -359,7 +359,7 @@ def test_the_ensemble_writes_per_row_scores_next_to_its_metrics(tmp_path):
 
 def test_inventory_runs_on_a_partial_tree(trees):
     s, e, tmp = trees
-    m = _script("00_inventory")
+    m = _script("inventory")
     df = m.main(["--only", "main", "molecule", "architecture", "--sweep-root", str(s),
                  "--ensemble-root", str(e), "--expect-seeds", "2", "--out", str(tmp / "inv")])
     q = df[(df.table == "main") & (df.dataset == "cc") & (df.regime == "transductive")]
@@ -439,7 +439,7 @@ def test_no_ours_drops_our_rows_and_leaves_the_baselines_intact(m2or):
     rng = np.random.default_rng(3)
     _m2or_sweep(s, rng)
     _m2or_baseline(e, rng)
-    m = _script("01_main_tables")
+    m = _script("m1_main_tables")
     out = tmp / "t1shape"
     longs = m.main(["--dataset", "m2or", "--baselines", "hladis", "--no-ours",
                     "--sweep-root", str(s), "--ensemble-root", str(e), "--out", str(out)])
@@ -454,7 +454,31 @@ def test_no_ours_and_ours_can_be_given_in_either_order(m2or):
     # argparse lets the two flags share a dest; last one on the line wins, and a
     # reader of the runbook should not have to know which.
     s, e, tmp = m2or
-    m = _script("01_main_tables")
+    m = _script("m1_main_tables")
     p = m.parser()
     assert p.parse_args(["--ours", "cls+mol", "--no-ours"]).ours == []
     assert p.parse_args(["--no-ours", "--ours", "cls+mol"]).ours == ["cls+mol"]
+
+
+# ------------------------------------------------------- the significance mark
+
+def test_the_mark_is_only_for_wins():
+    """A star is read as an achievement. A significant LOSS is still a result and its
+    p-values stay printed, but marking it would tell a skimming reader the opposite of
+    what happened."""
+    assert tk.leads_ref(0.02, "AUROC") is True
+    assert tk.leads_ref(-0.02, "AUROC") is False
+
+
+def test_the_mark_flips_for_error_metrics():
+    """On RMSE the winning difference is the negative one. This is the same direction
+    rule as every ranking in these tables, and getting it wrong here would decorate the
+    worse model in every error column."""
+    assert tk.leads_ref(-0.02, "RMSE") is True
+    assert tk.leads_ref(0.02, "RMSE") is False
+    assert tk.leads_ref(-0.02, "MAE") is True
+
+
+def test_a_missing_difference_never_earns_a_mark():
+    """No shared splits means no comparison, not a silent win."""
+    assert tk.leads_ref(float("nan"), "AUROC") is False

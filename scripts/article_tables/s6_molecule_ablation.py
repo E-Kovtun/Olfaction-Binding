@@ -2,8 +2,8 @@
 """Molecule-embedding ablation: our graph, the boosting base and Hladis on every molecule
 embedding -- the successor of tab:t2m2or / tab:t2cc / tab:t2hc, now at the seeded dial.
 
-    python scripts/article_tables/03_molecule_ablation.py
-    python scripts/article_tables/03_molecule_ablation.py --ours cls+prot+mol
+    python scripts/article_tables/s6_molecule_ablation.py
+    python scripts/article_tables/s6_molecule_ablation.py --ours cls+prot+mol
 
 One table per dataset: rows = ChemBERTa / GIN / ECFP, columns = regime x method. A cell is
 the metric of record, mean +/- std over splits, and in parentheses the place among the

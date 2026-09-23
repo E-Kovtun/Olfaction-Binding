@@ -541,6 +541,18 @@ def paired_test(x, y, metric):
     return out
 
 
+def leads_ref(delta, metric):
+    """Does a row with this mean difference LEAD its reference on this metric?
+
+    Direction-aware, which is the whole point: on RMSE and MAE a negative difference
+    is the winning one, and a test marked without asking this hands the mark to the
+    worse model on every error column.
+    """
+    if not np.isfinite(delta):
+        return False
+    return delta < 0 if metric in LOWER_IS_BETTER else delta > 0
+
+
 def holm(pvals):
     """Holm-Bonferroni adjusted p-values; NaN stays NaN and does not count."""
     p = pd.Series(pvals, dtype=float)
@@ -706,7 +718,12 @@ def text_block(st, metrics, title, sig=0.05, w=22, wp=14):
                 continue
             if np.isfinite(r["p_vs_ref"]) or np.isfinite(r["p_holm"]):
                 p = f"{pstr(r['p_vs_ref'])}/{pstr(r['p_holm'])}"
-                if np.isfinite(r["p_holm"]) and r["p_holm"] < sig:
+                # The mark means "we beat the reference here", so a significant LOSS
+                # does not earn one. Both p-values are printed either way -- the number
+                # is the evidence and stays visible; the star is only the reading of it,
+                # and a star on a defeat reads as an achievement to anyone skimming.
+                if (np.isfinite(r["p_holm"]) and r["p_holm"] < sig
+                        and leads_ref(r["delta_vs_ref"], m)):
                     p += "*"
             else:
                 p = "ref" if k == r["ref"] else ""

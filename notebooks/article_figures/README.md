@@ -21,7 +21,7 @@ aggregates nothing new either --- the places come from
 module the (unused) choice script reads --- but it does *test*, because "is this dial a
 slope or a flat surface" is a question a figure can pose and only a test can answer.
 The alpha-choice table it replaced is kept at
-`scripts/article_tables/06_alpha_choice_not_used.py` and is not in the runbook.
+`scripts/legacy/06_alpha_choice_not_used.py` and is not in the runbook.
 
 ## The rule these notebooks are built around
 

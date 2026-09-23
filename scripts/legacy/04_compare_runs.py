@@ -2,19 +2,19 @@
 
 Built to answer "did swapping the protein source lift anything, or just reshuffle
 the order" without reading two printouts in two terminals. Takes the `main_long.csv`
-that `01_main_tables.py` writes for each run and joins them on
+that `m1_main_tables.py` writes for each run and joins them on
 (dataset, regime, method, metric).
 
 Both sides must have been produced with the SAME flags -- same metrics, same
 baselines, same alpha -- or the comparison quietly compares two different tables.
 The header prints each side's row count so a mismatch is visible.
 
-    python scripts/article_tables/04_compare_runs.py \
+    python scripts/legacy/04_compare_runs.py \
         --a results/article_tables/main --a-label ESM-1b \
         --b results/article_tables/esm3/main --b-label ESM3
 
     # only the cells that moved by more than noise:
-    python scripts/article_tables/04_compare_runs.py --a A --b B --min-delta 0.01
+    python scripts/legacy/04_compare_runs.py --a A --b B --min-delta 0.01
 """
 from __future__ import annotations
 
@@ -39,13 +39,13 @@ LOWER_IS_BETTER = {"RMSE", "MAE"}
 def load(path: pathlib.Path) -> pd.DataFrame:
     csv = path if path.suffix == ".csv" else path / "main_long.csv"
     if not csv.exists():
-        raise SystemExit(f"no main_long.csv at {csv} -- run 01_main_tables.py with "
+        raise SystemExit(f"no main_long.csv at {csv} -- run m1_main_tables.py with "
                          f"--out {path} first")
     df = pd.read_csv(csv)
     missing = [k for k in KEYS if k not in df.columns]
     if missing:
         raise SystemExit(f"{csv} predates the dataset/regime columns ({missing}); "
-                         f"regenerate it with the current 01_main_tables.py")
+                         f"regenerate it with the current m1_main_tables.py")
     return df
 
 

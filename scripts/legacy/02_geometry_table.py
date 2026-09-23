@@ -3,8 +3,8 @@
 profile -- RSA, CCA and Procrustes -- for our graph at a fixed dial position and for the
 frozen protein features of tab:t4.
 
-    python scripts/article_tables/02_geometry_table.py
-    python scripts/article_tables/02_geometry_table.py --regime inductive --alphas 1.0 0.0
+    python scripts/legacy/02_geometry_table.py
+    python scripts/legacy/02_geometry_table.py --regime inductive --alphas 1.0 0.0
 
 Rows:
     Our graph (alpha=...)   the sweep's own geometry columns `{rsa,cca,procrustes}_fun`

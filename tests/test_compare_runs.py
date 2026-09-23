@@ -15,7 +15,7 @@ _root = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_root))
 
 _spec = importlib.util.spec_from_file_location(
-    "_cmp", _root / "scripts/article_tables/04_compare_runs.py")
+    "_cmp", _root / "scripts/legacy/04_compare_runs.py")
 C = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(C)
 

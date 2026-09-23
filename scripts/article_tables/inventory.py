@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """What every article table can be built from RIGHT NOW -- read-only, trains nothing.
 
-    python scripts/article_tables/00_inventory.py
-    python scripts/article_tables/00_inventory.py --only main molecule
+    python scripts/article_tables/inventory.py
+    python scripts/article_tables/inventory.py --only main molecule
 
 For each table it lists every input cell and gives it a status:
 
@@ -12,7 +12,7 @@ For each table it lists every input cell and gives it a status:
     MISSING   nothing on disk; the detail says what would produce it
 
 Tables:
-    main        01_main_tables.py     6 cells x (4 baselines + boost + 2 graph heads)
+    main        m1_main_tables.py     6 cells x (4 baselines + boost + 2 graph heads)
     molecule    03_molecule_ablation  18 cells x (graph, boost, Hladis)
     geometry    02 / 02a              sweep geometry at alpha + frozen-embedding CSVs
     protein     tab:t4 as it stands   results/tables/prot_floor_<ds>_<regime>.csv
@@ -102,7 +102,8 @@ def geometry_cells(a):
                                          f"{df.fold.nunique()} splits | {p}")))
             else:
                 out.append(rec("geometry", ds, reg, "", "frozen embeddings",
-                               ("MISSING", "run 02a_protein_geometry.py (CPU, no training)")))
+                               ("MISSING", "run scripts/legacy/02a_protein_geometry.py "
+                                "-- parked line, kept for provenance")))
     return out
 
 
@@ -147,7 +148,7 @@ def construction_cells(a):
                        "criterion x quantile (article_sweeps)", ("READY", f.name)))
     if not art:
         out.append(rec("construction", "", "", "", "criterion x quantile (article_sweeps)",
-                       ("MISSING", "scripts/article_sweeps/run_quantile_criteria.py "
+                       ("MISSING", "scripts/article_sweeps/s4_run_quantile_criteria.py "
                                    "output not on this box")))
     v7 = sorted(tk.resolve("results/graph/full_full/v7/protein_based_graph").glob("metrics_*.csv"))
     out.append(rec("construction", "m2or", "", "", "quantile x criterion sweep (v7, superseded)",

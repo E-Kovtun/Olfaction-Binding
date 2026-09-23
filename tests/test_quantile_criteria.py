@@ -20,7 +20,7 @@ import pytest
 _root = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_root))
 
-from scripts.article_sweeps import quantile_grid as qg  # noqa: E402
+from scripts.article_sweeps import s4_quantile_grid as qg  # noqa: E402
 
 
 def _spec(name, rel):
@@ -35,7 +35,7 @@ def _spec(name, rel):
 def sweep():
     """The sweep module. It imports the extractor, hence torch; conftest stubs
     torch_geometric where it is missing."""
-    return _spec("_qsweep", "scripts/article_sweeps/run_quantile_criteria.py")
+    return _spec("_qsweep", "scripts/article_sweeps/s4_run_quantile_criteria.py")
 
 
 # ----------------------------------------------------------------- fixtures

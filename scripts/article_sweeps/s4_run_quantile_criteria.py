@@ -15,7 +15,7 @@ preparation, metric battery and boosting reference **as a module** and varies on
 construction knob. Same folds, same coverage mask, same head, same columns -- so a row
 here is comparable with a row there, and nothing in the older code had to move.
 
-    .venv/bin/python scripts/article_sweeps/run_quantile_criteria.py \\
+    .venv/bin/python scripts/article_sweeps/s4_run_quantile_criteria.py \\
         --dataset m2or --regime inductive \\
         --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz' \\
         --max-parallel 4 --gpus 0 1 2 3
@@ -24,7 +24,7 @@ One CSV per (dataset, regime) under results/article_sweeps/quantile_criteria/, o
 per (criterion, quantile, fold, seed, head, split). Resumable at cell granularity: a
 re-run skips what is already there, so a killed sweep is restarted by repeating the
 command. `notebooks/article_figures/quantile_criteria.ipynb` draws it and aggregates
-nothing -- `quantile_grid.py` in this folder does that.
+nothing -- `s4_quantile_grid.py` in this folder does that.
 
 THREE THINGS THAT ARE EASY TO GET WRONG HERE
 

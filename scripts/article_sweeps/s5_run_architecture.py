@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """WHICH MESSAGE-PASSING OPERATOR: the architecture ablation, six numbers per row.
 
-    .venv/bin/python scripts/article_sweeps/run_architecture.py \\
+    .venv/bin/python scripts/article_sweeps/s5_run_architecture.py \\
         --dataset m2or cc hc --regime transductive inductive \\
         --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz' \\
         --seeds 42 43 44 45 46 --max-parallel 4 --gpus 0 1 2 3
@@ -42,7 +42,7 @@ this sweep deliberately rather than by oversight.
 
 WHAT COMES OUT. One CSV per (dataset, regime) under `--out`, one row per
 (operator, width, fold, seed, head, split), plus the boosting reference on the same
-folds. `scripts/article_tables/08_architecture.py` renders the six-column table from
+folds. `scripts/article_tables/s5_architecture.py` renders the six-column table from
 them: the metric of record per dataset, one column per (dataset, regime).
 
 Resumable at cell granularity: rows already in the CSV are kept and only the missing

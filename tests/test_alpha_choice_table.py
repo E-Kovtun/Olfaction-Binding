@@ -27,7 +27,7 @@ _root = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_root))
 
 _spec = importlib.util.spec_from_file_location(
-    "_ac_table", _root / "scripts/article_tables/06_alpha_choice_not_used.py")
+    "_ac_table", _root / "scripts/legacy/06_alpha_choice_not_used.py")
 T = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(T)
 

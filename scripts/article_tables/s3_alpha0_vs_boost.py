@@ -12,16 +12,16 @@ Three rows per cell, on the same folds:
     boost [ESM|mol]  the sweep's own boost_full reference
     boost [1hot|mol] the same head over a ONE-HOT receptor block instead of ESM
 
-The first two are read from the sweep; the third comes from `05a_onehot_boost.py`,
+The first two are read from the sweep; the third comes from `s3_onehot_boost.py`,
 which fits it. That one is the honest floor for the first: a one-hot block is receptor
 identity with no refinement, so a graph at alpha=0 that does not beat it has learned nothing from the
 response profile, and one that beats boost-over-ESM while tying one-hot says the win
 was never about sequence.
 
-    python scripts/article_tables/05_alpha0_vs_boost.py \
+    python scripts/article_tables/s3_alpha0_vs_boost.py \
         --sweep-root results/graph/main
 
-READ-ONLY. The one-hot heads are fitted by `05a_onehot_boost.py`, which writes one
+READ-ONLY. The one-hot heads are fitted by `s3_onehot_boost.py`, which writes one
 CSV per (dataset, regime) under results/article_tables/onehot_boost/; this script only
 reads them, so it is fast and safe to re-run while tweaking a label. If those files are
 absent the column reads `--` and the run prints the command that makes them.
@@ -52,7 +52,7 @@ ROWS = (GRAPH, BOOST, ONEHOT)
 # ------------------------------------------------------------------ the one-hot rows
 
 def onehot_table(ds, regime, cache):
-    """The one-hot head's rows for this cell, as `05a_onehot_boost.py` wrote them.
+    """The one-hot head's rows for this cell, as `s3_onehot_boost.py` wrote them.
 
     Missing is not an error: the one-hot column simply reads `--`, and the message
     below says what to run. That keeps this script fast and read-only -- fitting a
@@ -140,7 +140,7 @@ def build(a):
         datasets = " ".join(sorted({d for d, _ in missing}))
         print(f"\nNOTE: no one-hot rows for {cells} -- that column reads '--'.\n"
               f"      Fit them once (slow, then cached) with:\n"
-              f"        python scripts/article_tables/05a_onehot_boost.py"
+              f"        python scripts/article_tables/s3_onehot_boost.py"
               f" --dataset {datasets}"
               f" --prot-embeddings '<the npz the sweep used>'\n")
     return pd.DataFrame(out)
@@ -233,7 +233,7 @@ def parser():
     ap.add_argument("--flag-at", type=int, default=3,
                     help="mark a row with this many wins or more")
     ap.add_argument("--cache", default="results/article_tables/onehot_boost",
-                    help="where 05a_onehot_boost.py wrote its CSVs")
+                    help="where s3_onehot_boost.py wrote its CSVs")
     ap.add_argument("--out", default="results/article_tables/alpha0")
     return ap
 

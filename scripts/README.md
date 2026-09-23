@@ -112,7 +112,7 @@ analysis/
                                     and the sparse-matrix assay-design check
 
 article_sweeps/
-  run_quantile_criteria.py          the CONSTRUCTION ablation: molecule-ranking
+  s4_run_quantile_criteria.py          the CONSTRUCTION ablation: molecule-ranking
                                     criterion x coverage quantile, i.e. which
                                     molecules carry the messages at all. Trains, so
                                     it wants a GPU; imports run_alpha_gate_sweep as a

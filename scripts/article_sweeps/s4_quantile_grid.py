@@ -71,7 +71,7 @@ def load(root=DEFAULT_ROOT, dataset=None, regime=None, mol_source=None,
     files = sorted(d.glob("metrics_*.csv"))
     if not files:
         raise SystemExit(f"no metrics_*.csv under {d} -- run "
-                         f"scripts/article_sweeps/run_quantile_criteria.py first")
+                         f"scripts/article_sweeps/s4_run_quantile_criteria.py first")
     df = pd.concat([pd.read_csv(f) for f in files], ignore_index=True)
     for col, want in (("dataset", dataset), ("regime", regime),
                       ("mol_source", mol_source)):

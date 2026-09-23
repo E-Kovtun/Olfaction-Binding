@@ -11,11 +11,11 @@ coverage mask, the same `fit_boost` hyperparameters, the same metric battery
 (`_score_split`) -- so the row lands beside `boost_full` as a like-for-like control and
 not as a second implementation of boosting.
 
-This is the SLOW half, and it is separated for that reason: `05_alpha0_vs_boost.py`
+This is the SLOW half, and it is separated for that reason: `s3_alpha0_vs_boost.py`
 only reads what this writes. On M2OR the one-hot block is 1237 columns wide over ~46k
 rows, so budget minutes per fold; the insect panels are seconds.
 
-    .venv/bin/python scripts/article_tables/05a_onehot_boost.py \\
+    .venv/bin/python scripts/article_tables/s3_onehot_boost.py \\
         --dataset m2or cc hc \\
         --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz'
 

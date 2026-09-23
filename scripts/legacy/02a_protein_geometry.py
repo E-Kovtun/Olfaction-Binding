@@ -9,8 +9,8 @@ on the same receptor order and the same profile matrix -- it calls the sweep's o
 ESM-2 (each only where its npz exists and covers every receptor), the six classical
 descriptors of tab:t4, and one-hot identity. No model, no GPU.
 
-    .venv/bin/python scripts/article_tables/02a_protein_geometry.py --dataset cc hc
-    .venv/bin/python scripts/article_tables/02a_protein_geometry.py --dataset m2or --regime transductive
+    .venv/bin/python scripts/legacy/02a_protein_geometry.py --dataset cc hc
+    .venv/bin/python scripts/legacy/02a_protein_geometry.py --dataset m2or --regime transductive
 
 One CSV per (dataset, regime): results/article_tables/protein_geometry/<ds>_<regime>.csv,
 one row per (fold, embedding), `{rsa,cca,procrustes}_fun` and their `_z` against a

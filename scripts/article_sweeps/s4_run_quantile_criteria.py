@@ -66,8 +66,8 @@ sys.path.insert(0, str(_root))
 from orbind.baselines import (check_xgboost_version, fit_boost,   # noqa: E402
                               predict_scores)
 from orbind.gnn_extractor import GnnSignedExtractor               # noqa: E402
-from orbind.mol_selection import (CRITERIA, K_MODES,              # noqa: E402
-                                  compute_mol_scores, resolve_K)
+from orbind.mol_selection import (CONTROL_CRITERIA, CRITERIA,     # noqa: E402
+                                  K_MODES, compute_mol_scores, resolve_K)
 
 #: Default grid. Coarse at the bottom (nothing happens there) and dense at the top,
 #: where the paper's own point sits and where K falls off a cliff.
@@ -123,6 +123,11 @@ def flat_criteria(P, task, criteria):
     Not a failure -- an honest reading of a complete matrix. But a figure that puts
     seven such criteria side by side implies they rank differently, when what actually
     separated them was an arbitrary tie-break.
+
+    `random` is skipped, and so is anything else `compute_mol_scores` has no vector for:
+    a control does not rank, so there is no ranking of its that could collapse. It draws
+    K molecules uniformly whatever the scores look like, which is the whole point of
+    having it on the grid.
     """
     mols = sorted(pd.unique(P["mol_tr"]))
     recs = sorted(pd.unique(P["rec_tr"]))
@@ -133,9 +138,13 @@ def flat_criteria(P, task, criteria):
                             np.asarray(P["y_tr"]), len(mols), len(recs),
                             need_greedy=False,
                             pos_threshold=(0.0 if task == "regression" else None))
-    flat = [c for c in criteria if c != "greedy_pair_cover"
+    flat = [c for c in criteria
+            if c not in CONTROL_CRITERIA and c in sc["SCORE"]
             and len(np.unique(np.round(sc["SCORE"][c], 10))) == 1]
-    if "greedy_pair_cover" in criteria and len(np.unique(sc["cov"])) == 1:
+    # greedy has an order, not a score: it is flat exactly when coverage is, because
+    # then every molecule covers the same protein pairs and the ordering is arbitrary.
+    if ("greedy_pair_cover" in criteria and "greedy_pair_cover" not in CONTROL_CRITERIA
+            and len(np.unique(sc["cov"])) == 1):
         flat.append("greedy_pair_cover")
     return flat
 

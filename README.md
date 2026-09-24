@@ -922,6 +922,29 @@ The folds are the paper's own: M2OR's splits come from
 same store M1, A1 and the dial read, so a row here is on the same held-out set as a row
 there — including its `val` third.
 
+**Before the long run, a smoke test.** One fold, two quantiles, two criteria — a few
+minutes, and its rows count toward the full run, which writes into the same file:
+
+```bash
+.venv/bin/python scripts/article_sweeps/s4_run_quantile_criteria.py     --dataset m2or --regime inductive     --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz'     --seed-graph --seeds 42 --n-folds 1     --quantiles 0 0.99 --criteria coverage random --max-parallel 2 --gpus 0 1
+```
+
+**`--max-parallel` above the number of cards is allowed.** Workers are assigned
+round-robin (`gpus[i % len(gpus)]`), so `--max-parallel 8 --gpus 0 1 2 3` puts two on
+each card. It usually does help: a 900-epoch GNN on a graph this small is bound by
+kernel-launch latency rather than by arithmetic, which is exactly why the card reads as
+under-used. Two things bound it, and both are worth a look before committing 820 cells
+to it:
+
+* **Host RAM, which is the real limit.** Each worker is a separate process that caches
+  `_fold_prep` for every fold it touches, and on M2OR with ESM3 that is roughly half a
+  gigabyte per fold (the dense `Xp`/`Xm` blocks for train, val and test), so a worker
+  that has seen all five holds ~2.5 GB, plus its CUDA context. Eight of those is ~25 GB.
+  Check with `free -g` while it runs.
+* **Per-card memory**, since XGBoost trains on the device too (`device="cuda"`,
+  `tree_method="hist"`) in the same process as the graph. Two workers per card double
+  it. `nvidia-smi` during the smoke test answers this in one line.
+
 **Adding a seed later costs only the new seed.** The seed is part of the cell key, so
 repeating the command with `--seeds 42 43 44` trains 205 graphs per regime and touches
 nothing that is already there; the `q = 0` column is shared for the new seed exactly as

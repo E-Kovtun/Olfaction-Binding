@@ -4,6 +4,8 @@
     python scripts/article_tables/m1_main_tables.py                    # M1, all datasets
     python scripts/article_tables/m1_main_tables.py --dataset cc hc    # M1, two of them
     python scripts/article_tables/m1_main_tables.py --baseline-combo cls --no-ours  # A1
+    python scripts/article_tables/m1_main_tables.py --ours cls+prot+mol --stars  # M1,
+        # one graph row and a star instead of a p column (the form the paper carries)
 
 `--baseline-combo` takes EITHER one combo for every baseline OR `name=combo` items, never
 a mixture: a bare item cannot be read as "the default for the rest", because a name absent
@@ -143,11 +145,18 @@ def caption(ds, blocks, metrics, a):
             f"({splits}); rows from our sweep are first averaged over {seeds} model seeds "
             f"within each split, external baselines have one per split. "
             r"\textbf{Bold} = best in column, \underline{underline} = second. "
-            r"The $p$ column after each metric is given for OUR rows only: a two-sided "
-            r"paired $t$-test over splits against the best non-ours row in that same "
-            r"column, printed raw/Holm (Holm corrects within the column, over our two "
-            r"rows). Rank = place within each split among all rows, averaged over splits "
-            f"and the {len(metrics)} metrics. -- = not available.")
+            + (r"$^{*}$ = our row is first in that column AND ahead of the next row down "
+               r"at $p<" + f"{a.sig:g}" + r"$, two-sided paired $t$-test over splits, "
+               r"Holm-corrected within the column; the last row gives that $p$ where we "
+               r"are first, and is blank elsewhere. A column we do not lead is neither "
+               r"marked nor quoted: the test is computed for every column, but it only "
+               r"supports a claim where we lead, and we make none elsewhere. "
+               if getattr(a, "stars", False) else
+               r"The $p$ column after each metric is given for OUR rows only: a two-sided "
+               r"paired $t$-test over splits against the best non-ours row in that same "
+               r"column, printed raw/Holm (Holm corrects within the column). ")
+            + f"Rank = place within each split among all rows, averaged over splits "
+              f"and the {len(metrics)} metrics. -- = not available.")
     cuts = {b[1]["cut"].iloc[0] for b in blocks.values() if len(b[1])}
     thresholded = [m for m in metrics if m in tk.THRESHOLDED]
     if thresholded and cuts != {"n/a"}:
@@ -173,7 +182,9 @@ def caption(ds, blocks, metrics, a):
 
 def latex(ds, blocks, metrics, a):
     regs = [r for r in tk.REGIMES if r in blocks]
-    ncol = 2 * len(metrics) + 1                  # value + p per metric, then Rank
+    stars = getattr(a, "stars", False)
+    # value + p per metric, then Rank -- or just the value per metric under --stars
+    ncol = (1 if stars else 2) * len(metrics) + 1
     total = 1 + ncol * len(regs)
     keys = list(dict.fromkeys(k for r in regs for k in blocks[r][1].key))
     split_combo = _combo_split(blocks)
@@ -186,7 +197,9 @@ def latex(ds, blocks, metrics, a):
                              for r in regs) + r" \\",
            "".join(rf"\cmidrule(lr){{{2 + i * ncol}-{1 + (i + 1) * ncol}}}"
                    for i in range(len(regs)))]
-    sub = " & ".join(sum([[tk.metric_tex(m), "$p$"] for m in metrics], []) + ["Rank"])
+    sub = " & ".join(([tk.metric_tex(m) for m in metrics] if stars
+                      else sum([[tk.metric_tex(m), "$p$"] for m in metrics], []))
+                     + ["Rank"])
     out.append(r"\textbf{Method (features)} & " + " & ".join(sub for _ in regs) + r" \\")
     prev = None
     for key in keys:
@@ -205,16 +218,21 @@ def latex(ds, blocks, metrics, a):
                 col = st[st.metric == m]
                 r = col[col.key == key]
                 if r.empty or not bool(r.usable.iloc[0]) or not np.isfinite(r["mean"].iloc[0]):
-                    cells += ["--", ""]
+                    cells += ["--"] if stars else ["--", ""]
                     continue
                 r = r.iloc[0]
                 txt = tk.tex_num(r["mean"], r["std"])
                 best, second = tk.top_two(col, m)
+                if stars and key == best and np.isfinite(r["p_holm"]) and r["p_holm"] < a.sig:
+                    # Only on a row of ours, and only where we are the bold one: `ref` is
+                    # the best row that is not ours, so on top of the column it is the
+                    # nearest competitor below and the test is the gap to second place.
+                    txt += r"$^{*}$"
                 if key == best:
                     txt = rf"\cbest{{{txt}}}"
                 elif key == second:
                     txt = rf"\gbest{{{txt}}}"
-                cells += [txt, tk.tex_p_pair(r["p_vs_ref"], r["p_holm"])]
+                cells += [txt] if stars else [txt, tk.tex_p_pair(r["p_vs_ref"], r["p_holm"])]
             ranks = _mean_ranks(st)
             mr = ranks.get(key, np.nan)
             if not np.isfinite(mr):
@@ -224,6 +242,31 @@ def latex(ds, blocks, metrics, a):
             else:
                 cells.append(f"{mr:.2f}")
         out.append(f"{label} & " + " & ".join(cells) + r" \\")
+    if stars:
+        for key in keys:
+            if not any(r.key == key and r.kind == "ours"
+                       for reg in regs for r in blocks[reg][0]):
+                continue
+            cells, any_shown = [], False
+            for reg in regs:
+                st = blocks[reg][1]
+                for m in metrics:
+                    col = st[st.metric == m]
+                    r = col[col.key == key]
+                    best, _ = tk.top_two(col, m)
+                    if (r.empty or key != best or not bool(r.usable.iloc[0])
+                            or not np.isfinite(r["p_holm"].iloc[0])):
+                        cells.append("")
+                        continue
+                    cells.append(tk.tex_p(float(r["p_holm"].iloc[0])))
+                    any_shown = True
+                cells.append("")                      # the Rank column is not tested
+            if any_shown:
+                out.append(r"\addlinespace")
+                out.append(r"\emph{\footnotesize $p$ vs.\ best other} & "
+                           + " & ".join(rf"{{\footnotesize {c}}}" if c else ""
+                                        for c in cells) + r" \\")
+
     fried = friedman_line(blocks, metrics)
     if fried:
         out.append(r"\midrule")
@@ -293,8 +336,13 @@ def parser():
                     help="restrict the sweep rows to these model seeds")
     ap.add_argument("--allow-mol-mismatch", action="store_true",
                     help="keep a baseline row fed another molecule embedding")
+    ap.add_argument("--stars", action="store_true",
+                    help="drop the per-metric $p$ column and mark significance with a "
+                         "star on our value instead, where our row leads the column. "
+                         "Halves the table's width; the p-values stay in the console "
+                         "view and in main_long.csv")
     ap.add_argument("--sig", type=float, default=0.05,
-                    help="only marks the console view; the table prints both p-values")
+                    help="the threshold a star has to clear under --stars; without it the table prints both p-values and this only marks the console view")
     ap.add_argument("--no-val-cut", dest="val_cut", action="store_false",
                     help="do not add the MCC/F1 columns at a validation-chosen "
                          "threshold, even where the per-row scores are on disk")

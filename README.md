@@ -647,11 +647,11 @@ can run while 1.1 is still going.
     --dataset m2or cc hc \
     --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz'
 
-# for A4: the construction sweep, criterion x quantile (see A4 for the insects)
+# for A4: the construction sweep, criterion x quantile. M2OR only (decided 25.09)
 .venv/bin/python scripts/article_sweeps/s4_run_quantile_criteria.py \
     --dataset m2or --regime inductive transductive \
     --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz' \
-    --seeds 42 43 --max-parallel 4 --gpus 0 1 2 3
+    --seed-graph --seeds 42 43 --max-parallel 4 --gpus 0 1 2 3
 
 # for A5: the architecture sweep. The graph is PINNED per dataset at the paper's
 # construction -- this moves the operator and nothing else
@@ -873,30 +873,73 @@ not beat a random draw, what the graph buys is message passing and not the choic
 hubs. Its draw follows the cell's seed, so what the figure shows is its spread and not
 one lucky set.
 
+**Scope, decided 25.09: M2OR only, both regimes, two seeds.** The insects are left
+out on purpose. Their matrices are complete, so a coverage quantile cuts nothing there
+and the criterion axis collapses to tie-breaks; what is left, `--k-mode fraction`, is a
+different knob from the one M2OR is reported on, so the two would not belong on one
+figure. M2OR is also the only dataset whose reported construction is non-trivial
+(`greedy_pair_cover` at `q = 0.99`) and therefore the only one that owes a defence.
+
 ```bash
 # the producer. Quantiles are FRACTIONS, and the cell the paper reports
-# (greedy_pair_cover at 0.99 on M2OR, coverage at 0 on the insects) must be in the grid
+# (greedy_pair_cover at 0.99) must be in the grid or there is nothing to compare against
 .venv/bin/python scripts/article_sweeps/s4_run_quantile_criteria.py \
     --dataset m2or --regime inductive transductive \
     --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz' \
-    --seeds 42 43 --max-parallel 4 --gpus 0 1 2 3
-
-# the insect panels: their matrices are complete, so the coverage quantile cuts
-# nothing and --k-mode fraction is the knob that moves (the default switches for you)
-.venv/bin/python scripts/article_sweeps/s4_run_quantile_criteria.py \
-    --dataset cc hc --regime inductive transductive \
-    --criteria coverage greedy_pair_cover \
-    --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz' \
-    --seeds 42 43 --max-parallel 4 --gpus 0 1 2 3
+    --seed-graph --seeds 42 43 --max-parallel 4 --gpus 0 1 2 3
 
 # the figures. This sweep is read by eye and there is no text reader for it:
 # quantile_grid.py is the aggregation layer the notebook imports, not a command
 jupyter lab notebooks/article_figures/quantile_criteria.ipynb
 ```
 
-Resumable: re-running the same command continues it. See
-`scripts/article_sweeps/README.md` for what `--k-mode` changes and why a failed cell is
-written down rather than dropped.
+That is 8 criteria x 6 quantiles x 5 folds x 2 seeds x 2 regimes, minus the `q = 0`
+column: nothing is cut there, so all eight criteria keep the same molecules and train
+the same graph. The sweep computes that cell once per (fold, seed) and writes the other
+seven rows from it with `shared_from` naming the fit that ran — one experiment drawn
+through eight curves rather than eight identical fits. That is 7 x 5 x 2 x 2 = 140 fits
+not done: **820 graphs**, not 960, plus 20 boosting reference fits (one per fold, seed
+and regime), which are cheap.
+
+**The quantile is chosen on VALIDATION.** Reading the best `q` off these curves and then
+defending it with the same curves takes the number and its defence from one set of rows,
+so the notebook's `SPLIT` defaults to `"val"`; `test` is read once, at the end, for the
+cell already picked. The claim the figure is meant to support is the weak one — that
+over the range where `sep < 1` the construction does not matter, and the cell we report
+is not behind the best one by more than the grid can resolve. The ablation's job is to
+show the choice was not load-bearing, not to win a fourth decimal.
+
+`--seed-graph` for the same reason the dial passes it: without a seeded graph
+initialisation two cells differ by their init as well as by their construction, and the
+knob's own effect is the smaller of the two. The `random` control is unaffected -- it
+draws its hubs from `--seeds`, not from the init. Everything else is left at the
+default, and the defaults here are the alpha sweep's own (`--fanout 25 10`, layer norm
+on, `--n-models 1`, `--epochs 900`, chemberta), so this runs in the paper's
+`v14_esm3_paper` encoder regime.
+
+The folds are the paper's own: M2OR's splits come from
+`data/processed/full_full_split_indices.npz` through `orbind.regimes.load_split`, the
+same store M1, A1 and the dial read, so a row here is on the same held-out set as a row
+there — including its `val` third.
+
+**Adding a seed later costs only the new seed.** The seed is part of the cell key, so
+repeating the command with `--seeds 42 43 44` trains 205 graphs per regime and touches
+nothing that is already there; the `q = 0` column is shared for the new seed exactly as
+for the old ones. The sharing does not depend on which criteria a later run asks for
+either: the source of a copy is any `q <= 0` row that was actually fitted (`shared_from`
+empty), not a fixed criterion name, so a run with a shorter `--criteria` list cannot
+refit that cell under a second name.
+
+Two things to know about a re-run. `config_*.json` records the LAST invocation, not the
+union of them, which is the same convention every producer here follows — the CSV is the
+record of what was computed. And a seed that is added but not finished leaves cells
+averaging different numbers of draws, which moves a curve by the imbalance rather than
+by the knob: the notebook's second guard prints `qg.seed_balance` and says so, and
+`SEEDS` cuts back to the seeds that are complete.
+
+Resumable: re-running the same command continues it, and a resume also fills the shared
+`q = 0` rows if an older run left them out. See `scripts/article_sweeps/README.md` for
+what `--k-mode` changes and why a failed cell is written down rather than dropped.
 
 #### A5 — the architecture table (`tab:arch`)
 

@@ -106,12 +106,43 @@ def metrics_available(df, dataset=None, which="headline"):
 
 
 def coverage(df):
-    """What is on disk: cells per series, and how many of them failed."""
+    """What is on disk: cells per series, and how many of them failed.
+
+    `shared` counts rows the sweep COPIED rather than trained: at q<=0 nothing is cut,
+    so every criterion is the same graph and one fit stands for all of them. Without
+    this column the cell count reads as that many independent fits.
+    """
     g = graph_rows(df)
-    out = g.groupby("series").agg(
-        criteria=("criterion", "nunique"), quantiles=("quantile", "nunique"),
-        folds=("fold", "nunique"), seeds=("seed", "nunique"), cells=("K", "size"))
-    return out
+    aggs = dict(criteria=("criterion", "nunique"), quantiles=("quantile", "nunique"),
+                folds=("fold", "nunique"), seeds=("seed", "nunique"),
+                cells=("K", "size"))
+    if "shared_from" in g.columns:
+        g = g.assign(_shared=g["shared_from"].notna()
+                     & (g["shared_from"].astype(str) != ""))
+        aggs["shared"] = ("_shared", "sum")
+    return g.groupby("series").agg(**aggs)
+
+
+def seed_balance(df):
+    """Per series: the seeds present, and how many cells are missing one of them.
+
+    A cell here is a (criterion, quantile, fold). `fold_means` averages the seeds
+    inside each one, so cells that carry different seeds are averaged over different
+    things -- which is what an interrupted run leaves behind, and what an added seed
+    leaves behind until it finishes.
+    """
+    g = graph_rows(df)
+    if g.empty:
+        return pd.DataFrame()
+    out = []
+    for ser, d in g.groupby("series"):
+        seeds = sorted(d.seed.unique())
+        per = d.groupby(["criterion", "quantile", "fold"])["seed"].nunique()
+        out.append({"series": ser, "seeds": ", ".join(map(str, seeds)),
+                    "cells": int(len(per)),
+                    "short": int((per < len(seeds)).sum()),
+                    "balanced": bool((per == len(seeds)).all())})
+    return pd.DataFrame(out).set_index("series")
 
 
 # ------------------------------------------------------------------ aggregation

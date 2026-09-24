@@ -34,6 +34,11 @@ THREE THINGS THAT ARE EASY TO GET WRONG HERE
 * **The paper's own construction is a grid point, not a separate arm.** On M2OR
   that is `--criteria greedy_pair_cover --quantiles ... 0.99`; leave it out of the
   grid and the figure has nothing to compare against.
+* **At `q = 0` the criterion axis does not exist.** Nothing is cut there, so all
+  eight criteria keep the same molecules and train the same graph. That cell is
+  computed ONCE and written out under every criterion's name with `shared_from`
+  naming the one that ran -- one experiment, drawn through eight curves, instead of
+  eight identical fits.
 * **On the insect matrices most criteria are ties.** CC/HC are complete matrices, so
   coverage is constant over train molecules: `coverage_quantile` cuts nothing and the
   coverage-shaped criteria all score every molecule the same. The run probes this
@@ -160,7 +165,7 @@ def _base(ds, regime, args, P, **rest):
     return dict(dataset=ds, regime=regime, mol_source=args.mol_source,
                 k_mode=args.k_mode, n_models=args.n_models, epochs=args.epochs,
                 gnn_regime=regime_tag(fan, norm),
-                n_receptors=len(P["order"]), status="ok", **rest)
+                n_receptors=len(P["order"]), status="ok", shared_from="", **rest)
 
 
 def boost_rows(ds, regime, fold, seed, sw, args, P):
@@ -228,6 +233,47 @@ def graph_rows(ds, regime, fold, seed, crit, q, sw, args, P):
                               n_rows=len(P[f"y_{k}"]),
                               **sw._score_split(P, pred, task, split)))
     return rows
+
+
+def shared_criterion(criteria):
+    """Which criterion TRAINS the q<=0 cell when nothing on disk covers it yet.
+    Deterministic, so a resume of the same command trains in the same place."""
+    return "coverage" if "coverage" in criteria else criteria[0]
+
+
+def is_shared(row):
+    """True if this row was copied rather than fitted."""
+    v = row.get("shared_from")
+    return v is not None and not pd.isna(v) and str(v) != ""
+
+
+def shared_copies(new_rows, criteria, done):
+    """The q<=0 cell, written out under every other criterion's name.
+
+    Only q<=0 qualifies: that is the one quantile where the mask is the whole eligible
+    set whatever the ranking says, so the copy is a statement of identity and not an
+    approximation. `shared_from` keeps the row honest about which fit produced it.
+
+    The SOURCE is any q<=0 row that was actually fitted -- `shared_from` empty -- and
+    not a fixed criterion name. A later run with a different `--criteria` list would
+    otherwise refit that cell under a new name, and two rows claiming to be different
+    constructions would be the same graph twice.
+    """
+    out, seen = [], set()
+    for r in new_rows:
+        q = r.get("quantile")
+        if pd.isna(q) or float(q) > 0 or is_shared(r):
+            continue
+        for c in criteria:
+            if c == str(r.get("criterion")):
+                continue
+            cp = dict(r, criterion=c, shared_from=str(r.get("criterion")))
+            k = cell_key(cp)
+            if k in done or k in seen:
+                continue
+            seen.add(k)
+            out.append(cp)
+    return out
 
 
 def failed_rows(ds, regime, fold, seed, crit, q, sw, args, P, err):
@@ -335,21 +381,40 @@ def sweep(ds, regime, sw, args, xgb_version):
         tmp.replace(path)
 
     folds = repeats_for(sw, ds, regime, args)
+    shared_crit = shared_criterion(args.criteria)
+    # A resume of an older run, or of this one, may hold the q<=0 cell without its
+    # copies. Fill them before the jobs are built, so the loop below sees them as done.
+    if rows:
+        back = shared_copies(rows, args.criteria, done)
+        for r in back:
+            rows.append(r); done.add(cell_key(r))
+        if back:
+            save()
+            print(f"  q<=0 is ONE experiment: wrote {len(back)} rows for the other "
+                  f"criteria from the q<=0 cells already on disk")
+
     jobs = []
     for fold in folds:
         for seed in args.seeds:
             if args.boost_full and                     ("boost_full", None, fold, seed, "prot+mol", "test") not in done:
                 jobs.append(("boost", fold, seed, None, None))
             for q in args.quantiles:
-                for crit in args.criteria:
+                # at q<=0 the mask is the whole eligible set whatever the criterion
+                # says, so one fit stands for all of them
+                for crit in ([shared_crit] if float(q) <= 0 else args.criteria):
                     if not all((crit, round(float(q), 6), fold, seed, c, "test") in done
                                for c in args.combos):
                         jobs.append(("gnn", fold, seed, float(q), crit))
 
     heavy = sum(1 for j in jobs if j[0] == "gnn")
+    n_free = sum(1 for q in args.quantiles if float(q) <= 0) * len(folds) \
+        * len(args.seeds) * (len(args.criteria) - 1)
     print(f"\n=== {ds} / {regime}: {len(folds)} folds x {len(args.seeds)} seeds x "
           f"{len(args.quantiles)} quantiles x {len(args.criteria)} criteria "
-          f"-> {heavy} graphs to train ({len(jobs)} jobs)\n    -> {path}")
+          f"-> {heavy} graphs to train ({len(jobs)} jobs)"
+          + (f"\n    {n_free} cells are not trained: at q<=0 every criterion is the "
+             f"same graph, shared from {shared_crit}" if n_free else "")
+          + f"\n    -> {path}")
     if not jobs:
         print("  nothing to do -- every cell is cached")
         return
@@ -359,7 +424,7 @@ def sweep(ds, regime, sw, args, xgb_version):
 
     def record(new, was_heavy):
         added = 0
-        for r in new:
+        for r in list(new) + shared_copies(new, args.criteria, done):
             k = cell_key(r)
             if k in done:
                 continue

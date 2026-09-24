@@ -249,15 +249,23 @@ def resolution_mark(ax, half_width, x=0.02, color=None):
 
 
 # --------------------------------------------------------------------------- output
-def savefig(fig, name, fig_dir, enabled=True):
-    """Write one figure under `fig_dir`, printing where it went."""
+def savefig(fig, name, fig_dir, enabled=True, formats=("png",)):
+    """Write one figure under `fig_dir`, printing where it went.
+
+    `formats` defaults to PNG alone, which is what a notebook wants. Pass
+    `("png", "pdf")` for anything going to print: journals take line art as vector or at
+    600 dpi, and the 200 dpi raster this style saves is neither.
+    """
     if not enabled:
         return None
     d = pathlib.Path(fig_dir)
     if not d.is_absolute():
         d = REPO / d
     d.mkdir(parents=True, exist_ok=True)
-    path = d / f"{name}.png"
-    fig.savefig(path)
-    print("wrote", path)
-    return path
+    out = []
+    for ext in formats:
+        path = d / f"{name}.{ext}"
+        fig.savefig(path)
+        print("wrote", path)
+        out.append(path)
+    return out[0] if len(out) == 1 else out

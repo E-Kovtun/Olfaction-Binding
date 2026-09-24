@@ -170,7 +170,8 @@ def note_empty(a, text="not run yet"):
     a.grid(False)
 
 
-def figlegend(fig, handles, ncol=4, pad_in=0.62):
+def figlegend(fig, handles, ncol=4, pad_in=0.62, fontsize=8.5, handlelength=2.4,
+              columnspacing=1.8):
     """One legend per figure, below it, describing the ENCODING.
 
     Never a box inside each panel repeating the same entries N times. It reserves a
@@ -181,7 +182,8 @@ def figlegend(fig, handles, ncol=4, pad_in=0.62):
     fig.subplots_adjust(bottom=fig.subplotpars.bottom
                         + pad_in / fig.get_size_inches()[1])
     fig.legend(handles=handles, loc="lower center", bbox_to_anchor=(0.5, 0.004),
-               ncol=ncol, fontsize=8.5, handlelength=2.4, columnspacing=1.8)
+               ncol=ncol, fontsize=fontsize, handlelength=handlelength,
+               columnspacing=columnspacing)
 
 
 # --------------------------------------------------------------------------- marks

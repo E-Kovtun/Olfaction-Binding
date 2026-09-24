@@ -142,10 +142,16 @@ every row as uncovered and the run dies inside the DataLoader with `num_samples=
 far from the cause. The `WARNING coverage[train]: 0/…` line just above it is the
 tell. Always name the insect file in the spec — the full set is in the root README.
 
-**Hladiš's step budget is sized for M2OR.** 10000/6000/500 steps on M2OR's ~41k
-train rows; on Carey's 3.5k that is ~285 epochs. The insect runs use
-`1:2000:1200:100` (n_models:max_steps:warmup:eval_every), same 0.6 warmup ratio, and
-the shrunk panels keep it for comparability even though their train sets differ.
+**Hladiš's step budget is sized for M2OR, and we keep it everywhere anyway.**
+10000/6000/500 steps on M2OR's ~41k train rows is ~24 epochs; the same count on Carey
+is ~180 and on Hallem–Carlson ~380. The ESM-1b series rescaled it to
+`1:2000:1200:100` (n_models:max_steps:warmup:eval_every, same 0.6 warmup ratio), and
+the shrunk panels kept that for comparability. **The ESM3 series does not rescale**
+(24.09.2026): one spec on every panel and every molecule source, because best-val
+weight selection makes the surplus steps a compute cost rather than an advantage, and
+a mixed budget inside one table's column is a worse problem than an overshoot. If you
+do change it, change all three numbers together -- a `max_steps` below `warmup_steps`
+never leaves the LR ramp.
 
 **A method's name is not a configuration.** "LORAX" as a `cls` source and "LORAX
 cls+prot+mol" are different rows, and our graph's headline `cls+mol` deliberately

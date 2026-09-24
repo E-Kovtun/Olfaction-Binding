@@ -5,7 +5,7 @@ wants the paper's tables back. It assumes nothing about the project's history: e
 directory it asks you to create is named here, and every command names its inputs and
 outputs explicitly rather than relying on a default.
 
-**Scope.** It currently covers the three tables listed below. The remaining ones are
+**Scope.** It currently covers the four tables listed below. The remaining ones are
 being converted to the same form and will appear here as they are; the first command in
 §[3.1](#31-our-graph--run-this-first-before-anything-else) already produces what they
 need, and that section says which artifact reads what.
@@ -15,6 +15,7 @@ need, and that section says which artifact reads what.
 | Main battery | every competitor, the boosting base and our graph, per dataset and regime | [4.1](#41-main-battery) |
 | Baselines alone | each competitor in its own learned pair representation, against the base | [4.2](#42-baselines-in-their-own-representation) |
 | Receptor representations | our graph, protein language models, classical descriptors, identity controls | [4.3](#43-receptor-representations) |
+| Architecture | which message-passing operator, the graph held fixed | [4.4](#44-architecture) |
 
 ---
 
@@ -72,14 +73,15 @@ need no file.
 
 ## 3. Producing the numbers
 
-Everything below writes into three roots. Create them wherever you like and keep the
+Everything below writes into four roots. Create them wherever you like and keep the
 names consistent between the producing and the reading commands — the scripts take them
 as flags and parse nothing out of the path:
 
 ```
-results/graph/main        our graph, every dataset x regime        (§3.1)
-results/baselines/        the competitors, one directory per cell   (§3.2)
-results/tables/           the receptor-representation fits          (§3.3)
+results/graph/main                    our graph, every dataset x regime   (§3.1)
+results/baselines/                    the competitors, one dir per cell    (§3.2)
+results/tables/                       the receptor-representation fits     (§3.3)
+results/article_sweeps/architecture/  the operator comparison              (§3.4)
 ```
 
 ### 3.1 Our graph — run this first, before anything else
@@ -214,11 +216,30 @@ The other three `cls=` sources, with `{ds}` one of `m2or`, `cc`, `hc`:
 ```
 cls=prosmith:esm3_per_residue_{ds}.npz:chemberta_77m_{ds}.npz::<prosmith checkpoint .pkl>
 cls=molor:esm3_per_residue_{ds}.npz:1                      # in .venv-molor
-cls=hladis:esm3_{ds}.npz:1:2000:1200:100                   # in .venv (needs rdkit)
+cls=hladis:esm3_{ds}.npz                                   # in .venv (needs rdkit)
 ```
 
 Hladiš takes the pooled file: it has no per-residue path, and it builds its molecule side
-from SMILES, so it takes no molecule npz either. `2000:1200:100` is its step budget.
+from SMILES, so it takes no molecule npz either.
+
+Its training budget is counted in optimizer steps, and we leave it at the published
+defaults on every dataset — 1 model, 10000 steps, 6000 warmup, evaluate every 500 — which
+is why the spec above carries no budget fields.
+
+Those defaults are sized for the human panel's 41k measurements, about 24 passes over the
+data at batch 100. The insect panels hold 5500 and 2640 measurements, so the same step
+count is ~180 and ~380 passes there. That overshoot is intentional. One budget across
+panels keeps every cell of the comparison on one configuration, and the extra steps cost
+compute rather than fairness: the weights kept are the best of twenty validation
+checkpoints, so a longer run cannot end up worse than a shorter one through overtraining.
+A competitor trained longer than it needs makes the comparison conservative rather than
+flattering.
+
+If you do change the budget, change all three numbers together: the learning rate follows
+`init·min(step^-0.5, step·warmup^-1.5)`, so the warmup decides where the peak falls and a
+step count below it never leaves the ramp. And change it for **every** run of a dataset,
+including the ones on other molecule embeddings — otherwise this method's row reports
+something that trained for different lengths in different columns.
 
 The insect datasets use a different regime flag and a continuous target:
 
@@ -291,6 +312,30 @@ says so by name — two encoders in one column is not a table.
 
 ---
 
+### 3.4 Architecture
+
+One row per message-passing operator. The graph is pinned per dataset inside the script,
+so the operator is the only thing that moves — an operator comparison run on two
+different graphs is not one:
+
+```bash
+.venv/bin/python scripts/article_sweeps/s5_run_architecture.py \
+    --dataset m2or cc hc --regime transductive inductive \
+    --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz' \
+    --max-parallel 4 --gpus 0 1 2 3
+```
+
+Four operators x 6 cells x 5 splits x 5 seeds of graph training, and the boosting
+reference on the same splits. It writes one CSV per cell under
+`results/article_sweeps/architecture/` and is resumable at cell granularity, so the same
+command restarts an interrupted run.
+
+`--seeds` defaults to the five the other tables use, and one seed both initialises the
+graph and seeds the boosting head — the same single axis as everywhere else in this
+document.
+
+---
+
 ## 4. Rendering the tables
 
 Readers only read. None of them fits anything, so they are cheap to re-run, and each one
@@ -337,6 +382,21 @@ representation at all.
 ```
 
 One combined table, a column per (dataset, regime), the metric of record only.
+
+### 4.4 Architecture
+
+```bash
+.venv/bin/python scripts/article_tables/s5_architecture.py \
+    --dataset m2or cc hc --regime transductive inductive \
+    --root results/article_sweeps/architecture \
+    --out results/paper/architecture
+```
+
+Five rows: the four operators and the boosting base as the anchor. Bold marks the best
+operator in each column; the base is what the operators are read against and is never
+marked. Where the reported operator's interval overlaps the marked one, the reader says
+so in words under the table — those columns separate nothing, and that is the table's
+result rather than a failure of it.
 
 ---
 

@@ -61,6 +61,15 @@ def _head(key):
     return tk.BASELINE_TEX.get(key, key)
 
 
+def _head_txt(key):
+    """The same heading for the console, where a LaTeX escape is just noise."""
+    if key.startswith("ours:"):
+        return "Graph"
+    if key == "boost":
+        return "Base"
+    return tk.BASELINE_LABEL.get(key, key)
+
+
 def latex(ds, cells, metric, a):
     regs = [r for r in tk.REGIMES if any(k[0] == r for k in cells)]
     keys = _keys(a)
@@ -74,7 +83,7 @@ def latex(ds, cells, metric, a):
            f"std over held-out splits (our sweep's rows averaged over model seeds within each "
            f"split). In parentheses: place among the {k} methods within each split, "
            r"averaged over splits. \textbf{Bold} = best value in the group. "
-           f"$^{{*}}$ = differs from our graph at $p<{a.sig:g}$, paired two-sided $t$-test "
+           f"$^{{*}}$ = our graph is ahead of this row at $p<{a.sig:g}$, paired two-sided $t$-test "
            r"over splits, Holm-corrected within the group. Last row: mean place over the "
            r"embeddings. -- = not available.")
     out = [r"\begin{table}[t]", r"\centering", r"\small", r"\caption{" + cap + "}",
@@ -100,7 +109,10 @@ def latex(ds, cells, metric, a):
                 txt = tk.tex_num(r["mean"], r["std"])
                 if np.isfinite(r["rank"]):
                     txt += f" ({r['rank']:.2f})"
-                if key != r["ref"] and np.isfinite(r["p_holm"]) and r["p_holm"] < a.sig:
+                # A mark is a claim, so it goes on a row only where OUR graph is the
+                # one ahead: `delta_vs_ref` is row-minus-ours, hence the sign flip.
+                if (key != r["ref"] and np.isfinite(r["p_holm"]) and r["p_holm"] < a.sig
+                        and tk.leads_ref(-r["delta_vs_ref"], metric)):
                     txt += r"$^{*}$"
                 row.append(rf"\cbest{{{txt}}}" if key == best else txt)
         out.append(f"{tk.MOL_LABEL[mol]} & " + " & ".join(row) + r" \\")
@@ -129,6 +141,55 @@ def mean_place(cells, reg, keys):
             if len(s) and np.isfinite(s["rank"].iloc[0]):
                 vals[key].append(float(s["rank"].iloc[0]))
     return {k: (float(np.mean(v)) if v else np.nan) for k, v in vals.items()}
+
+
+def console_table(ds, cells, metric, a, w=23, wl=11):
+    """One table per dataset, the shape the LaTeX has: rows = molecule embeddings, columns
+    = regime x method. The six per-cell blocks say the same thing in six places, which is
+    exactly where a reader stops being able to compare down a column."""
+    regs = [r for r in tk.REGIMES if any(k[0] == r for k in cells)]
+    keys = _keys(a)
+    span = w * len(keys)
+    h1 = f"  {'':<{wl}}" + "".join(f"{tk.REGIME_LABEL[r]:^{span}}" for r in regs)
+    h2 = (f"  {'Molecule':<{wl}}"
+          + "".join(f"{_head_txt(k):>{w}}" for _ in regs for k in keys))
+    lines = [f"=== {tk.DATASET_LABEL[ds]} | {metric} | graph {a.ours} at alpha={a.alpha:g}",
+             h1, h2, "  " + "-" * (len(h2) - 2)]
+    for mol in a.mol_sources:
+        row = f"  {tk.MOL_LABEL[mol]:<{wl}}"
+        for reg in regs:
+            got = cells.get((reg, mol))
+            best = tk.top_two(got[1], metric)[0] if got else None
+            for key in keys:
+                r = got[1][got[1].key == key] if got else pd.DataFrame()
+                if (r.empty or not bool(r.usable.iloc[0])
+                        or not np.isfinite(r["mean"].iloc[0])):
+                    row += f"{'--':>{w}}"
+                    continue
+                r = r.iloc[0]
+                txt = tk.txt_num(r["mean"], r["std"])
+                if np.isfinite(r["rank"]):
+                    txt += f" ({r['rank']:.2f})"
+                if (key != r["ref"] and np.isfinite(r["p_holm"]) and r["p_holm"] < a.sig
+                        and tk.leads_ref(-r["delta_vs_ref"], metric)):
+                    txt += "*"
+                row += f"{('>' + txt) if key == best else txt:>{w}}"
+        lines.append(row)
+    lines.append("  " + "-" * (len(h2) - 2))
+    row = f"  {'mean place':<{wl}}"
+    for reg in regs:
+        mr = mean_place(cells, reg, keys)
+        low = (np.nanmin(list(mr.values()))
+               if any(np.isfinite(v) for v in mr.values()) else np.nan)
+        for key in keys:
+            v = mr[key]
+            txt = "--" if not np.isfinite(v) else f"{v:.2f}"
+            row += f"{('>' + txt) if np.isfinite(v) and np.isclose(v, low) else txt:>{w}}"
+    lines.append(row)
+    lines.append(f"  > best in its (regime, molecule) group; "
+                 f"* our graph is ahead of that row at p_holm<{a.sig:g}; "
+                 f"in parentheses: mean place among the {len(keys)} methods")
+    return "\n".join(lines)
 
 
 def summary(ds, cells, metric, a):
@@ -174,6 +235,9 @@ def parser():
     ap.add_argument("--baseline-combo", default=tk.BASELINE_COMBO)
     ap.add_argument("--seeds", type=int, nargs="+", default=None)
     ap.add_argument("--sig", type=float, default=0.05)
+    ap.add_argument("--blocks", action="store_true",
+                    help="also print one block per (regime, molecule) with both p-values "
+                         "per row -- the detail the combined table leaves out")
     ap.add_argument("--sweep-root", default=tk.SWEEP_ROOT)
     ap.add_argument("--ensemble-root", default=tk.ENSEMBLE_ROOT)
     ap.add_argument("--out", default=f"{tk.OUT_ROOT}/molecule")
@@ -192,9 +256,12 @@ def main(argv=None):
         if not cells:
             print(f"\n=== {tk.DATASET_LABEL[ds]}: nothing on disk")
             continue
+        print("\n" + console_table(ds, cells, metric, a))
         for (reg, mol), (_, st) in cells.items():
-            print("\n" + tk.text_block(st, [metric], f"=== {tk.DATASET_LABEL[ds]} / "
-                                                     f"{tk.REGIME_LABEL[reg]} / {mol}", a.sig))
+            if a.blocks:
+                print("\n" + tk.text_block(st, [metric],
+                                           f"--- {tk.DATASET_LABEL[ds]} / "
+                                           f"{tk.REGIME_LABEL[reg]} / {mol}", a.sig))
             longs.append(st)
         summ = summary(ds, cells, metric, a)
         (out / f"{ds}.tex").write_text(latex(ds, cells, metric, a) + "\n", encoding="utf-8")

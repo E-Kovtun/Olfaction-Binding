@@ -488,12 +488,34 @@ The other three `cls=` specs, with `{ds}` = `m2or`, `cc` or `hc`:
 ```
 cls=prosmith:esm3_per_residue_{ds}.npz:chemberta_77m_{ds}.npz::<prosmith .pkl>
 cls=molor:esm3_per_residue_{ds}.npz:1
-cls=hladis:esm3_{ds}.npz:1:2000:1200:100
+cls=hladis:esm3_{ds}.npz
 ```
 
 Hladiš takes the **mean** file — it has no per-residue path, and its molecule side is
-built from SMILES, so it has no molecule npz either. `2000:1200:100` is its step
-budget rescaled to the insect panels.
+built from SMILES, so it has no molecule npz either.
+
+Its budget is counted in **optimizer steps**, and since 24.09.2026 every ESM3 run takes
+upstream's defaults — 1 model, `max_steps=10000`, `warmup_steps=6000`, `eval_every=500` —
+on all three panels. Hence the bare spec above: no budget fields anywhere.
+
+That is deliberately generous on the insects. The defaults are sized for M2OR's 41k train
+rows, about 24 epochs at batch 100; the same step count on CC (5500 rows) is ~180 epochs
+and on HC (2640) ~380. We accept the overshoot rather than calibrate per panel, because
+one spec across panels is worth more here than a tuned step count: what the extra steps
+buy Hladiš is compute, not an unfair advantage — the weights kept are the best of 20
+validation checkpoints (`eval_every` divides the budget into twenty either way), so a
+longer run cannot score worse than a shorter one by overtraining past its own optimum.
+Reading it the other way round: a competitor given more training than it needs is a
+*conservative* comparison for us.
+
+The three numbers are coupled and must not be changed one at a time. The LR is
+`init·min(step^-0.5, step·warmup^-1.5)`, so `warmup_steps` fixes where the peak falls and
+a `max_steps` below it never leaves the ramp.
+
+**The earlier ESM3 insect runs used a rescaled `1:2000:1200:100` and are superseded** —
+see 1.3 for which ones and what retyping that costs. The ESM-1b section above keeps the
+rescaled spec because that is what those runs actually did; it is a record of the old
+series, not a recipe.
 
 Insects: `--regime ofm --dataset {cc,hc} --split-family {rand,our_inductive}
 --task regression --combos "1 12 123" --repeats 1 2 3 4 5`, pools
@@ -529,8 +551,83 @@ for DS in cc hc; do
 done
 ```
 
+And the same on M2OR, where the bare spec is the budget of record — these four runs did
+not exist before 24.09.2026:
+
+```bash
+P3=data/embeddings/proteins/esm3_m2or.npz
+
+for MOL in gin ecfp; do
+  case ${MOL} in
+    gin)  MF=data/embeddings/molecules/gin_supervised_contextpred_all_m2or.npz ;;
+    ecfp) MF=data/embeddings/molecules/ecfp_m2or.npz ;;
+  esac
+  for MODE in transductive inductive_molecule_v5; do
+    if [[ ${MODE} == transductive ]]; then
+      POOL=m2or-transductive-${MOL}-esm3; TAG=transductive; REP=(1 2 3 4 5)
+    else
+      POOL=m2or-inductive-${MOL}-esm3;    TAG=inductive;    REP=(42 43 44 45 46)
+    fi
+    .venv/bin/python scripts/modeling/train/train_ensemble_boost.py \
+        --regime full_full --full-full-mode ${MODE} \
+        --out-dir results/ensemble_logs_esm3/${POOL} \
+        --run-name ${TAG}_hladis_esm3_${MOL} \
+        --source cls=hladis:${P3} \
+        --source prot=esm:${P3}:esm3-sm-open-v1 \
+        --source mol=gin:${MF}:${MOL} \
+        --combos "1 123" --on-missing drop \
+        --max-parallel 2 --gpus 0 1 --repeats ${REP}
+  done
+done
+```
+
+M2OR's GIN file is the one special case in the project: `gin_supervised_contextpred_all_m2or.npz`,
+without the `_{ds}` suffix the other panels use.
+
 `mol=gin:` is the generic entity extractor, not the GIN model: the file decides what
 the embedding is and the third field is provenance only.
+
+**The spec is bare on purpose** — one budget on every panel and every molecule source, as
+1.2 explains. Two consequences for what is already on disk:
+
+* the eight gin/ecfp insect runs (`{cc,hc}_{rand,our_inductive}_hladis_esm3_{gin,ecfp}`)
+  were made with a bare spec and therefore already satisfy this. Nothing to redo;
+* the four **ChemBERTa** insect runs (`{cc,hc}_{rand,our_inductive}_hladis_esm3`) were made
+  with `1:2000:1200:100` and no longer match. They have to be refitted.
+
+Refitting them is not a plain rerun: the checkpoints are named
+`hladis_{name}_model{m}.pt` with **no budget in the name**, so a rerun that finds them
+skips training entirely and reloads the old weights. Delete the four run directories
+first, then refit them at ChemBERTa:
+
+```bash
+for DS in cc hc; do
+  for FAM in rand our_inductive; do
+    if [[ ${FAM} == rand ]]; then POOL=${DS}-rand-esm3; TAG=${DS}_rand
+    else POOL=${DS}-ourind-esm3; TAG=${DS}_our_inductive; fi
+    rm -rf results/ensemble_logs_esm3/${POOL}/${TAG}_hladis_esm3
+    .venv/bin/python scripts/modeling/train/train_ensemble_boost.py \
+      --regime ofm --dataset ${DS} --split-family ${FAM} --task regression \
+      --out-dir results/ensemble_logs_esm3/${POOL} \
+      --run-name ${TAG}_hladis_esm3 \
+      --source cls=hladis:data/embeddings/proteins/esm3_${DS}.npz \
+      --source prot=esm:data/embeddings/proteins/esm3_${DS}.npz:esm3-sm-open-v1 \
+      --source mol=gin:data/embeddings/molecules/chemberta_77m_${DS}.npz:chemberta_77m \
+      --combos "1 12 123" --on-missing drop \
+      --max-parallel 2 --gpus 0 1 --repeats 1 2 3 4 5
+  done
+done
+```
+
+**These four feed M1, not only A6.** The Hladiš row of `tab:esm3cc` and `tab:esm3hc` comes
+from exactly these runs, so after refitting, both insect M1 tables have to be regenerated
+and retyped — and not just that one row: the rank column and the bold marks are computed
+across the rows of the table, so every row's rank moves when Hladiš's values do. M2OR's
+M1 table and A1 are untouched (M2OR was always on the defaults).
+
+`transductive_hladis_esm3` on M2OR spells the same defaults out and adds a sixth field,
+`report_own_head=1`, which only prints Hladiš's own scalar head on test and changes no
+number in any table — it does not need refitting.
 
 #### 1.4 The fitters that belong to one table each
 
@@ -806,17 +903,17 @@ written down rather than dropped.
 
 #### A5 — the architecture table (`tab:arch`)
 
-One row per message-passing operator, one column per (dataset, regime), each column
-that panel's metric of record — six numbers per row, which is the whole table. The
-boosting base is the anchor row, because "our graph against the base" is the comparison
-every other table here makes.
+One row per message-passing operator, one column per (dataset, regime), each column that
+panel's metric of record — six numbers per row, which is the whole table. The boosting
+base is the anchor row, because "our graph against the base" is the comparison every
+other table here makes.
 
 ```bash
-# trains: four operators on the paper's own graph, five folds, five seeds
+# trains: the four operators, five folds, five seeds, on the pinned graph
 .venv/bin/python scripts/article_sweeps/s5_run_architecture.py \
     --dataset m2or cc hc --regime transductive inductive \
     --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz' \
-    --seeds 42 43 44 45 46 --seed-graph --max-parallel 4 --gpus 0 1 2 3
+    --max-parallel 4 --gpus 0 1 2 3
 
 # renders: one combined table, six columns, the metric of record only
 .venv/bin/python scripts/article_tables/s5_architecture.py \
@@ -827,37 +924,45 @@ every other table here makes.
 dataset in `VARIANT` (M2OR's hub core, the insects' complete matrix) and is deliberately
 not a command-line flag: an operator comparison run on two different graphs is not one.
 Everything else is held too — the signed two-stack structure, the subtraction, the
-decoder, the epoch budget, the folds, the head.
-
-**The `:paper` rows.** `sage:paper` and `gat:paper` run those two operators the way
-their papers do: **neighbour sampling** (fan-out 25 then 10, redrawn every epoch;
-inference stays full-neighbourhood, as in the paper) and **per-layer L2
-normalisation** — the two things our encoder took from neither. They are extra rows,
-not a change to ours: both are opt-in fields on the extractor (`fanout`,
-`normalize_layers`), off everywhere else, so no reported number moves. What they
-answer is how much of the distance between "GraphSAGE" and "our GraphSAGE" is the
-operator and how much is the regime around it. `--fanout L1 L2` overrides the setting.
-
-So the table is seven rows: four operators, two `:paper` variants, and the boosting
-anchor.
+decoder, the epoch budget, the folds, the head, and since 23.09.2026 the encoder regime.
 
 **The four operators** (`orbind.gnn_extractor.CONVS`): `sage` is ours; `gat` is the
 attention epoch of this project, ported from `orbind/legacy/hetero_gat.py` with the two
 details that make attention work on a bipartite graph (`add_self_loops=False`,
-multi-head concat on layer 1 and a single head on layer 2); `graphconv` is the
-GCN-shaped operator that is actually defined on two node sets — plain `GCNConv` is not
-here and cannot be, since its symmetric normalisation and mandatory self-loops assume
-one; `gin` is the molecular domain's standard and the most expressive of the four.
+multi-head concat on layer 1 and a single head on layer 2); `graphconv` is the GCN-shaped
+operator that is actually defined on two node sets — plain `GCNConv` is not here and
+cannot be, since its symmetric normalisation and mandatory self-loops assume one node
+set; `gin` is the molecular domain's standard and the most expressive of the four.
+
+So the table is five rows: four operators and the boosting anchor.
+
+**Why `DEFAULT_SPECS` carries a `:paper` suffix on all four.** That suffix names the
+encoder regime on disk — neighbour sampling plus per-layer L2 normalisation — and it is
+now the only regime the table reports, so the reader prints a suffixed row as the plain
+operator name. It is kept rather than removed because every cell already computed carries
+it in its `arch` column, and renaming would make each of them look missing. The
+un-suffixed specs still train the historical encoder and still render, marked
+`(full neighbourhood, un-normalised)`; they are what measured the regime in the first
+place and are worth keeping on disk, but they are not part of the table. `--historical`
+does not exist: pass the un-suffixed spec if you want those rows back and read them
+knowing the label.
+
+**The randomness is M1's, by construction.** One seed per row: it initialises the graph
+AND seeds the boosting head, exactly as `--seed-graph` does in the main sweep, and the
+reader averages seeds inside each fold before taking any interval. `--seeds` defaults to
+`42 43 44 45 46` and graph seeding is ON by default — `--no-seed-graph` turns it off, and
+a row produced that way is a different experiment from the main tables. `prot_mix=1.0` is
+passed explicitly for the same reason: the main sweep always passes it, and rho=1
+short-circuits to the embedding file, so the two scripts make the same call and not
+merely the same model.
 
 **Width is free, depth is not.** `--hidden 128 256 512` adds one row per width with no
-new code. Depth is not a knob: the encoder is two layers by construction, and making
-that variable is a refactor of the module rather than a flag — it is out of this sweep
+new code. Depth is not a knob: the encoder is two layers by construction, and making that
+variable is a refactor of the module rather than a flag — it is out of this sweep
 deliberately.
 
-`--seed-graph` matters more here than anywhere else: with four operators landing close
-together, the initialisation lottery is the noise most likely to be mistaken for a
-winner. The reader marks the best operator per column, never the anchor, and names in
-words any column where our interval overlaps the marked one.
+The reader marks the best operator per column, never the anchor, and names in words any
+column where our interval overlaps the marked one.
 
 #### A6 — the molecule ablation
 

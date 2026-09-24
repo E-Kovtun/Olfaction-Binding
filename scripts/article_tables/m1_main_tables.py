@@ -1,9 +1,14 @@
 #!/usr/bin/env python
 """Main tables: every method on every (dataset, regime), our graph at one dial position.
 
-    python scripts/article_tables/m1_main_tables.py
-    python scripts/article_tables/m1_main_tables.py --dataset cc hc
-    python scripts/article_tables/m1_main_tables.py --baseline-combo cls hladis=cls+prot+mol
+    python scripts/article_tables/m1_main_tables.py                    # M1, all datasets
+    python scripts/article_tables/m1_main_tables.py --dataset cc hc    # M1, two of them
+    python scripts/article_tables/m1_main_tables.py --baseline-combo cls --no-ours  # A1
+
+`--baseline-combo` takes EITHER one combo for every baseline OR `name=combo` items, never
+a mixture: a bare item cannot be read as "the default for the rest", because a name absent
+from the dict already falls back to `tablekit.BASELINE_COMBO`. To put three baselines on
+one combo and one on another, spell all four out.
 
 One table per dataset, the two regimes side by side (transductive | cold molecule):
 

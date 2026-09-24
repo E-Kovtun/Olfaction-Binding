@@ -4,7 +4,7 @@ Everything the article's tables are assembled from. All scripts **read** results
 on disk and write LaTeX + a long CSV + a plain-text summary to `results/article_tables/`.
 
 **The prefix is the registry item** (`paper/PLAN.md`), renamed 23.09.2026: `m1_` for the
-main-text battery, `s2_`/`s3_`/`s5_`/`s6_` for supplementary items A2, A3.3, A5 and A6,
+main-text battery, `s2_`/`s3_`/`s5_`/`s6_` for supplementary items A2, A3.2, A5 and A6,
 and no prefix for a tool that serves every table. The old prefixes (`00`, `01`, `03`,
 `05`, `05a`, `07`, `08`) were the order the scripts were written in -- they looked like a
 sequence and corresponded to nothing.
@@ -12,7 +12,7 @@ sequence and corresponded to nothing.
 Two gaps in the numbering are real and deliberate. There is no `s1_`: the supplementary
 baselines table is `m1_main_tables.py` with `--baseline-combo cls --no-ours`, the same
 reader answering a narrower question. There is no `s4_` here either: A4's reader is a
-notebook, and its compute half lives in `../article_sweeps/`. A3.1 and A3.2 are notebooks
+notebook, and its compute half lives in `../article_sweeps/`. A3.1 is a notebook
 too, which is why `s3_` names only the identity control.
 
 Retired to `scripts/legacy/` on the same day, because no current table is built from
@@ -27,8 +27,8 @@ Run from the repo root with `.venv/bin/python`.
 | `inventory.py` | tool | — | reports READY / PARTIAL / MISSING for every input cell of every table |
 | `m1_main_tables.py` | **M1** + **A1** | main: all methods × {M2OR, Carey, Hallem} × {transductive, cold molecule} | sweep `results/graph/v9_seeded` (graph α=1, both heads; boost) + `results/ensemble_logs` (LORAX, ProSmith, MolOR, Hladiš) |
 | `s6_molecule_ablation.py` | **A6** | graph vs boost vs Hladiš × ChemBERTa / GIN / ECFP (successor of tab:t2m2or/t2cc/t2hc) | sweep + ensemble_logs |
-| `s3_onehot_boost.py` | **A3.3** | (compute) the boosting head over [one-hot receptor ‖ molecule] — the row no sweep writes | the sweep's own fold prep, `fit_boost` and metric battery |
-| `s3_alpha0_vs_boost.py` | **A3.3** | the identity control: our graph at alpha=0 vs boost over ESM and vs the one-hot boost | sweep + `s3_onehot_boost`'s CSVs |
+| `s3_onehot_boost.py` | **A3.2** | (compute) the boosting head over [one-hot receptor ‖ molecule] — the row no sweep writes | the sweep's own fold prep, `fit_boost` and metric battery |
+| `s3_alpha0_vs_boost.py` | **A3.2** | the identity control: our graph at alpha=0 vs boost over ESM and vs the one-hot boost | sweep + `s3_onehot_boost`'s CSVs |
 | `s5_architecture.py` | **A5** | the architecture table (`tab:arch`): one row per message-passing operator, six columns (dataset x regime), the boosting base as the anchor | `s5_run_architecture.py`'s CSVs under results/article_sweeps/architecture |
 | `s2_protein_sources.py` | **A2** | what the receptor side has to be: our graph, pLMs, the classical floor and the one-hot controls under one head; metric of record only by default | `prot_floor_sweep.py --gnn` CSVs under `results/tables/` |
 

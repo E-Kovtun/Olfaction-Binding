@@ -399,8 +399,8 @@ small and feeds only A6, so it can be left until just before that table.
 
 ```bash
 # (a) THE DIAL, chemberta. Long: 11 positions x 6 cells x 5 folds x 5 seeds of graph.
-#     Feeds M1 and A1 (the alpha=1 end), A3.1 and A3.2 (every position, incl. the val
-#     files), A3.3 (the alpha=0 end). This is the command currently defining the root.
+#     Feeds M1 and A1 (the alpha=1 end), A3.1 (every position, incl. the val
+#     files), A3.2 (the alpha=0 end). This is the command currently defining the root.
 .venv/bin/python scripts/modeling/train/run_alpha_gate_sweep.py \
     --dataset m2or cc hc --regime transductive inductive \
     --mol-source chemberta \
@@ -641,7 +641,7 @@ can run while 1.1 is still going.
     --dataset m2or cc hc --regime transductive inductive \
     --gnn esm3@1 esm3@0 prott5@1 --seeds 42 43 44 45 46
 
-# for A3.3 (tab:alpha0): the one-hot boosting heads. Pass the SAME protein npz the
+# for A3.2 (tab:alpha0): the one-hot boosting heads. Pass the SAME protein npz the
 # sweep used -- it decides the coverage mask even though one-hot replaces ESM
 .venv/bin/python scripts/article_tables/s3_onehot_boost.py \
     --dataset m2or cc hc \
@@ -660,7 +660,7 @@ can run while 1.1 is still going.
     --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz' \
     --seeds 42 43 44 45 46 --seed-graph --max-parallel 4 --gpus 0 1 2 3
 
-# for A3.2, ONLY for a root made before Sep 2026: score that root's validation split.
+# for A3.1, ONLY for a root made before Sep 2026: score that root's validation split.
 # The head is refit on the same train rows with the same seed and asked for the val
 # rows instead -- one XGBoost fit per cell, no message passing, no GPU, resumable,
 # and self-checking (it re-predicts test and compares against the recorded number)
@@ -689,9 +689,8 @@ the supplementary ablations as the argument needs them.
 | M1 | main battery | `m1_main_tables.py` | 1.1 + 1.2 |
 | A1 | baselines as `cls` vs the boosting base | `m1_main_tables.py --baseline-combo cls --no-ours` | 1.1 + 1.2 |
 | A2 | protein representations + our rows (`tab:t4`) | `s2_protein_sources.py` | 1.4 (`prot_floor_sweep`) |
-| A3.1 | the alpha dial, as a figure | `notebooks/article_figures/prediction_dial.ipynb` | 1.1, dense grid |
-| A3.2 | mean rank against the dial, both heads | `notebooks/article_figures/alpha_rank_dial.ipynb` | 1.1, dense grid + its `val_metrics_*` |
-| A3.3 | identity control (`tab:alpha0`) | `s3_alpha0_vs_boost.py` | 1.1 + 1.4 (`s3_onehot_boost`) |
+| A3.1 | the dial as advantage over the base, 3x2 battery | `notebooks/article_figures/prediction_dial.ipynb` | 1.1, dense grid + its `val_metrics_*` if `SPLIT="val"` |
+| A3.2 | identity control (`tab:alpha0`) | `s3_alpha0_vs_boost.py` | 1.1 + 1.4 (`s3_onehot_boost`) |
 | A4 | criterion × quantile, + the random control | `notebooks/article_figures/quantile_criteria.ipynb` | 1.4 (`run_quantile_criteria`) |
 | A5 | architecture: which operator | `s5_architecture.py` | 1.4 (`run_architecture`) |
 | A6 | molecule ablation | `s6_molecule_ablation.py` | 1.1 (all three `--mol-source`) + 1.3 |
@@ -813,43 +812,41 @@ insects' validation rows into train. `--trust-existing` accepts such a file, `--
 refits everything. A cell a dataset cannot do (HC ships no `cold_receptor`) is skipped
 with a note.
 
-#### A3.1 — the alpha dial, as a figure
+#### A3.1 — the dial as advantage over the base (one figure)
 
-Read by eye from the dense grid of 1.1; there is no text reader:
+A 3×2 battery: columns are datasets, rows are regimes. Two curves per panel, each the
+**paired difference of one boosting head against the base**, computed fold by fold on the
+same held-out rows and then averaged over folds — `cls+mol`, where the refined receptor
+replaces the raw protein vector, and `cls+prot+mol`, where it is added beside it. The base
+is the zero line and is deliberately not a curve: every point is already measured against
+it, so drawing it would be drawing zero twice.
 
 ```bash
 jupyter lab notebooks/article_figures/prediction_dial.ipynb
 ```
 
-#### A3.2 — where the dial puts us: mean rank against $\alpha$
+Each curve carries a least-squares line, and the box inside each panel gives the
+zero-slope test for both. **The slope is fitted per fold**, and the five slopes are the
+sample the t-test is over — a slope fitted on the (fold, seed) rows would count five seeds
+that share a held-out set as five observations. The per-fold advantages come from
+`alpha_grid.delta_folds`, which shares its pairing with `delta_vs`, so the band and the
+slope cannot rest on different reductions.
 
-Two panels side by side, one per boosting head: `cls+mol` on the left (the construction
-the paper reports, where the refined receptor replaces the protein vector) and
-`cls+prot+mol` on the right (where it is added beside it, so its features are nested in
-the base's). Each point is one dial position, its height is the mean rank across cells
-on validation, the bars are the spread across cells, the dashed line is where the
-boosting base sits on the same scale, and a fitted straight line asks the only question
-that matters here: is the dial a slope or a flat surface?
+The question is not which $\alpha$ wins — an argmax over a flat surface is noise — but
+whether the surface is flat at all. `SPLIT` defaults to `test`, which is honest here
+precisely because nothing is chosen on this page: $\alpha = 1$ is reported for what it
+means, not for being the argmax. Set `SPLIT = "val"` to see the same panels on the split a
+choice would have to be made on; a root made before Sep 2026 gets validation rows from
+`val_rescore.py` (1.4).
 
-```bash
-jupyter lab notebooks/article_figures/alpha_rank_dial.ipynb
-```
+This figure replaced two (levels along the dial, and mean rank across cells) on
+24.09.2026: they asked one question in two idioms. `alpha_rank_dial.ipynb` is still in the
+tree and still runs, but it is not part of the paper.
 
-A separate cell tests the slope against zero three ways — an ordinary fit through the
-dial positions, a per-cell fit whose sample is the cells, and a permutation test that
-shuffles the dial labels inside each cell. Read the last two: the dial positions inside
-one cell are ranked against each other, so they are not independent points and the
-first fit's p-value is descriptive only.
+`MOL_SOURCE` stays `chemberta`: the dense grid exists only there, and on the other
+molecule sources only $\alpha \in \{0, 1\}$ was run.
 
-The notebook reads validation, and the sweep writes it (`val_metrics_*`); a root made
-before Sep 2026 gets those rows from `val_rescore.py` (1.4).
-
-The dense dial grid exists only for `chemberta`, and the knob `MOL_SOURCE` says so: on
-the other molecule sources only $\alpha \in \{0, 1\}$ was run, and a mean rank taken
-over cells holding 13 competitors and cells holding 3 is not one scale. The notebook
-prints the per-competitor cell counts and says so out loud if they differ.
-
-#### A3.3 — the identity control (`tab:alpha0`)
+#### A3.2 — the identity control (`tab:alpha0`)
 
 Our graph with the receptor's sequence removed, against the boost over ESM and over a
 one-hot receptor. The `s3_onehot_boost` half from 1.4 fits heads — minutes per fold on M2OR — and

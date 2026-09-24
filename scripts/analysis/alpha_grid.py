@@ -565,6 +565,45 @@ def duel(df, metric, by=("series",), ref_arm="boost_full", arm="gate"):
     return out[cols]
 
 
+def _paired(df, metric, ref_arm, arm, by):
+    """`arm` and `ref_arm` differenced on (fold, seed), or None if either is absent.
+
+    Step 1 of the two reductions described on `delta_vs`, alone, so that every public
+    function below differences the same way.
+    """
+    by = list(by)
+    if metric not in df.columns:
+        return None
+    ref = df[df.arm == ref_arm].copy()
+    g = df[df.arm == arm].copy()
+    if ref.empty or g.empty:
+        return None
+    ref = ref[by + SPLIT + [metric]].rename(columns={metric: "_ref"})
+    ref = ref.drop_duplicates(subset=by + SPLIT)
+    m = g[by + SPLIT + ["alpha", metric]].merge(ref, on=by + SPLIT, how="inner")
+    m = m.assign(_d=pd.to_numeric(m[metric], errors="coerce")
+                 - pd.to_numeric(m["_ref"], errors="coerce")).dropna(subset=["_d"])
+    return None if m.empty else m
+
+
+def delta_folds(df, metric, ref_arm="boost_full", arm="gate", by=("series",)):
+    """The paired advantage as ONE NUMBER PER (by..., alpha, fold).
+
+    Steps 1 and 2 of `delta_vs` and nothing after them: pair on (fold, seed), then
+    average the model seeds inside each fold. That is the frame a per-fold slope has to
+    be fitted on -- the fold is the unit of evidence everywhere in this project, and a
+    slope fitted on (fold, seed) rows would count five seeds agreeing on one fold as five
+    pieces of evidence. Column `delta`.
+    """
+    by = list(by)
+    m = _paired(df, metric, ref_arm, arm, by)
+    if m is None:
+        return pd.DataFrame(columns=by + ["alpha", "fold", "delta"])
+    return (fold_means(m, "_d", by + ["alpha"])
+            .rename(columns={"_d": "delta"})
+            .sort_values(by + ["alpha", "fold"], ignore_index=True))
+
+
 def delta_vs(df, metric, ref_arm="boost_full", arm="gate", by=("series",), level=0.95):
     """The paired difference `arm - ref_arm`: per (fold, seed) first, then per FOLD.
 
@@ -586,18 +625,8 @@ def delta_vs(df, metric, ref_arm="boost_full", arm="gate", by=("series",), level
     # has not run yet" from "this object is not the thing I asked for", and mid-run the
     # first is the normal case.
     empty = _agg(df.iloc[:0], "alpha", by + ["alpha"]).assign(won=pd.Series(dtype=int))
-    if metric not in df.columns:
-        return empty
-    ref = df[df.arm == ref_arm].copy()
-    g = df[df.arm == arm].copy()
-    if ref.empty or g.empty:
-        return empty
-    ref = ref[by + SPLIT + [metric]].rename(columns={metric: "_ref"})
-    ref = ref.drop_duplicates(subset=by + SPLIT)
-    m = g[by + SPLIT + ["alpha", metric]].merge(ref, on=by + SPLIT, how="inner")
-    m = m.assign(_d=pd.to_numeric(m[metric], errors="coerce")
-                 - pd.to_numeric(m["_ref"], errors="coerce")).dropna(subset=["_d"])
-    if m.empty:
+    m = _paired(df, metric, ref_arm, arm, by)
+    if m is None:
         return empty
     out = _agg(m, "_d", by + ["alpha"], level)
     # counted on the SAME reduction the interval uses, or the two would disagree about

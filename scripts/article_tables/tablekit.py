@@ -541,6 +541,31 @@ def paired_test(x, y, metric):
     return out
 
 
+def marks_rounded(values, metric, nd=3, lower=None):
+    """{key: "cbest"|"gbest"} at the precision the table PRINTS.
+
+    `values` is {key: mean}. Rows that print the same number share the mark, and the
+    next mark goes to the next DISTINCT printed value -- breaking such a tie on the
+    unrounded mean would put a rule into the table that its reader cannot check.
+    Direction comes from LOWER_IS_BETTER, which covers the error columns. `lower=True`
+    states it explicitly for a column that is not a metric at all -- the rank column,
+    where the best number is the smallest and the name is not in that set."""
+    vals = {k: round(float(v), nd) for k, v in values.items()
+            if v is not None and np.isfinite(v)}
+    if not vals:
+        return {}
+    lo = (metric in LOWER_IS_BETTER) if lower is None else bool(lower)
+    uniq = sorted(set(vals.values()), reverse=not lo)
+    first, second = uniq[0], (uniq[1] if len(uniq) > 1 else None)
+    out = {}
+    for k, v in vals.items():
+        if v == first:
+            out[k] = "cbest"
+        elif second is not None and v == second:
+            out[k] = "gbest"
+    return out
+
+
 def leads_ref(delta, metric):
     """Does a row with this mean difference LEAD its reference on this metric?
 

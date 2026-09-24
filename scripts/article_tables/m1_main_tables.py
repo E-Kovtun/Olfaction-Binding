@@ -132,6 +132,12 @@ def friedman_line(blocks, metrics):
     return "Friedman -- " + "; ".join(parts) if parts else ""
 
 
+def _col_marks(col, metric):
+    """The marks for one printed column of one regime."""
+    usable = col[col.usable.astype(bool)]
+    return tk.marks_rounded(dict(zip(usable.key, usable["mean"])), metric)
+
+
 def caption(ds, blocks, metrics, a):
     sts = pd.concat([b[1] for b in blocks.values()], ignore_index=True)
     use = sts[sts.usable.astype(bool) & (sts.n > 0)]
@@ -148,7 +154,7 @@ def caption(ds, blocks, metrics, a):
             + (r"$^{*}$ = our row is first in that column AND ahead of the next row down "
                r"at $p<" + f"{a.sig:g}" + r"$, two-sided paired $t$-test over splits, "
                r"Holm-corrected within the column; the last row gives that $p$ where we "
-               r"are first, and is blank elsewhere. A column we do not lead is neither "
+               r"are first, and a dash elsewhere. A column we do not lead is neither "
                r"marked nor quoted: the test is computed for every column, but it only "
                r"supports a claim where we lead, and we make none elsewhere. "
                if getattr(a, "stars", False) else
@@ -222,25 +228,27 @@ def latex(ds, blocks, metrics, a):
                     continue
                 r = r.iloc[0]
                 txt = tk.tex_num(r["mean"], r["std"])
-                best, second = tk.top_two(col, m)
-                if stars and key == best and np.isfinite(r["p_holm"]) and r["p_holm"] < a.sig:
+                mk = _col_marks(col, m)
+                if (stars and mk.get(key) == "cbest"
+                        and np.isfinite(r["p_holm"]) and r["p_holm"] < a.sig):
                     # Only on a row of ours, and only where we are the bold one: `ref` is
                     # the best row that is not ours, so on top of the column it is the
                     # nearest competitor below and the test is the gap to second place.
                     txt += r"$^{*}$"
-                if key == best:
-                    txt = rf"\cbest{{{txt}}}"
-                elif key == second:
-                    txt = rf"\gbest{{{txt}}}"
+                if mk.get(key):
+                    txt = rf"\{mk[key]}{{{txt}}}"
                 cells += [txt] if stars else [txt, tk.tex_p_pair(r["p_vs_ref"], r["p_holm"])]
             ranks = _mean_ranks(st)
             mr = ranks.get(key, np.nan)
             if not np.isfinite(mr):
                 cells.append("--")
-            elif np.isclose(mr, ranks.min()):
-                cells.append(rf"\textbf{{{mr:.2f}}}")
             else:
-                cells.append(f"{mr:.2f}")
+                # The rank column is marked like every other: best, then second, ties
+                # sharing. It is printed to two decimals, so that is the precision the
+                # comparison uses. Smaller is better, said explicitly: "Rank" is a
+                # place, not a metric, so it is not in LOWER_IS_BETTER.
+                rmk = tk.marks_rounded(dict(ranks), "Rank", nd=2, lower=True).get(key)
+                cells.append(rf"\{rmk}{{{mr:.2f}}}" if rmk else f"{mr:.2f}")
         out.append(f"{label} & " + " & ".join(cells) + r" \\")
     if stars:
         for key in keys:
@@ -253,21 +261,23 @@ def latex(ds, blocks, metrics, a):
                 for m in metrics:
                     col = st[st.metric == m]
                     r = col[col.key == key]
-                    best, _ = tk.top_two(col, m)
-                    if (r.empty or key != best or not bool(r.usable.iloc[0])
+                    if (r.empty or _col_marks(col, m).get(key) != "cbest"
+                            or not bool(r.usable.iloc[0])
                             or not np.isfinite(r["p_holm"].iloc[0])):
-                        cells.append("")
+                        cells.append("--")
                         continue
                     cells.append(tk.tex_p(float(r["p_holm"].iloc[0])))
                     any_shown = True
-                cells.append("")                      # the Rank column is not tested
+                cells.append("--")                    # the Rank column is not tested
             if any_shown:
                 out.append(r"\addlinespace")
                 out.append(r"\emph{\footnotesize $p$ vs.\ best other} & "
-                           + " & ".join(rf"{{\footnotesize {c}}}" if c else ""
-                                        for c in cells) + r" \\")
+                           + " & ".join(rf"{{\footnotesize {c}}}" for c in cells)
+                           + r" \\")
 
-    fried = friedman_line(blocks, metrics)
+    # Under --stars the table is the six rows and the p-row; the Friedman line is one
+    # more thing to read for a question none of the marks answer.
+    fried = "" if stars else friedman_line(blocks, metrics)
     if fried:
         out.append(r"\midrule")
         out.append(rf"\multicolumn{{{total}}}{{@{{}}l}}{{\footnotesize {fried}}} \\")
@@ -339,8 +349,9 @@ def parser():
     ap.add_argument("--stars", action="store_true",
                     help="drop the per-metric $p$ column and mark significance with a "
                          "star on our value instead, where our row leads the column. "
-                         "Halves the table's width; the p-values stay in the console "
-                         "view and in main_long.csv")
+                         "Halves the table's width and drops the Friedman line; the "
+                         "p-values and the Friedman tests stay in the console view and "
+                         "in main_long.csv")
     ap.add_argument("--sig", type=float, default=0.05,
                     help="the threshold a star has to clear under --stars; without it the table prints both p-values and this only marks the console view")
     ap.add_argument("--no-val-cut", dest="val_cut", action="store_false",

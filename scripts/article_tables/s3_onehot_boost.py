@@ -74,6 +74,15 @@ def fold_row(ds, regime, fold, sw, ns, data, seed, task):
                 n_features=int(Xtr.shape[1]), t_head=dt, **scores)
 
 
+def folds_of(sw, ds, regime):
+    """The folds the SWEEP itself would use for this cell.
+
+    Its `REPEATS` table holds only the exceptions and falls back to 1..5 everywhere else,
+    so that fallback has to be read the same way here -- reading the dict directly skips
+    every dataset whose entry is empty, which is both insect panels."""
+    return list(sw.REPEATS.get(ds, {}).get(regime, [1, 2, 3, 4, 5]))
+
+
 def parser():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -97,18 +106,24 @@ def main(argv=None):
     ns = argparse.Namespace(mol_source=a.mol_source, mol_embeddings=None,
                             prot_embeddings=a.prot_embeddings, pool_fold=1)
     out = tk.out_dir(a.out)
+    unknown = [r for r in a.regime if r not in tk.REGIMES]
+    if unknown:
+        raise SystemExit(f"--regime {' '.join(unknown)}: not a regime of this project, "
+                         f"which has {', '.join(tk.REGIMES)}")
+    known = [r for r in a.regime if r in tk.REGIMES]
     for ds in a.dataset:
-        todo = [r for r in a.regime
-                if r in sw.REPEATS.get(ds, {})
-                and (a.force or not (out / f"{ds}_{r}.csv").exists())]
+        have = [r for r in known if (out / f"{ds}_{r}.csv").exists()]
+        todo = known if a.force else [r for r in known if r not in have]
         if not todo:
-            print(f"{ds}: nothing to do (--force to redo)")
+            print(f"{ds}: already on disk ({', '.join(have)}) -- --force to redo")
             continue
+        if a.force and have:
+            print(f"{ds}: --force, replacing {', '.join(have)}")
         data = sw._prepare(ds, ns)
         print(f"{ds}: {len(pd.unique(data[0]['receptor']))} receptors in the pool")
         for regime in todo:
             rows = [fold_row(ds, regime, f, sw, ns, data, a.seed, tk.TASK[ds])
-                    for f in sw.REPEATS[ds][regime]]
+                    for f in folds_of(sw, ds, regime)]
             path = out / f"{ds}_{regime}.csv"
             pd.DataFrame(rows).to_csv(path, index=False)
             print(f"  -> {path}")

@@ -612,7 +612,12 @@ def best_other(rows, metric, exclude=("ours",)):
 
 
 def block_stats(rows, metrics, ref_key=None, ref_mode="fixed", test_kinds=("ours",)):
-    """One record per (method, metric): mean/std over splits, place, and a paired test.
+    """One record per (method, metric): mean, spread over splits, place, a paired test.
+
+    Two spreads are recorded, because tables in this paper quote both. `std` is the
+    sample deviation over the split means; `hw` is the half-width of the 95% Student-t
+    interval over the same numbers, which at n=5 is 1.24x WIDER than the std (t=2.776
+    against sqrt(5)=2.236). A caller picks one and says in its caption which.
 
     `ref_mode="fixed"` tests every row against `ref_key` -- the older tables' shape.
     `ref_mode="best_other"` is what the main table does: the reference is chosen PER
@@ -648,6 +653,7 @@ def block_stats(rows, metrics, ref_key=None, ref_mode="fixed", test_kinds=("ours
                 usable=r.usable, seeds=r.seeds, metric=m, n=len(v),
                 mean=float(v.mean()) if len(v) else np.nan,
                 std=float(v.std(ddof=1)) if len(v) > 1 else np.nan,
+                hw=ag.ci(v)[1] if len(v) > 1 else np.nan,
                 rank=(float(R[r.key].mean()) if r.key in R.columns and len(R)
                       else np.nan),
                 n_ranked=len(R), k_ranked=R.shape[1], friedman_p=fp, ref=rk or "",
@@ -712,7 +718,7 @@ def tex_p_pair(raw, adj):
     return f"{tex_p(raw)}/{tex_p(adj)}"
 
 
-def text_block(st, metrics, title, sig=0.05, w=22, wp=14):
+def text_block(st, metrics, title, sig=0.05, w=22, wp=14, spread="std"):
     """The block as a console table.
 
     Two columns per metric -- the value with its place, and (for the rows that were
@@ -735,7 +741,7 @@ def text_block(st, metrics, title, sig=0.05, w=22, wp=14):
                 cells += f"{'--':>{w}}" + (f"{'':>{wp}}" if tested else "")
                 continue
             r = s.loc[m]
-            txt = txt_num(r["mean"], r["std"])
+            txt = txt_num(r["mean"], r[spread])
             if np.isfinite(r["rank"]):
                 txt += f" ({r['rank']:.2f})"
             cells += f"{txt:>{w}}"

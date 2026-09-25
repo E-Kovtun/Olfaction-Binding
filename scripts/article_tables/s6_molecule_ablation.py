@@ -6,8 +6,10 @@ embedding -- the successor of tab:t2m2or / tab:t2cc / tab:t2hc, now at the seede
     python scripts/article_tables/s6_molecule_ablation.py --ours cls+prot+mol
 
 One table per dataset: rows = ChemBERTa / GIN / ECFP, columns = regime x method. A cell is
-the metric of record, mean +/- std over splits, and in parentheses the place among the
-methods within each split, averaged over splits. `*` = paired t-test against our graph,
+the metric of record, mean +/- the 95% Student-t interval over the five split means, and
+in parentheses the place among the methods within each split, averaged over splits. The
+interval is what the rest of the appendix quotes; `--spread std` gives the raw deviation
+instead, which is what the earlier version of this table printed. `*` = paired t-test against our graph,
 Holm within the cell group. The last row is the mean place over the embeddings.
 
 Graph and base come from ONE sweep cell, so they are paired by split and seed; Hladis is
@@ -80,7 +82,10 @@ def latex(ds, cells, metric, a):
            f"base (prot+mol) and "
            + ", ".join(tk.BASELINE_TEX.get(b, b) for b in a.baselines)
            + f" ({combo}) across molecule embeddings, {tk.metric_tex(metric)}, mean $\\pm$ "
-           f"std over held-out splits (our sweep's rows averaged over model seeds within each "
+           + (r"95\% CI over held-out splits (Student-t over the split means, "
+              if a.spread == "hw" else
+              r"std over held-out splits (")
+           + f"our sweep's rows averaged over model seeds within each "
            f"split). In parentheses: place among the {k} methods within each split, "
            r"averaged over splits. \textbf{Bold} = best value in the group. "
            f"$^{{*}}$ = our graph is ahead of this row at $p<{a.sig:g}$, paired two-sided $t$-test "
@@ -106,7 +111,7 @@ def latex(ds, cells, metric, a):
                     row.append("--")
                     continue
                 r = r.iloc[0]
-                txt = tk.tex_num(r["mean"], r["std"])
+                txt = tk.tex_num(r["mean"], r[a.spread])
                 if np.isfinite(r["rank"]):
                     txt += f" ({r['rank']:.2f})"
                 # A mark is a claim, so it goes on a row only where OUR graph is the
@@ -167,7 +172,7 @@ def console_table(ds, cells, metric, a, w=23, wl=11):
                     row += f"{'--':>{w}}"
                     continue
                 r = r.iloc[0]
-                txt = tk.txt_num(r["mean"], r["std"])
+                txt = tk.txt_num(r["mean"], r[a.spread])
                 if np.isfinite(r["rank"]):
                     txt += f" ({r['rank']:.2f})"
                 if (key != r["ref"] and np.isfinite(r["p_holm"]) and r["p_holm"] < a.sig
@@ -186,6 +191,9 @@ def console_table(ds, cells, metric, a, w=23, wl=11):
             txt = "--" if not np.isfinite(v) else f"{v:.2f}"
             row += f"{('>' + txt) if np.isfinite(v) and np.isclose(v, low) else txt:>{w}}"
     lines.append(row)
+    lines.append(f"  value = mean +/- "
+                 + ("95% CI over the 5 split means (Student-t)"
+                    if a.spread == "hw" else "std over splits"))
     lines.append(f"  > best in its (regime, molecule) group; "
                  f"* our graph is ahead of that row at p_holm<{a.sig:g}; "
                  f"in parentheses: mean place among the {len(keys)} methods")
@@ -209,7 +217,7 @@ def summary(ds, cells, metric, a):
             ours = st[st.key == f"ours:{a.ours}"]
             line = f"  {tk.MOL_LABEL[mol]:<10}"
             if len(ours) and np.isfinite(ours["mean"].iloc[0]):
-                line += f" graph {tk.txt_num(ours['mean'].iloc[0], ours['std'].iloc[0])}"
+                line += f" graph {tk.txt_num(ours['mean'].iloc[0], ours[a.spread].iloc[0])}"
             if len(o) and np.isfinite(o["delta_vs_ref"].iloc[0]):
                 r = o.iloc[0]
                 line += (f" | graph - base {-r['delta_vs_ref']:+.3f}, graph ahead "
@@ -235,6 +243,11 @@ def parser():
     ap.add_argument("--baseline-combo", default=tk.BASELINE_COMBO)
     ap.add_argument("--seeds", type=int, nargs="+", default=None)
     ap.add_argument("--sig", type=float, default=0.05)
+    ap.add_argument("--spread", default="hw", choices=["hw", "std"],
+                    help="hw (default) = half-width of the 95%% Student-t interval over "
+                         "the split means, which is what the rest of the appendix "
+                         "quotes; std = the raw deviation, as the earlier version of "
+                         "this table printed")
     ap.add_argument("--blocks", action="store_true",
                     help="also print one block per (regime, molecule) with both p-values "
                          "per row -- the detail the combined table leaves out")
@@ -261,7 +274,8 @@ def main(argv=None):
             if a.blocks:
                 print("\n" + tk.text_block(st, [metric],
                                            f"--- {tk.DATASET_LABEL[ds]} / "
-                                           f"{tk.REGIME_LABEL[reg]} / {mol}", a.sig))
+                                           f"{tk.REGIME_LABEL[reg]} / {mol}", a.sig,
+                                           spread=a.spread))
             longs.append(st)
         summ = summary(ds, cells, metric, a)
         (out / f"{ds}.tex").write_text(latex(ds, cells, metric, a) + "\n", encoding="utf-8")

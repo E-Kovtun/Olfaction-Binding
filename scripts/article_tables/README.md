@@ -42,7 +42,10 @@ same assay-design contamination as M2OR's — they now have a measured-cell mask
 
 - **Unit = held-out split.** Sweep rows are averaged over model seeds inside each split
   first. External baselines have one seed per split.
-- **Cell = mean ± std over splits.**
+- **Cell = mean ± std over splits**, except the molecular ablation (`s6`), which
+  quotes the 95% Student-t interval by default so that it matches the rest of the
+  appendix; `--spread std` restores the older form. At n=5 the interval is 1.24× wider
+  than the std, so the two are not interchangeable in a caption.
 - **Significance:** a paired two-sided t-test over splits against the reference row,
   Holm-corrected within the column. Wilcoxon is not used: at 5 splits its smallest
   two-sided p is 0.0625.

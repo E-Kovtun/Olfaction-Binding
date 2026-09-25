@@ -172,6 +172,31 @@ def test_molecule_ablation_end_to_end(trees):
     assert ecfp["mean"].iloc[0] == pytest.approx(0.55)     # Hladis alone on ECFP
 
 
+def test_the_molecular_cell_quotes_the_interval_and_not_the_deviation(trees):
+    """The appendix quotes 95% intervals everywhere else, and at n=5 the deviation is
+    1.24x narrower -- side by side on a page the two read as the same quantity."""
+    from scipy.stats import t as _t
+
+    s, e, tmp = trees
+    m = _script("s6_molecule_ablation")
+    long = None
+    for spread, out in (("hw", tmp / "mol_hw"), ("std", tmp / "mol_std")):
+        m.main(["--dataset", "cc", "--spread", spread, "--sweep-root", str(s),
+                "--ensemble-root", str(e), "--out", str(out)])
+        tex = (out / "cc.tex").read_text()
+        assert (r"95\% CI" in tex) == (spread == "hw")
+        if spread == "hw":
+            long = pd.read_csv(out / "molecule_long.csv")
+            hw_tex = tex
+
+    row = long[(long.mol_source == "ecfp") & (long.key == "hladis")].iloc[0]
+    n = int(row["n"])
+    factor = _t.ppf(0.975, n - 1) / n ** 0.5
+    assert row["hw"] == pytest.approx(row["std"] * factor)
+    # and it is the hw, not the std, that reaches the page
+    assert f"{row['mean']:.3f}$\\pm${row['hw']:.3f}" in hw_tex
+
+
 def test_geometry_table_reads_the_sweep_and_the_frozen_embeddings(trees):
     s, _, tmp = trees
     pg = tmp / "pg"

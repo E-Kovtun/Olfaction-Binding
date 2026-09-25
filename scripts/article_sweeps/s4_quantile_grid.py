@@ -304,6 +304,52 @@ def paper_point(df, metric, level=0.95):
     return pd.DataFrame(rows)
 
 
+def best_cell(d, metric, paper=None):
+    """The best cell of a DELTA frame, the runner-up behind it, and where ours sits.
+
+    `d` is one series' `delta_vs_boost` output, so every number here is a paired
+    difference from the base on the same folds and every half-width is the paired one.
+    That is the point of not reusing `best_q`/`paper_point`: those read the absolute
+    curve, whose interval is wider, and quoting it beside a paired band would put two
+    different intervals on one page under one name.
+
+    `sep` is the gap from the best cell to the next best, in half-widths of the best --
+    over criteria AND quantiles at once, which is the panel's question rather than
+    `best_q`'s per-criterion one. Below 1 the winner is a ranking of noise, and the
+    honest reading is that the construction does not matter over this grid.
+
+    `paper` is (criterion, quantile); `behind` is how far it sits below the best cell,
+    again in the best cell's half-widths. NaN if it is not in the grid.
+    """
+    cols = ["criterion", "quantile", "mean", "hw"]
+    if d is None or len(d) == 0 or not set(cols) <= set(d.columns):
+        return {}
+    g = d.dropna(subset=["mean"]).sort_values("mean", ascending=(sign_of(metric) < 0))
+    if g.empty:
+        return {}
+    top = g.iloc[0]
+    run = g.iloc[1] if len(g) > 1 else None
+    hw = float(top["hw"]) if np.isfinite(top["hw"]) and top["hw"] else np.nan
+    sgn = sign_of(metric)
+    out = dict(best_criterion=str(top["criterion"]), best_q=float(top["quantile"]),
+               best_mean=float(top["mean"]), best_hw=float(top["hw"]),
+               runner_criterion=(None if run is None else str(run["criterion"])),
+               runner_q=(np.nan if run is None else float(run["quantile"])),
+               sep=(np.nan if run is None or not np.isfinite(hw)
+                    else float(sgn * (top["mean"] - run["mean"]) / hw)))
+    if paper is not None:
+        crit, q = paper
+        mine = g[(g.criterion == crit) & np.isclose(g["quantile"].astype(float),
+                                                    float(q))]
+        out |= dict(
+            ours_criterion=crit, ours_q=float(q), in_grid=bool(len(mine)),
+            ours_mean=(np.nan if mine.empty else float(mine.iloc[0]["mean"])),
+            ours_hw=(np.nan if mine.empty else float(mine.iloc[0]["hw"])),
+            behind=(np.nan if mine.empty or not np.isfinite(hw)
+                    else float(sgn * (top["mean"] - mine.iloc[0]["mean"]) / hw)))
+    return out
+
+
 def floor(df, metric, by=("series",)):
     """How small a difference this grid can resolve: the model noise left in a fold
     mean after the seeds are averaged.

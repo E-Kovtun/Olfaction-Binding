@@ -888,7 +888,7 @@ figure. M2OR is also the only dataset whose reported construction is non-trivial
     --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz' \
     --seed-graph --seeds 42 43 --max-parallel 4 --gpus 0 1 2 3
 
-# the figures. This sweep is read by eye and there is no text reader for it:
+# the figure. This sweep is read by eye and there is no text reader for it:
 # quantile_grid.py is the aggregation layer the notebook imports, not a command
 jupyter lab notebooks/article_figures/quantile_criteria.ipynb
 ```
@@ -900,6 +900,16 @@ seven rows from it with `shared_from` naming the fit that ran — one experiment
 through eight curves rather than eight identical fits. That is 7 x 5 x 2 x 2 = 140 fits
 not done: **820 graphs**, not 960, plus 20 boosting reference fits (one per fold, seed
 and regime), which are cheap.
+
+The notebook's headline is **one pair of panels** (25.09), M2OR transductive and
+M2OR cold-molecule, built in the same idiom as the dial's highlight figure in
+`prediction_dial.ipynb`: full page width, the base as the zero line because every curve
+is a paired difference, letters in the margin, one legend strip, a fixed box corner and
+a ring on the cell the paper reports. Eight criteria on one axis is the most a
+colour-safe palette carries, so each also has its own marker, `random` is grey as the
+control, and only the reported construction draws a band — eight bands is grey mud. The
+I-mark in the left margin is the smallest difference the grid resolves. The absolute
+levels, the K panel and the `sep`/`behind` tables stay below it as diagnostics.
 
 **The quantile is chosen on VALIDATION.** Reading the best `q` off these curves and then
 defending it with the same curves takes the number and its defence from one set of rows,

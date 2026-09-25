@@ -311,12 +311,11 @@ def test_an_ablation_row_says_what_it_ablated(reader):
     assert reader.label("none") == "No message passing"
 
 
-def test_the_base_is_ranked_and_the_ablations_are_not(reader):
-    """The base is one of the answers to "which would you rather have", so it takes
-    part. An encoder ablation is a part of our own row, and folding it in would move
-    every operator's number each time another ablation is added."""
+def test_the_operator_rank_is_operators_and_nothing_else(reader):
+    """The base is what the graphs are read against, not one of them; an encoder
+    ablation is a part of our own row and is ranked in its own field."""
     assert reader.is_ranked("sage:paper") and reader.is_ranked("gin:paper")
-    assert reader.is_ranked("boost_full")
+    assert not reader.is_ranked("boost_full")
     assert not reader.is_ranked("none")
     assert not reader.is_ranked("sage:paper:pos")
 

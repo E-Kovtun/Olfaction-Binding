@@ -112,16 +112,14 @@ def in_ablation_block(arch):
 
 
 def is_ranked(arch):
-    """True for the rows the `rank` column ranks: the operators AND the boosting base.
+    """True for the rows the operator rank ranks: the operators, and nothing else.
 
-    The base belongs in it because "which of these would you rather have" is the
-    question the column answers, and the base is one of the answers -- an operator that
-    places above it and one that places below it are making different claims. The
-    encoder ablations stay out: they are parts of our own row, and folding them in would
-    move every operator's number each time another ablation is added.
+    The boosting base is deliberately out. It is the thing every graph in this paper is
+    compared against, not one of the graphs; ranking it among them would make the column
+    answer a different question from the one its name asks. Its number sits in the row
+    above, to be read against the marked one.
     """
-    base, _, _, notes = split_arch(arch)
-    return not notes and base != "none"
+    return is_operator(arch)
 
 
 def row_group(arch):
@@ -215,11 +213,11 @@ def combine(cells):
         col = (ds, reg, metric)
         # TWO ranks, each over a closed set, because a rank is a mean place among a
         # fixed field and a row added to the field moves every number in it. The
-        # operator set (operators + base) answers "which operator would you rather
-        # have"; the ablation set (ours + its ablations + the control) answers "which
-        # part of the design is load-bearing". A row belongs to exactly one printed
-        # rank: ours is ranked as an operator, because that is the number the text
-        # quotes, even though it takes part in the ablation ranking as its reference.
+        # operator field answers "which operator"; the ablation field (ours, its
+        # encoder ablations and the control) answers "which part of the design is
+        # load-bearing". The boosting base is in neither: it is what every graph here
+        # is read against. A row belongs to exactly one PRINTED rank -- ours is ranked
+        # as an operator, though it takes part in the ablation field as its reference.
         def _order(sub):
             return sub["value"].rank(ascending=metric in ag.LOWER_IS_BETTER,
                                      method="average")
@@ -287,7 +285,7 @@ def text(rows, cols, wide, labels, ranks):
     for n in rows:
         cells = "".join(f"{fmt(wide[n].get(c)) + ('*' if best[c] == n else ' '):>{cw}}"
                         for c in cols)
-        rank = f"{np.mean(ranks[n]):.1f}" if ranks.get(n) else ""
+        rank = f"{np.mean(ranks[n]):.1f}" if ranks.get(n) else "--"
         out.append(f"{labels[n]:<{w}}{rank:>7}  {cells}")
 
     ties = [f"{SHORT_DS.get(ds, ds)}/{SHORT_REG.get(reg, reg)}"
@@ -298,12 +296,13 @@ def text(rows, cols, wide, labels, ranks):
             "competitor). mean +/- 95% CI over folds;",
             "    seeds averaged inside each fold first.",
             "rank = mean place averaged over columns (smaller is better), taken "
-            "within a block:",
-            "    operators and the base in one field; our row, its encoder ablations "
-            "and the",
-            "    no-message-passing control in the other, where our row is the "
-            "reference and keeps",
-            "    its operator rank."]
+            "within a field:",
+            "    the operators in one; our row, its encoder ablations and the "
+            "no-message-passing",
+            "    control in the other, where our row is the reference and keeps its "
+            "operator rank.",
+            "    The base is in neither -- it is what every graph here is read "
+            "against."]
     if ties:
         out += [f"ours overlaps the marked operator's interval in: {', '.join(ties)} "
                 f"-- those columns separate nothing."]
@@ -316,7 +315,7 @@ def latex(rows, cols, wide, labels, ranks):
     for n in rows:
         if n == ANCHOR:
             cells = [fmt(wide[n].get(c)).replace("+/-", r"$\pm$") for c in cols]
-            rank = f"{np.mean(ranks[n]):.1f}" if ranks.get(n) else ""
+            rank = f"{np.mean(ranks[n]):.1f}" if ranks.get(n) else "--"
             body.append(rf"\emph{{{labels[n]}}} & \emph{{{rank}}} & "
                         + " & ".join(cells) + r" \\")
             body.append(r"\addlinespace")
@@ -340,12 +339,12 @@ def latex(rows, cols, wide, labels, ranks):
         r"CI over splits, model seeds averaged inside each split first. "
         r"\textbf{Bold} = best operator in column; the boosting base is the anchor the "
         r"graphs are read against and is not marked, though it does take part in the "
-        r"rank --- an operator that places above it and one that places below it are "
-        r"making different claims. The rank is a mean place within a block: the "
-        r"operators and the base form one field, and our row together with its encoder "
-        r"ablations and the no-message-passing control form the other, so that adding "
-        r"an ablation cannot move an operator's number. Our row is ranked as an "
-        r"operator. \texttt{--} = not trained in that cell.}",
+        r"rank. The rank is a mean place within a field: the operators form one, and "
+        r"our row together with its encoder ablations and the no-message-passing "
+        r"control forms the other, so that adding an ablation cannot move an "
+        r"operator's number. Our row is ranked as an operator; the base is ranked in "
+        r"neither, being what every graph here is read against. "
+        r"\texttt{--} = not ranked, or not trained in that cell.}",
         r"\label{tab:arch}",
         r"\resizebox{\textwidth}{!}{%",
         r"\begin{tabular}{@{}lr" + "r" * len(cols) + r"@{}}", r"\toprule",

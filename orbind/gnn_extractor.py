@@ -318,14 +318,28 @@ def _mp_edges(pairs: pd.DataFrame, train_idx, mol_to_i, prot_to_i, q: float,
             (mol_ids[~pos_mask], prot_ids[~pos_mask], nw))
 
 
-def _edge_index_dict(pos, neg):
-    pm, pp = pos[0], pos[1]
-    nm, npt = neg[0], neg[1]
+def _edge_index_dict(pos, neg, mode: str = "signed"):
+    """Edge dicts for the two stacks, under one of the three sign regimes.
+
+    "signed" is ours. "positive" hands the negative edges to nobody, so they leave the
+    graph. "unsigned" keeps every edge but puts them all in the one stack, so the sign
+    stops being structural while the connectivity is unchanged. In the last two the
+    negative dict is EMPTY and the model is built without a negative stack, rather than
+    with an idle one -- an ablation should move the parameter count with it.
+    """
+    if mode not in EDGE_MODES:
+        raise ValueError(f"edges must be one of {EDGE_MODES}, got {mode!r}")
+    pm, pp = np.asarray(pos[0]), np.asarray(pos[1])
+    nm, npt = np.asarray(neg[0]), np.asarray(neg[1])
+    if mode == "unsigned":
+        pm, pp = np.concatenate([pm, nm]), np.concatenate([pp, npt])
     def _idx(a, b):
         if len(a) == 0:
             return torch.zeros((2, 0), dtype=torch.long)
         return torch.tensor(np.stack([a, b]), dtype=torch.long)
     pos_eidx = {ETYPE: _idx(pm, pp), RTYPE: _idx(pp, pm)}
+    if mode != "signed":
+        return pos_eidx, {}
     neg_eidx = {ETYPE_NEG: _idx(nm, npt), RTYPE_NEG: _idx(npt, nm)}
     return pos_eidx, neg_eidx
 
@@ -472,7 +486,10 @@ class _WSAGE(MessagePassing):
 #:               the GIN molecule embeddings this repo already uses as a molecule
 #:               source. Sum aggregation and an MLP, which is the most expressive of
 #:               the four in the WL sense.
-CONVS = ("sage", "gat", "graphconv", "gin")
+CONVS = ("sage", "gat", "graphconv", "gin", "none")
+
+#: How the two edge signs reach the encoder. See `GnnSignedExtractor.edges`.
+EDGE_MODES = ("signed", "positive", "unsigned")
 
 #: Layer 1 concatenates `heads` of `hidden // heads`; layer 2 is single-head, so the
 #: width the decoder sees is `hidden` for every operator. Comparing operators at
@@ -526,6 +543,9 @@ def _make_conv(kind: str, hidden: int, layer: int, heads: int, dropout: float,
     `(-1, -1)` input dims everywhere they are supported, because layer 1 sees the two
     projected node types and layer 2 sees the subtraction's output.
     """
+    if kind == "none":
+        raise ValueError("conv='none' has no operator: the encoder skips message "
+                         "passing entirely and never builds a convolution")
     if kind == "sage":
         return _WSAGE(hidden) if weighted else SAGEConv((-1, -1), hidden)
     if weighted:
@@ -615,10 +635,15 @@ class _SignedSage(nn.Module):
     def __init__(self, mol_dim: int, prot_dim: int, hidden: int, dropout: float,
                  weighted: bool = False, pca_mol=None, pca_prot=None,
                  alpha=None, s_prot=None, conv: str = "sage", heads: int = GAT_HEADS,
-                 normalize: bool = False):
+                 normalize: bool = False, layers: int = 2, signed: bool = True):
         super().__init__()
         self.weighted = weighted
         self.conv_kind = conv
+        # Depth and sign are ablations, not modes: at `layers=1` the two-hop
+        # prot -> mol -> prot path this project claims does not exist, and at
+        # `signed=False` there is no negative stack to subtract. Both default to ours.
+        self.layers = int(layers)
+        self.signed = bool(signed)
         # GraphSAGE normalises h_v to unit norm after every layer; we historically did
         # not, and every reported number is un-normalised. Opt-in, so the default path
         # is byte-identical.
@@ -646,10 +671,20 @@ class _SignedSage(nn.Module):
             _freeze_pca(self.proj_mol, *pca_mol)
         if pca_prot is not None:
             _freeze_pca(self.proj_prot, *pca_prot)
-        self.conv1 = HeteroConv({ETYPE: mk(1), RTYPE: mk(1)}, aggr="sum")
-        self.conv1_neg = HeteroConv({ETYPE_NEG: mk(1), RTYPE_NEG: mk(1)}, aggr="sum")
-        self.conv2 = HeteroConv({ETYPE: mk(2), RTYPE: mk(2)}, aggr="sum")
-        self.conv2_neg = HeteroConv({ETYPE_NEG: mk(2), RTYPE_NEG: mk(2)}, aggr="sum")
+        # Creation order is load-bearing: the convolutions are lazily initialised, so
+        # a seeded run consumes its draws in this order and any reshuffle here would
+        # change every number on disk. The default (signed, two layers) builds exactly
+        # what it built before.
+        if conv != "none":
+            self.conv1 = HeteroConv({ETYPE: mk(1), RTYPE: mk(1)}, aggr="sum")
+            if self.signed:
+                self.conv1_neg = HeteroConv({ETYPE_NEG: mk(1), RTYPE_NEG: mk(1)},
+                                            aggr="sum")
+            if self.layers == 2:
+                self.conv2 = HeteroConv({ETYPE: mk(2), RTYPE: mk(2)}, aggr="sum")
+                if self.signed:
+                    self.conv2_neg = HeteroConv({ETYPE_NEG: mk(2), RTYPE_NEG: mk(2)},
+                                                aggr="sum")
         self.dec = nn.Sequential(
             nn.Linear(2 * hidden, hidden), nn.LeakyReLU(self.LEAK), nn.Dropout(dropout),
             nn.Linear(hidden, hidden // 2), nn.LeakyReLU(self.LEAK), nn.Dropout(dropout),
@@ -657,37 +692,56 @@ class _SignedSage(nn.Module):
         )
 
     def encode(self, x_mol, x_prot, pos_eidx, neg_eidx, pos_ew=None, neg_ew=None):
-        """`pos_eidx`/`neg_eidx` are one edge dict, or a PAIR of them -- layer 1's and
-        layer 2's. The pair is what neighbour sampling needs: the paper draws a
-        different fan-out per layer (25 then 10), and one dict for both would be a
-        single draw applied twice."""
-        def per_layer(e):
-            return e if isinstance(e, (list, tuple)) else (e, e)
+        """`pos_eidx`/`neg_eidx` are one edge dict, or one per LAYER. The per-layer form
+        is what neighbour sampling needs: the paper draws a different fan-out per layer
+        (25 then 10), and one dict for both would be a single draw applied twice.
 
-        pos1, pos2 = per_layer(pos_eidx)
-        neg1, neg2 = per_layer(neg_eidx)
+        `neg_eidx` may be empty. Under `edges="positive"` and `edges="unsigned"` there is
+        no negative stack, and the subtraction that defines the signed encoder simply
+        does not happen -- it is not performed against zeros, which would cost a pass.
+        """
+        def per_layer(e):
+            seq = list(e) if isinstance(e, (list, tuple)) else [e]
+            return [seq[min(i, len(seq) - 1)] for i in range(self.layers)]
+
+        pos_l, neg_l = per_layer(pos_eidx), per_layer(neg_eidx)
         x = {MOL: F.leaky_relu(self.proj_mol(x_mol), self.LEAK),
              PROT: F.leaky_relu(self.proj_prot(x_prot), self.LEAK)}
+        if self.conv_kind == "none":
+            # THE NO-MESSAGE-PASSING CONTROL. Two trainable projections, the same
+            # decoder, the same loss and the same training pairs -- and no graph at all.
+            # Nothing else in this class runs, so the row cannot differ from the others
+            # in some second way by accident. There are no layers here, hence no
+            # per-layer normalisation; the extractor forces that field off to match.
+            return self._readout(x)
         kp = {"edge_weight_dict": pos_ew} if (self.weighted and pos_ew is not None) else {}
         kn = {"edge_weight_dict": neg_ew} if (self.weighted and neg_ew is not None) else {}
-        x_p = self.conv1(x, pos1, **kp)
-        x_n = self.conv1_neg(x, neg1, **kn)
-        x = {k: F.leaky_relu(x_p[k] - x_n.get(k, torch.zeros_like(x_p[k])), self.LEAK) for k in x_p}
-        if self.normalize:
-            x = {k: F.normalize(v, dim=-1) for k, v in x.items()}
-        x_p = self.conv2(x, pos2, **kp)
-        x_n = self.conv2_neg(x, neg2, **kn)
-        z = {k: x_p[k] - x_n.get(k, torch.zeros_like(x_p[k])) for k in x_p}
-        if self.normalize:
-            # before the alpha gate, which does its own RMS scaling: normalising after
-            # it would undo the mixture it was set to produce
-            z = {k: F.normalize(v, dim=-1) for k, v in z.items()}
+        for li in range(1, self.layers + 1):
+            x_p = getattr(self, f"conv{li}")(x, pos_l[li - 1], **kp)
+            if self.signed:
+                x_n = getattr(self, f"conv{li}_neg")(x, neg_l[li - 1], **kn)
+                x = {k: x_p[k] - x_n.get(k, torch.zeros_like(x_p[k])) for k in x_p}
+            else:
+                x = x_p
+            if li < self.layers:
+                x = {k: F.leaky_relu(v, self.LEAK) for k, v in x.items()}
+            if self.normalize:
+                # before the alpha gate, which does its own RMS scaling: normalising
+                # after it would undo the mixture it was set to produce
+                x = {k: F.normalize(v, dim=-1) for k, v in x.items()}
+        return self._readout(x)
+
+    def _readout(self, z):
+        """The v8 hard gate on the receptor embedding, or the embeddings unchanged.
+
+        The receptor readout is a FIXED convex mix of a frozen structural branch and the
+        trained graph. alpha is set before training and used unchanged at inference --
+        it is a property of the model, not a post-hoc dial. Gradient cannot reach
+        s_prot, which is the whole point: 900 epochs of binding loss can no longer
+        erase ESM.
+        """
         if self.alpha is not None and self.s_prot is not None and PROT in z:
-            # The receptor readout is a FIXED convex mix of a frozen structural
-            # branch and the trained graph. alpha is set before training and used
-            # unchanged at inference -- it is a property of the model, not a
-            # post-hoc dial. Gradient cannot reach s_prot, which is the whole
-            # point: 900 epochs of binding loss can no longer erase ESM.
+            z = dict(z)
             z[PROT] = (1.0 - self.alpha) * self.s_prot + self.alpha * _rms(z[PROT])
         return z
 
@@ -943,15 +997,21 @@ def _run_models(ext, pairs: pd.DataFrame, train_idx, val_idx, test_idx, seed: in
     _fan = tuple(getattr(ext, "fanout", ()) or ())
     print(f"  {ext.name}: encoder {'sampled ' + '-'.join(map(str, _fan)) if _fan else 'full neighbourhood'}"
           f", {'L2-normalised per layer' if getattr(ext, 'normalize_layers', False) else 'un-normalised'}"
-          f", conv={getattr(ext, 'conv', 'sage')}, hidden={getattr(ext, 'hidden', '?')}"
+          f", conv={getattr(ext, 'conv', 'sage')}, layers={getattr(ext, 'layers', 2)}"
+          f", edges={getattr(ext, 'edges', 'signed')}"
+          f", hidden={getattr(ext, 'hidden', '?')}"
           f", epochs={getattr(ext, 'epochs', '?')}, bags={getattr(ext, 'n_models', 1)}",
           flush=True)
-    if n_pos == 0 or n_neg == 0:
+    _edges = getattr(ext, "edges", "signed")
+    if _edges == "signed" and (n_pos == 0 or n_neg == 0):
         raise ValueError(
             f"{ext.name}: signed message passing needs both edge signs, got "
             f"{n_pos} positive / {n_neg} negative. Check `edge_threshold` "
             f"(={getattr(ext, 'edge_threshold', 0.0)}) against the label scale.")
-    pos_eidx, neg_eidx = _edge_index_dict(pos, neg)
+    if _edges == "positive" and n_pos == 0:
+        raise ValueError(f"{ext.name}: edges='positive' leaves no edges at all "
+                         f"({n_neg} negative dropped, 0 positive kept).")
+    pos_eidx, neg_eidx = _edge_index_dict(pos, neg, _edges)
     pos_ew, neg_ew = _edge_weights(pos, neg)
 
     def model_job(m):
@@ -1122,6 +1182,19 @@ class GnnSignedExtractor:
     conv: str = "sage"
     # GAT only: heads on layer 1, concatenated back to `hidden`. Ignored otherwise.
     heads: int = GAT_HEADS
+    # WHICH EDGE SIGNS the encoder sees (orbind.gnn_extractor.EDGE_MODES).
+    #   "signed"   ours: the two signs go through separate stacks and are subtracted
+    #   "positive" the negative edges leave the message-passing graph entirely
+    #   "unsigned" every edge is kept, but all of them go through ONE stack, so the
+    #              sign stops being structural while the connectivity is unchanged
+    # The last two build the model WITHOUT a negative stack rather than with an idle
+    # one, so the parameter count moves with the ablation instead of flattering it.
+    edges: str = "signed"
+    # ENCODER DEPTH. Two is the design and not a hyperparameter: exactly two hops let a
+    # receptor reach other receptors through the odorants they share, which is the
+    # mechanism this project claims. `layers=1` is the ablation of that claim -- a
+    # receptor then sees odorants only. `fanout` must have one entry per layer.
+    layers: int = 2
     # DEFAULT CHANGED 23.09.2026: these two were opt-in and are now ON, because the
     # architecture ablation measured them and they won every paired comparison it
     # made -- 24 of 24 deltas positive across two operators, four panels and both
@@ -1149,13 +1222,27 @@ class GnnSignedExtractor:
         if self.criterion not in mol_selection.CRITERIA:
             raise ValueError(f"criterion must be one of {mol_selection.CRITERIA}, "
                              f"got {self.criterion!r}")
+        if self.edges not in EDGE_MODES:
+            raise ValueError(f"edges must be one of {EDGE_MODES}, got {self.edges!r}")
+        if int(self.layers) not in (1, 2):
+            raise ValueError(f"layers must be 1 or 2, got {self.layers!r}")
+        if self.edges != "signed" and self.edge_weight_mode != "none":
+            # the weights are built per sign; merging or dropping a sign would leave
+            # them attached to edges that are no longer there
+            raise ValueError(f"edges={self.edges!r} and edge_weight_mode="
+                             f"{self.edge_weight_mode!r} cannot be combined")
+        if self.conv == "none":
+            # no layers, so there is nothing to sample and nothing to normalise per
+            # layer. Forced here rather than ignored, so the config written beside the
+            # numbers says what actually ran.
+            self.fanout, self.normalize_layers = (), False
         if self.fanout:
             self.fanout = tuple(int(f) for f in self.fanout)
             if any(f <= 0 for f in self.fanout):
                 raise ValueError(f"fanout entries must be positive, got {self.fanout}")
-            if len(self.fanout) != 2:
-                raise ValueError(f"the encoder has two layers, so fanout needs two "
-                                 f"entries, got {self.fanout}")
+            if len(self.fanout) != int(self.layers):
+                raise ValueError(f"the encoder has {self.layers} layer(s), so fanout "
+                                 f"needs that many entries, got {self.fanout}")
             if self.edge_weight_mode != "none":
                 # the sampler drops edges but not their weights, so the two would
                 # silently disagree about which edge a weight belongs to
@@ -1204,7 +1291,9 @@ class GnnSignedExtractor:
                            pca_mol=self._pca_mol, pca_prot=self._pca_prot,
                            alpha=self.alpha, s_prot=self._s_prot,
                            conv=self.conv, heads=self.heads,
-                           normalize=self.normalize_layers)
+                           normalize=self.normalize_layers,
+                           layers=int(self.layers),
+                           signed=(self.edges == "signed"))
 
     def _hp(self, seed):
         return dict(lr=self.lr, weight_decay=self.weight_decay, clip_grad=self.clip_grad,

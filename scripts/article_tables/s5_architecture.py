@@ -46,7 +46,12 @@ ANCHOR = "boost_full"
 OURS = "sage:paper"
 
 LABEL = {"boost_full": "Boosting base (no graph)", "sage": "GraphSAGE",
-         "gat": "GAT", "graphconv": "GraphConv", "gin": "GIN"}
+         "gat": "GAT", "graphconv": "GraphConv", "gin": "GIN",
+         "none": "No message passing"}
+#: The encoder ablations, as they are spelled in a row name and as they are printed.
+#: They are NOT operators, so they are grouped apart and left out of the rank.
+ABLATION_NOTE = {"1layer": "one layer", "pos": "positive edges only",
+                 "unsigned": "unsigned edges"}
 #: `:paper` marks the regime this project now trains in -- neighbour sampling plus
 #: per-layer L2 normalisation, GraphSAGE's own. Since it is the only regime the table
 #: reports, it is NOT printed: a suffixed row is just that operator. An un-suffixed row
@@ -60,26 +65,60 @@ SHORT_REG = {"transductive": "trans", "inductive": "cold mol",
              "cold_receptor": "cold rec"}
 
 
+def split_arch(arch):
+    """`sage:paper:pos` -> ('sage', '', True, ['pos']). The row name is the record of
+    what was trained, so it is parsed rather than re-derived from the columns."""
+    parts = str(arch).split(":")
+    head, tail = parts[0], parts[1:]
+    paper = "paper" in tail
+    notes = [t for t in tail if t != "paper"]
+    base, _, width = head.partition("@")
+    return base, width, paper, notes
+
+
 def label(arch):
-    """`gat@512` -> `GAT, width 512`; `sage:paper` -> `GraphSAGE (ours), sampled +
-    normalised`; a bare operator keeps its pretty name."""
-    name = str(arch)
-    paper = name.endswith(PAPER_SUFFIX)
-    if paper:
-        name = name[: -len(PAPER_SUFFIX)]
-    base, _, width = name.partition("@")
+    """`gat@512` -> `GAT, width 512`; `sage:paper:pos` -> `GraphSAGE, positive edges
+    only`; a bare operator keeps its pretty name."""
+    base, width, paper, notes = split_arch(arch)
     out = LABEL.get(base, base)
     if width:
         out += f", width {width}"
-    if base == "boost_full" or paper:
+    for n in notes:
+        out += f", {ABLATION_NOTE.get(n, n)}"
+    if base in ("boost_full", "none") or paper:
         return out
     return f"{out} ({HISTORICAL_NOTE})"
 
 
+def is_operator(arch):
+    """True for the rows the `rank` column is a ranking OF: the message-passing
+    operators in the reported regime. The anchor has no graph, `none` has no operator,
+    and an encoder ablation is a variant of ours rather than a competitor -- ranking any
+    of them among the operators would answer a question nobody asked."""
+    base, _, _, notes = split_arch(arch)
+    return base not in (ANCHOR, "none") and not notes
+
+
+def row_group(arch):
+    """Which block a row belongs to: anchor, operators, encoder ablations, the control.
+
+    The blocks are the table's argument. The operator block answers "does the operator
+    matter"; the ablation block answers "does the signed two-hop design matter"; the
+    control answers "does message passing matter at all". One undivided list would
+    imply they are five answers to one question."""
+    base, _, _, notes = split_arch(arch)
+    if arch == ANCHOR:
+        return 0
+    if base == "none":
+        return 3
+    return 1 if not notes else 2
+
+
 def row_order(arch):
-    """Anchor first, ours second, then everything else alphabetically. The table is
-    read top-down as 'the base, us, the alternatives', which is its argument."""
-    return (0 if arch == ANCHOR else 1 if arch == OURS else 2, str(arch))
+    """Anchor first, ours second, then the other operators, then the encoder ablations,
+    then the no-message-passing control. Read top-down it is 'the base, us, the
+    alternatives, the parts of us, and no graph at all'."""
+    return (row_group(arch), 0 if arch == OURS else 1, str(arch))
 
 
 # ------------------------------------------------------------------ loading
@@ -97,9 +136,12 @@ def load(root, dataset, regime, mol_source):
 def reported_only(d):
     """Drop the historical-encoder rows, keep the anchor and the reported regime.
 
-    The anchor has no encoder at all, so it is kept by name rather than by suffix."""
+    The anchor has no encoder at all and `none` has no layers to sample or normalise,
+    so both are kept by name rather than by suffix. Every other row must carry
+    `:paper`, wherever in its name it sits."""
     arch = d["arch"].astype(str)
-    return d[arch.str.endswith(PAPER_SUFFIX) | arch.eq(ANCHOR)]
+    paper = arch.str.split(":").apply(lambda p: PAPER_SUFFIX[1:] in p[1:])
+    return d[paper | arch.eq(ANCHOR) | arch.str.split(":").str[0].eq("none")]
 
 
 def cell_table(df, dataset, combo, level=0.95, historical=False):
@@ -146,11 +188,17 @@ def combine(cells):
     wide, labels, ranks = {}, {}, {}
     for ds, reg, metric, t in cells:
         col = (ds, reg, metric)
-        order = t["value"].rank(ascending=metric in ag.LOWER_IS_BETTER, method="average")
+        # The rank is over the OPERATORS alone. It used to be taken over every row in
+        # the cell, anchor included, while the caption said the anchor was not ranked;
+        # the four operator numbers therefore move with this change.
+        ops = t[t["arch"].map(is_operator)]
+        order = ops["value"].rank(ascending=metric in ag.LOWER_IS_BETTER,
+                                  method="average")
         for i, r in t.iterrows():
             wide.setdefault(r["arch"], {})[col] = (r["value"], r["hw"])
             labels[r["arch"]] = r["label"]
-            ranks.setdefault(r["arch"], []).append(float(order.loc[i]))
+            if i in order.index:
+                ranks.setdefault(r["arch"], []).append(float(order.loc[i]))
     cols = [(ds, reg, m) for ds, reg, m, _ in cells]
     rows = sorted(wide, key=row_order)
     return rows, cols, wide, labels, ranks
@@ -206,7 +254,7 @@ def text(rows, cols, wide, labels, ranks):
     for n in rows:
         cells = "".join(f"{fmt(wide[n].get(c)) + ('*' if best[c] == n else ' '):>{cw}}"
                         for c in cols)
-        rank = "" if n == ANCHOR else f"{np.mean(ranks[n]):.1f}"
+        rank = f"{np.mean(ranks[n]):.1f}" if ranks.get(n) else ""
         out.append(f"{labels[n]:<{w}}{rank:>7}  {cells}")
 
     ties = [f"{SHORT_DS.get(ds, ds)}/{SHORT_REG.get(reg, reg)}"
@@ -237,8 +285,8 @@ def latex(rows, cols, wide, labels, ranks):
         for c in cols:
             v = fmt(wide[n].get(c)).replace("+/-", r"$\pm$")
             cells.append(rf"\textbf{{{v}}}" if best[c] == n else v)
-        body.append(f"{labels[n]} & {np.mean(ranks[n]):.1f} & "
-                    + " & ".join(cells) + r" \\")
+        rank = f"{np.mean(ranks[n]):.1f}" if ranks.get(n) else "--"
+        body.append(f"{labels[n]} & {rank} & " + " & ".join(cells) + r" \\")
     heads = " & ".join(rf"\textbf{{{tk.DATASET_LABEL.get(ds, ds)}}}" for ds, _, _ in cols)
     sub = " & ".join(rf"{reg.replace('_', ' ')} ({m})" for _, reg, m in cols)
     return "\n".join([

@@ -976,6 +976,37 @@ what `--k-mode` changes and why a failed cell is written down rather than droppe
 
 #### A5 — the architecture table (`tab:arch`)
 
+**The encoder ablations (25.09).** Four further rows, each requested on the command
+line, none of them in the default set. `:1layer` drops the second message-passing layer,
+which is the direct ablation of the two-hop path the method section claims: with one
+layer a receptor never reaches another receptor. `:pos` removes the negative edges from
+message passing; `:unsigned` keeps every edge but sends them all through one stack, so
+only the SIGN stops being structural. Those two belong together — alone, neither
+separates "fewer edges" from "no sign". And `none` is not an operator at all: two
+trainable projections, the same decoder, the same loss, the same pairs, no graph, which
+is the control that says how much of the refined receptor is message passing and how
+much is a projection of ESM3 trained under the binding loss.
+
+```bash
+# the four ablations. ~150 graph fits each (3 datasets x 2 regimes x 5 folds x 5 seeds),
+# resumable, and they do not touch the operator rows already on disk
+.venv/bin/python scripts/article_sweeps/s5_run_architecture.py \
+    --dataset m2or cc hc --regime transductive inductive \
+    --conv sage:paper:1layer sage:paper:pos sage:paper:unsigned none \
+    --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz' \
+    --max-parallel 8 --gpus 0 1 2 3
+```
+
+On the insect panels `:pos` removes about half the graph, because there a negative edge
+is a response below the z-scored threshold rather than a measured non-response; on M2OR
+it removes measured non-responses. The two panels answer different questions and are
+read apart.
+
+**The rank column changed meaning (25.09).** It was taken over every row in the cell,
+the boosting base included, while the caption said the base was not ranked. It is now a
+rank over the OPERATORS alone, so the four published rank numbers move; the anchor, the
+encoder ablations and the control print `--`.
+
 One row per message-passing operator, one column per (dataset, regime), each column that
 panel's metric of record — six numbers per row, which is the whole table. The boosting
 base is the anchor row, because "our graph against the base" is the comparison every

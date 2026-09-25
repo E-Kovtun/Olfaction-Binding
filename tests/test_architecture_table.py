@@ -98,10 +98,11 @@ def test_the_construction_is_not_a_command_line_knob(sweep):
 
 
 def test_every_operator_is_offered(sweep):
-    """Four operators as we run them, plus the two whose papers define a regime."""
+    """Every operator is a default row. `none` is in CONVS but is not an operator --
+    it is the no-message-passing control, and it is run on request, not by default."""
     from orbind.gnn_extractor import CONVS
     specs = sweep.parser().parse_args([]).conv
-    assert [s.split(":")[0] for s in specs] == list(CONVS)
+    assert [s.split(":")[0] for s in specs] == [c for c in CONVS if c != "none"]
     assert all(s.endswith(":paper") for s in specs), (
         "every default row trains in the regime the project reports; an un-suffixed "
         "spec is the historical encoder and does not belong in the table")
@@ -109,12 +110,32 @@ def test_every_operator_is_offered(sweep):
 
 
 def test_a_spec_is_parsed_and_a_bad_one_is_refused(sweep):
-    assert sweep.parse_spec("sage") == ("sage", False)
-    assert sweep.parse_spec("gat:paper") == ("gat", True)
+    plain = dict(paper=False, edges="signed", layers=2)
+    assert sweep.parse_spec("sage") == ("sage", plain)
+    assert sweep.parse_spec("gat:paper") == ("gat", dict(plain, paper=True))
+    assert sweep.parse_spec("sage:paper:pos") == (
+        "sage", dict(paper=True, edges="positive", layers=2))
+    assert sweep.parse_spec("sage:paper:1layer") == (
+        "sage", dict(paper=True, edges="signed", layers=1))
     with pytest.raises(SystemExit, match="unknown operator"):
         sweep.parse_spec("gcn")
-    with pytest.raises(SystemExit, match="only ':paper'"):
+    with pytest.raises(SystemExit, match="unknown suffix"):
         sweep.parse_spec("sage:sampled")
+
+
+def test_a_spec_cannot_ablate_twice_or_ablate_nothing(sweep):
+    """Two edge modes in one row is not a row, and `none` has no layers to thin."""
+    with pytest.raises(SystemExit, match="sets 'edges' twice"):
+        sweep.parse_spec("sage:pos:unsigned")
+    with pytest.raises(SystemExit, match="takes no suffix"):
+        sweep.parse_spec("none:paper")
+
+
+def test_the_ablation_specs_are_not_run_by_default(sweep):
+    """They answer a different question from 'which operator', they cost a run each,
+    and an old command must not quietly start training them."""
+    assert set(sweep.ABLATION_SPECS).isdisjoint(sweep.DEFAULT_SPECS)
+    assert "none" in sweep.ABLATION_SPECS
 
 
 def test_the_paper_rows_add_sampling_and_normalisation(sweep):
@@ -125,14 +146,26 @@ def test_the_paper_rows_add_sampling_and_normalisation(sweep):
 
 
 def test_a_paper_row_never_shares_a_name_with_its_plain_row(sweep):
-    assert sweep.arch_label("sage", 256, True) == "sage:paper"
-    assert sweep.arch_label("sage", 256, False) == "sage"
-    assert sweep.arch_label("gat", 512, True) == "gat@512:paper"
+    paper = sweep.parse_spec("sage:paper")[1]
+    plain = sweep.parse_spec("sage")[1]
+    assert sweep.arch_label("sage", 256, paper) == "sage:paper"
+    assert sweep.arch_label("sage", 256, plain) == "sage"
+    assert sweep.arch_label("gat", 512, sweep.parse_spec("gat:paper")[1]) \
+        == "gat@512:paper"
+
+
+def test_a_row_has_one_name_however_the_spec_was_spelled(sweep):
+    """The suffix order in a label is canonical, so `sage:pos:paper` and
+    `sage:paper:pos` are one cached row and not two."""
+    a = sweep.arch_label("sage", 256, sweep.parse_spec("sage:paper:pos")[1])
+    b = sweep.arch_label("sage", 256, sweep.parse_spec("sage:pos:paper")[1])
+    assert a == b == "sage:paper:pos"
 
 
 def test_the_width_is_in_the_row_name_only_when_it_is_not_the_reported_one(sweep):
-    assert sweep.arch_label("gat", 256) == "gat"
-    assert sweep.arch_label("gat", 512) == "gat@512"
+    plain = sweep.parse_spec("gat")[1]
+    assert sweep.arch_label("gat", 256, plain) == "gat"
+    assert sweep.arch_label("gat", 512, plain) == "gat@512"
 
 
 def test_the_resume_key_separates_widths_heads_and_regimes(sweep):
@@ -269,6 +302,40 @@ def test_the_text_block_names_the_columns_that_separate_nothing(reader, capsys):
 def test_the_width_row_is_labelled_as_a_width(reader):
     assert reader.label("gat@512") == "GAT, width 512 (full neighbourhood, un-normalised)"
     assert reader.label("sage") == "GraphSAGE (full neighbourhood, un-normalised)"
+
+
+def test_an_ablation_row_says_what_it_ablated(reader):
+    assert reader.label("sage:paper:pos") == "GraphSAGE, positive edges only"
+    assert reader.label("sage:paper:unsigned") == "GraphSAGE, unsigned edges"
+    assert reader.label("sage:paper:1layer") == "GraphSAGE, one layer"
+    assert reader.label("none") == "No message passing"
+
+
+def test_only_the_operators_are_ranked(reader):
+    """The rank column is a ranking OF the operators. The anchor has no graph, `none`
+    has no operator, and an encoder ablation is a variant of ours rather than a
+    competitor."""
+    assert reader.is_operator("sage:paper") and reader.is_operator("gin:paper")
+    assert not reader.is_operator("boost_full")
+    assert not reader.is_operator("none")
+    assert not reader.is_operator("sage:paper:pos")
+
+
+def test_the_blocks_read_as_the_argument(reader):
+    """Base, us, the alternatives, the parts of us, no graph at all."""
+    rows = ["none", "gin:paper", "sage:paper:pos", "boost_full", "sage:paper"]
+    assert sorted(rows, key=reader.row_order) == [
+        "boost_full", "sage:paper", "gin:paper", "sage:paper:pos", "none"]
+
+
+def test_the_control_survives_the_reported_regime_filter(reader):
+    """`none` carries no `:paper` because it has nothing to sample or normalise, and
+    dropping it as 'historical' would delete the control."""
+    import pandas as pd
+    d = pd.DataFrame({"arch": ["sage:paper", "sage", "none", "boost_full",
+                               "sage:paper:pos"]})
+    assert set(reader.reported_only(d)["arch"]) == {
+        "sage:paper", "none", "boost_full", "sage:paper:pos"}
 
 
 def test_the_reported_regime_is_not_announced_in_the_label(reader):

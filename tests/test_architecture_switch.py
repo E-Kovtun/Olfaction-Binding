@@ -34,7 +34,10 @@ def npz_pair(tmp_path):
 # ----------------------------------------------------------------- the list
 
 def test_the_operators_are_the_four_we_argue_about():
-    assert CONVS == ("sage", "gat", "graphconv", "gin")
+    """Four operators, and one entry that is not an operator at all: `none` is the
+    control in which no message passing happens, and it lives in the same list because
+    the sweep selects a row by this name."""
+    assert CONVS == ("sage", "gat", "graphconv", "gin", "none")
 
 
 def test_plain_gcn_is_not_among_them():
@@ -75,10 +78,15 @@ def test_heads_are_ignored_by_the_others(tmp_path):
 
 def test_weighted_edges_refuse_every_operator_but_sage():
     """`edge_weight_mode='magnitude'` lives in `_WSAGE`. Another operator would drop
-    the weights on the floor and report a weighted run that was not one."""
-    for kind in [c for c in CONVS if c != "sage"]:
+    the weights on the floor and report a weighted run that was not one.
+
+    `none` is excluded because it has no operator at all: it refuses earlier, and for
+    a different reason."""
+    for kind in [c for c in CONVS if c not in ("sage", "none")]:
         with pytest.raises(ValueError, match="implemented for conv='sage'"):
             _make_conv(kind, 16, 1, 4, 0.1, weighted=True)
+    with pytest.raises(ValueError, match="has no operator"):
+        _make_conv("none", 16, 1, 4, 0.1, weighted=True)
 
 
 # ----------------------------------------------------------------- the operators
@@ -201,15 +209,99 @@ def test_an_empty_edge_type_survives_sampling():
 
 
 def test_the_extractor_refuses_a_fanout_that_is_not_per_layer(tmp_path):
-    """The encoder has two layers; one number would silently mean 'both', and the
-    paper's own setting is two different ones."""
+    """One number would silently mean 'both', and the paper's own setting is two
+    different ones. At `layers=1` the same rule gives one entry, not two."""
     kw = npz_pair(tmp_path)
-    with pytest.raises(ValueError, match="two entries"):
+    with pytest.raises(ValueError, match="needs that many entries"):
         GnnSignedExtractor(**kw, fanout=(25,))
     with pytest.raises(ValueError, match="must be positive"):
         GnnSignedExtractor(**kw, fanout=(25, 0))
     ok = GnnSignedExtractor(**kw, fanout=(25, 10))
     assert ok.fanout == (25, 10)
+    with pytest.raises(ValueError, match="needs that many entries"):
+        GnnSignedExtractor(**kw, layers=1, fanout=(25, 10))
+    assert GnnSignedExtractor(**kw, layers=1, fanout=(25,)).fanout == (25,)
+
+
+# ----------------------------------------------------------------- the ablations
+
+def test_the_edge_modes_are_the_three_we_argue_about():
+    from orbind.gnn_extractor import EDGE_MODES
+    assert EDGE_MODES == ("signed", "positive", "unsigned")
+
+
+def test_the_extractor_refuses_a_nonsense_ablation(tmp_path):
+    kw = npz_pair(tmp_path)
+    with pytest.raises(ValueError, match="edges must be one of"):
+        GnnSignedExtractor(**kw, edges="negative")
+    with pytest.raises(ValueError, match="layers must be 1 or 2"):
+        GnnSignedExtractor(**kw, layers=3)
+    with pytest.raises(ValueError, match="cannot be combined"):
+        GnnSignedExtractor(**kw, edges="unsigned", edge_weight_mode="magnitude")
+
+
+def test_no_message_passing_carries_neither_sampling_nor_normalisation(tmp_path):
+    """There are no layers, so there is nothing to sample per layer and nothing to
+    normalise per layer. Forced at construction rather than ignored at run time, so the
+    config written beside the numbers says what actually ran."""
+    ext = GnnSignedExtractor(**npz_pair(tmp_path), conv="none",
+                             fanout=(25, 10), normalize_layers=True)
+    assert ext.fanout == () and ext.normalize_layers is False
+
+
+@pytest.mark.skipif(torch_geometric_is_stubbed(),
+                    reason="needs a real torch_geometric, not the import stub")
+def test_positive_and_unsigned_drop_the_negative_stack(tmp_path):
+    """The ablation moves the parameter count with it: an idle negative stack would
+    leave the comparison flattering the ablated rows."""
+    from orbind.gnn_extractor import _SignedSage
+    signed = _SignedSage(11, 13, 16, 0.0)
+    assert hasattr(signed, "conv1_neg") and hasattr(signed, "conv2_neg")
+    for mode in ("positive", "unsigned"):
+        m = _SignedSage(11, 13, 16, 0.0, signed=False)
+        assert not hasattr(m, "conv1_neg") and not hasattr(m, "conv2_neg"), mode
+
+
+@pytest.mark.skipif(torch_geometric_is_stubbed(),
+                    reason="needs a real torch_geometric, not the import stub")
+def test_one_layer_builds_one_layer(tmp_path):
+    from orbind.gnn_extractor import _SignedSage
+    m = _SignedSage(11, 13, 16, 0.0, layers=1)
+    assert hasattr(m, "conv1") and hasattr(m, "conv1_neg")
+    assert not hasattr(m, "conv2") and not hasattr(m, "conv2_neg")
+
+
+@pytest.mark.skipif(torch_geometric_is_stubbed(),
+                    reason="needs a real torch_geometric, not the import stub")
+def test_no_message_passing_builds_no_convolution_at_all():
+    from orbind.gnn_extractor import _SignedSage
+    m = _SignedSage(11, 13, 16, 0.0, conv="none")
+    assert not any(hasattr(m, f"conv{i}{s}") for i in (1, 2) for s in ("", "_neg"))
+    assert hasattr(m, "proj_mol") and hasattr(m, "proj_prot") and hasattr(m, "dec")
+
+
+@pytest.mark.skipif(torch_geometric_is_stubbed(),
+                    reason="needs a real torch_geometric, not the import stub")
+def test_every_ablation_still_encodes_to_the_same_width():
+    """The decoder sees `hidden` columns whatever was ablated; a row that changed the
+    width would be comparing widths."""
+    import torch
+    from orbind.gnn_extractor import (ETYPE, ETYPE_NEG, MOL, PROT, RTYPE,
+                                      RTYPE_NEG, _SignedSage)
+    hidden = 16
+    e = torch.tensor([[0, 1], [0, 1]])
+    pos = {ETYPE: e, RTYPE: e.flip(0)}
+    neg = {ETYPE_NEG: e, RTYPE_NEG: e.flip(0)}
+    x_mol, x_prot = torch.randn(3, 11), torch.randn(3, 13)
+    for kw, p, n in ((dict(), pos, neg),
+                     (dict(layers=1), pos, neg),
+                     (dict(signed=False), pos, {}),
+                     (dict(conv="none"), pos, {})):
+        m = _SignedSage(11, 13, hidden, 0.0, **kw).eval()
+        with torch.no_grad():
+            z = m.encode(x_mol, x_prot, p, n)
+        assert z[PROT].shape == (3, hidden), kw
+        assert z[MOL].shape == (3, hidden), kw
 
 
 def test_sampling_and_edge_weights_are_refused_together(tmp_path):

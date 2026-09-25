@@ -122,8 +122,10 @@ def test_the_fanout_accepts_commas_too():
 
 
 def test_a_one_layer_fanout_is_refused_by_the_extractor():
-    """The encoder has two layers; one number would silently mean 'both'."""
-    with pytest.raises(ValueError, match="two entries"):
+    """The encoder has two layers by default; one number would silently mean 'both'.
+    (A ONE-layer encoder is a deliberate ablation, set by `layers=1`, and then one
+    number is exactly right -- the rule is one entry per layer, not always two.)"""
+    with pytest.raises(ValueError, match="needs that many entries"):
         parse_source_arg("cls=gnn_signed::::::::::::::::25")
 
 

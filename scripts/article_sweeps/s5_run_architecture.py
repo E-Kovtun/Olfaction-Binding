@@ -35,10 +35,29 @@ MLP decoder at a fixed epoch budget. The full list is in `orbind/gnn_extractor.p
 under WHAT "GRAPHSAGE" MEANS HERE. This table compares operators inside one fixed
 algorithm and claims nothing about reproducing any of their papers.
 
-WIDTH IS FREE, DEPTH IS NOT. `--hidden` sweeps the width with no new code, and each
-width is its own row. Depth is NOT a knob: the encoder is two layers by construction,
-and making it variable is a refactor of the module rather than a flag. It is out of
-this sweep deliberately rather than by oversight.
+WIDTH IS FREE, AND SINCE 25.09.2026 SO ARE DEPTH AND THE EDGE SIGNS. `--hidden`
+sweeps the width, each width its own row. Three further suffixes ablate the ENCODER
+rather than the operator, and each is a row of its own:
+
+    :1layer     one message-passing layer instead of two. Two is not a hyperparameter
+                here -- it is exactly two hops that let a receptor reach other receptors
+                through the odorants they share -- so this row ablates the mechanism the
+                paper claims rather than tuning it.
+    :pos        the negative edges leave the message-passing graph. On M2OR a negative
+                edge is a measured non-response; on the insect panels it is a response
+                below the z-scored threshold, so roughly half the graph goes. The two
+                panels therefore answer different questions and are read apart.
+    :unsigned   every edge is kept but all of them go through ONE stack: the
+                connectivity is untouched and only the SIGN stops being structural.
+                Read `:pos` and `:unsigned` together -- alone, neither separates
+                "fewer edges" from "no sign".
+
+And one row that is not an operator at all:
+
+    none        no message passing. Two trainable projections, the same decoder, the
+                same loss, the same pairs, no graph. It is the control that says how
+                much of z_prot is message passing and how much is a projection of ESM3
+                trained under the binding loss. It is not ranked among the operators.
 
 WHAT COMES OUT. One CSV per (dataset, regime) under `--out`, one row per
 (operator, width, fold, seed, head, split), plus the boosting reference on the same
@@ -94,6 +113,15 @@ PAPER_SUFFIX = ":paper"
 #: historical encoder; they are simply not part of the table any more, because there is
 #: no longer a variant of ours to contrast with.
 DEFAULT_SPECS = ("sage:paper", "gat:paper", "graphconv:paper", "gin:paper")
+#: The encoder ablations (25.09.2026). Not in the default set: they are a separate
+#: question from "which operator", they cost a run each, and the operator rows must not
+#: silently change meaning when someone re-runs the old command.
+ABLATION_SPECS = ("sage:paper:1layer", "sage:paper:pos", "sage:paper:unsigned", "none")
+#: Suffixes a spec may carry, and what each sets. `paper` is the regime; the rest are
+#: the encoder ablations. Order in a label is canonical (this order), so one row has one
+#: name however the command spelled it.
+SUFFIXES = {"paper": ("paper", True), "pos": ("edges", "positive"),
+            "unsigned": ("edges", "unsigned"), "1layer": ("layers", 1)}
 
 #: The head the paper compares on: our refined receptor beside the raw molecule.
 DEFAULT_COMBOS = ("cls+mol",)
@@ -129,22 +157,45 @@ def repeats_for(sw, ds, regime, args):
 
 
 def parse_spec(spec):
-    """`sage` -> ('sage', False); `sage:paper` -> ('sage', True). Refused otherwise,
-    at parse time rather than three hours into a run."""
-    conv, sep, tail = str(spec).partition(":")
+    """`sage:paper:pos` -> ('sage', {paper: True, edges: 'positive', layers: 2}).
+
+    Refused at parse time rather than three hours into a run: an unknown suffix, a
+    suffix twice, two edge modes at once, or anything at all on `none`, which has no
+    layers to sample, normalise or thin.
+    """
+    parts = str(spec).split(":")
+    conv, tail = parts[0], parts[1:]
     if conv not in CONVS:
         raise SystemExit(f"unknown operator {conv!r} in {spec!r}; have {list(CONVS)}")
-    if sep and tail != "paper":
-        raise SystemExit(f"unknown suffix {tail!r} in {spec!r}; only ':paper' exists")
-    return conv, bool(sep)
+    if conv == "none" and tail:
+        raise SystemExit(f"{spec!r}: 'none' has no message passing, so it takes no "
+                         f"suffix -- there is nothing to sample, normalise or thin")
+    opts = {"paper": False, "edges": "signed", "layers": 2}
+    seen = set()
+    for t in tail:
+        if t not in SUFFIXES:
+            raise SystemExit(f"unknown suffix {t!r} in {spec!r}; "
+                             f"have {sorted(SUFFIXES)}")
+        key, val = SUFFIXES[t]
+        if key in seen:
+            raise SystemExit(f"{spec!r} sets {key!r} twice")
+        seen.add(key)
+        opts[key] = val
+    return conv, opts
 
 
-def arch_label(conv, hidden, paper=False):
-    """How a row is named. The width appears only when it is not the reported one, so
-    the default table reads as operators and not as widths; `:paper` always appears,
-    because two rows of one operator that differ in regime must never share a name."""
+def arch_label(conv, hidden, opts):
+    """How a row is named, canonically: operator, width if unusual, then the suffixes in
+    a fixed order. The width appears only when it is not the reported one, so the
+    default table reads as operators and not as widths; every other suffix always
+    appears, because two rows that differ in what they ablate must never share a name."""
     name = conv if int(hidden) == DEFAULT_HIDDEN[0] else f"{conv}@{int(hidden)}"
-    return name + PAPER_SUFFIX if paper else name
+    if opts.get("paper"):
+        name += PAPER_SUFFIX
+    for suf, (key, val) in SUFFIXES.items():
+        if key != "paper" and opts.get(key) == val:
+            name += f":{suf}"
+    return name
 
 
 # ------------------------------------------------------------------ one cell
@@ -155,6 +206,12 @@ def _base(ds, regime, args, P, **rest):
                 q=v["q"], criterion=v["criterion"], k_mode=v["k_mode"],
                 n_models=args.n_models, epochs=args.epochs,
                 n_receptors=len(P["order"]), status="ok", **rest)
+
+
+def _row_kind(conv, opts):
+    """The encoder columns written beside every row, so a CSV can be read without
+    re-parsing the label it was named by."""
+    return dict(edges=opts["edges"], layers=int(opts["layers"]))
 
 
 def boost_rows(ds, regime, fold, seed, sw, args, P):
@@ -174,6 +231,7 @@ def boost_rows(ds, regime, fold, seed, sw, args, P):
         rows.append(_base(ds, regime, args, P, conv="boost_full", hidden=np.nan,
                           arch="boost_full", heads=np.nan, paper=False,
                           fanout="", normalize_layers=False,
+                          edges="", layers=np.nan,
                           fold=int(fold), seed=int(seed), combo="prot+mol",
                           split=split, t_graph=0.0, t_head=t_head,
                           n_rows=len(P[f"y_{k}"]),
@@ -192,16 +250,21 @@ def graph_rows(ds, regime, fold, seed, spec, hidden, sw, args, P):
     task = sw.TASK[ds]
     pp, mp = sw.paths(ds, args)
     v = VARIANT[ds]
-    conv, paper = parse_spec(spec)
+    conv, opts = parse_spec(spec)
+    paper, layers = opts["paper"], int(opts["layers"])
     # Both arms are pinned explicitly. Since 23.09.2026 the extractor's DEFAULT is the
     # sampled + normalised regime, so leaving the plain rows to the default would make
     # every row of this table the same regime and the comparison would evaporate.
-    extra = (dict(fanout=tuple(args.fanout), normalize_layers=True) if paper else
-             dict(fanout=(), normalize_layers=False))
+    # `none` has no layers, so it carries neither the sampling nor the normalisation
+    # whatever the spec said; the recorded columns below say so rather than implying it.
+    sampled = paper and conv != "none"
+    extra = (dict(fanout=tuple(args.fanout)[:layers], normalize_layers=True) if sampled
+             else dict(fanout=(), normalize_layers=False))
     ext = GnnSignedExtractor(
         name="cls", protein_path=pp, molecule_path=mp,
         q=float(v["q"]), criterion=v["criterion"], k_mode=v["k_mode"],
         conv=conv, heads=args.heads, hidden=int(hidden),
+        edges=opts["edges"], layers=layers,
         task=task, n_models=args.n_models, epochs=args.epochs, emit="prot",
         # prot_mix=1.0 is written out rather than left implicit: the main sweep
         # always passes it (`--dial nodes --alphas 1.0`) and rho=1 short-circuits to the
@@ -223,10 +286,11 @@ def graph_rows(ds, regime, fold, seed, spec, hidden, sw, args, P):
             k = sw.SPLIT_SHORT[split]
             pred = predict_scores(est, sw._head_features(combo, Z[k], P, k), task)
             rows.append(_base(ds, regime, args, P, conv=conv, hidden=int(hidden),
-                              arch=arch_label(conv, hidden, paper),
+                              arch=arch_label(conv, hidden, opts),
                               heads=int(args.heads), paper=paper,
-                              fanout=("-".join(map(str, args.fanout)) if paper else ""),
-                              normalize_layers=paper,
+                              **_row_kind(conv, opts),
+                              fanout="-".join(map(str, extra["fanout"])),
+                              normalize_layers=extra["normalize_layers"],
                               fold=int(fold), seed=int(seed), combo=combo,
                               split=split, t_graph=t_graph, t_head=t_head,
                               n_rows=len(P[f"y_{k}"]),
@@ -242,12 +306,15 @@ def failed_rows(ds, regime, fold, seed, spec, hidden, sw, args, P, err):
     """
     task = sw.TASK[ds]
     cols = sw.TASK_METRICS[task]
-    conv, paper = parse_spec(spec)
+    conv, opts = parse_spec(spec)
+    paper = opts["paper"]
+    sampled = paper and conv != "none"
     return [_base(ds, regime, args, P, conv=conv, hidden=int(hidden),
-                  arch=arch_label(conv, hidden, paper), heads=int(args.heads),
-                  paper=paper,
-                  fanout=("-".join(map(str, args.fanout)) if paper else ""),
-                  normalize_layers=paper,
+                  arch=arch_label(conv, hidden, opts), heads=int(args.heads),
+                  paper=paper, **_row_kind(conv, opts),
+                  fanout=("-".join(map(str, tuple(args.fanout)[:int(opts["layers"])]))
+                          if sampled else ""),
+                  normalize_layers=sampled,
                   fold=int(fold), seed=int(seed), combo=combo, split="test",
                   t_graph=np.nan, t_head=np.nan, n_rows=len(P["y_te"]),
                   **{c: np.nan for c in cols})
@@ -444,7 +511,9 @@ def parser():
                     metavar="SPEC",
                     help=f"rows to train: an operator from {list(CONVS)}, optionally "
                          f"with ':paper' for neighbour sampling + per-layer L2 "
-                         f"normalisation. Default: {list(DEFAULT_SPECS)}")
+                         f"normalisation, and with ':1layer', ':pos' or ':unsigned' "
+                         f"for the encoder ablations. Default: {list(DEFAULT_SPECS)}. "
+                         f"The ablations: {list(ABLATION_SPECS)}")
     ap.add_argument("--fanout", type=int, nargs=2, default=list(PAPER["fanout"]),
                     metavar=("L1", "L2"),
                     help="the ':paper' rows' fan-out, layer 1 then layer 2. "

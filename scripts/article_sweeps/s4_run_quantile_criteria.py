@@ -244,6 +244,33 @@ def graph_rows(ds, regime, fold, seed, crit, q, sw, args, P):
     return rows
 
 
+#: What makes a row THIS run's. A resume that ignores these inherits another model's
+#: cells as "done"; a copy made across them states an identity that does not hold.
+PROVENANCE = ("gnn_regime", "n_models", "epochs", "mol_source", "k_mode")
+
+
+def provenance_of(args):
+    """The provenance this invocation writes."""
+    fan, norm = gnn_regime(args)
+    return dict(gnn_regime=regime_tag(fan, norm), n_models=args.n_models,
+                epochs=args.epochs, mol_source=args.mol_source, k_mode=args.k_mode)
+
+
+def same_provenance(row, prov):
+    """True if `row` was written by a run with this provenance.
+
+    A MISSING key is a mismatch, not a pass: rows from before a field existed are
+    exactly the ones that have to be kept out.
+    """
+    for k, v in prov.items():
+        got = row.get(k)
+        if got is None or (isinstance(got, float) and pd.isna(got)):
+            return False
+        if str(got) != str(v):
+            return False
+    return True
+
+
 def shared_criterion(criteria):
     """Which criterion TRAINS the q<=0 cell when nothing on disk covers it yet.
     Deterministic, so a resume of the same command trains in the same place."""
@@ -256,7 +283,7 @@ def is_shared(row):
     return v is not None and not pd.isna(v) and str(v) != ""
 
 
-def shared_copies(new_rows, criteria, done):
+def shared_copies(new_rows, criteria, done, prov=None):
     """The q<=0 cell, written out under every other criterion's name.
 
     Only q<=0 qualifies: that is the one quantile where the mask is the whole eligible
@@ -273,6 +300,8 @@ def shared_copies(new_rows, criteria, done):
         q = r.get("quantile")
         if pd.isna(q) or float(q) > 0 or is_shared(r):
             continue
+        if prov is not None and not same_provenance(r, prov):
+            continue        # another model's cell is not this run's to copy
         for c in criteria:
             if c == str(r.get("criterion")):
                 continue
@@ -380,8 +409,29 @@ def _worker(job_q, res_q, args, ds, regime):
 
 def sweep(ds, regime, sw, args, xgb_version):
     path = out_path(ds, regime, args)
+    prov = provenance_of(args)
     rows, done = load_done(path)
     if rows:
+        foreign = [r for r in rows if not same_provenance(r, prov)]
+        if foreign and not args.allow_mixed:
+            seen = {tuple(str(r.get(k)) for k in PROVENANCE) for r in foreign}
+            raise SystemExit(
+                f"\n{path.name} holds {len(foreign)} of {len(rows)} rows written by a "
+                f"DIFFERENT run:\n"
+                + "\n".join("    " + " | ".join(t) for t in sorted(seen))
+                + f"\n    this run is: " + " | ".join(str(prov[k]) for k in PROVENANCE)
+                + "\n\n  A resume keys a cell on (criterion, quantile, fold, seed, "
+                  "combo, split) and would\n  report those cells as done, so they would "
+                  "never be recomputed and the figure would\n  mix two models. Move the "
+                  "file aside, or drop the foreign rows:\n"
+                  "    python -c \"import pandas as pd; f='" + str(path) + "'; "
+                  "d=pd.read_csv(f); d.to_csv(f+'.bak_mixed', index=False); "
+                  "d[d.gnn_regime.astype(str)=='" + str(prov['gnn_regime']) + "']"
+                  ".to_csv(f, index=False)\"\n"
+                  "  --allow-mixed keeps them, and is only right when you know the two "
+                  "runs are the same model.")
+        if foreign:
+            print(f"  WARNING: {len(foreign)} rows from another run kept (--allow-mixed)")
         print(f"  resuming: {len(rows)} rows already in {path.name}")
 
     def save():
@@ -394,7 +444,7 @@ def sweep(ds, regime, sw, args, xgb_version):
     # A resume of an older run, or of this one, may hold the q<=0 cell without its
     # copies. Fill them before the jobs are built, so the loop below sees them as done.
     if rows:
-        back = shared_copies(rows, args.criteria, done)
+        back = shared_copies(rows, args.criteria, done, prov)
         for r in back:
             rows.append(r); done.add(cell_key(r))
         if back:
@@ -433,7 +483,7 @@ def sweep(ds, regime, sw, args, xgb_version):
 
     def record(new, was_heavy):
         added = 0
-        for r in list(new) + shared_copies(new, args.criteria, done):
+        for r in list(new) + shared_copies(new, args.criteria, done, prov):
             k = cell_key(r)
             if k in done:
                 continue
@@ -538,6 +588,11 @@ def parser():
                     help="skip the [prot||mol] reference rows")
     ap.add_argument("--no-train-scores", dest="score_train", action="store_false",
                     help="score val and test only")
+    ap.add_argument("--allow-mixed", action="store_true",
+                    help="resume into a file holding rows from a run with a different "
+                         "encoder regime, bagging, epoch budget, molecule source or "
+                         "k_mode. Off by default: those cells read as done and are "
+                         "never recomputed")
     ap.add_argument("--max-parallel", type=int, default=1)
     ap.add_argument("--gpus", type=int, nargs="+", default=None)
     ap.add_argument("--out", default="results/article_sweeps/quantile_criteria")

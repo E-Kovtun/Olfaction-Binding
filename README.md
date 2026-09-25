@@ -1002,10 +1002,12 @@ is a response below the z-scored threshold rather than a measured non-response; 
 it removes measured non-responses. The two panels answer different questions and are
 read apart.
 
-**The rank column changed meaning (25.09).** It was taken over every row in the cell,
-the boosting base included, while the caption said the base was not ranked. It is now a
-rank over the OPERATORS alone, so the four published rank numbers move; the anchor, the
-encoder ablations and the control print `--`.
+**The rank column (25.09).** It is taken over the operators and the boosting base,
+which is how the four published numbers were produced; the base's own rank is now
+printed rather than computed and hidden, which is what made the caption and the code
+disagree. The encoder ablations and the no-message-passing control are not ranked and
+print `--`: they are parts of our own row, and folding them in would move every
+operator's number each time another ablation is added.
 
 One row per message-passing operator, one column per (dataset, regime), each column that
 panel's metric of record — six numbers per row, which is the whole table. The boosting

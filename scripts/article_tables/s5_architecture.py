@@ -91,12 +91,26 @@ def label(arch):
 
 
 def is_operator(arch):
-    """True for the rows the `rank` column is a ranking OF: the message-passing
-    operators in the reported regime. The anchor has no graph, `none` has no operator,
-    and an encoder ablation is a variant of ours rather than a competitor -- ranking any
-    of them among the operators would answer a question nobody asked."""
+    """True for the message-passing operators in the reported regime.
+
+    Not the same question as `is_ranked`: `none` and the anchor are rows that predict
+    without an operator, and an encoder ablation is a variant of ours rather than a
+    fifth operator."""
     base, _, _, notes = split_arch(arch)
     return base not in (ANCHOR, "none") and not notes
+
+
+def is_ranked(arch):
+    """True for the rows the `rank` column ranks: the operators AND the boosting base.
+
+    The base belongs in it because "which of these would you rather have" is the
+    question the column answers, and the base is one of the answers -- an operator that
+    places above it and one that places below it are making different claims. The
+    encoder ablations stay out: they are parts of our own row, and folding them in would
+    move every operator's number each time another ablation is added.
+    """
+    base, _, _, notes = split_arch(arch)
+    return not notes and base != "none"
 
 
 def row_group(arch):
@@ -188,10 +202,9 @@ def combine(cells):
     wide, labels, ranks = {}, {}, {}
     for ds, reg, metric, t in cells:
         col = (ds, reg, metric)
-        # The rank is over the OPERATORS alone. It used to be taken over every row in
-        # the cell, anchor included, while the caption said the anchor was not ranked;
-        # the four operator numbers therefore move with this change.
-        ops = t[t["arch"].map(is_operator)]
+        # The rank is over the operators AND the boosting base -- see `is_ranked`.
+        # The encoder ablations are left out and print `--`.
+        ops = t[t["arch"].map(is_ranked)]
         order = ops["value"].rank(ascending=metric in ag.LOWER_IS_BETTER,
                                   method="average")
         for i, r in t.iterrows():
@@ -264,8 +277,8 @@ def text(rows, cols, wide, labels, ranks):
     out += ["", "* = best operator in column (the base is the anchor, not a "
             "competitor). mean +/- 95% CI over folds;",
             "    seeds averaged inside each fold first.",
-            "rank = mean place among the operators, averaged over columns "
-            "(smaller is better)."]
+            "rank = mean place among the operators AND the base, averaged over "
+            "columns (smaller is better); the encoder ablations are not ranked."]
     if ties:
         out += [f"ours overlaps the marked operator's interval in: {', '.join(ties)} "
                 f"-- those columns separate nothing."]
@@ -278,7 +291,9 @@ def latex(rows, cols, wide, labels, ranks):
     for n in rows:
         if n == ANCHOR:
             cells = [fmt(wide[n].get(c)).replace("+/-", r"$\pm$") for c in cols]
-            body.append(rf"\emph{{{labels[n]}}} & & " + " & ".join(cells) + r" \\")
+            rank = f"{np.mean(ranks[n]):.1f}" if ranks.get(n) else ""
+            body.append(rf"\emph{{{labels[n]}}} & \emph{{{rank}}} & "
+                        + " & ".join(cells) + r" \\")
             body.append(r"\addlinespace")
             continue
         cells = []
@@ -299,8 +314,10 @@ def latex(rows, cols, wide, labels, ranks):
         r"reports that panel's metric of record, 5 held-out splits, mean $\pm$ 95\\% "
         r"CI over splits, model seeds averaged inside each split first. "
         r"\textbf{Bold} = best operator in column; the boosting base is the anchor the "
-        r"graphs are read against and is not marked. \texttt{--} = not trained in that "
-        r"cell.}",
+        r"graphs are read against and is not marked, though it does take part in the "
+        r"rank --- an operator that places above it and one that places below it are "
+        r"making different claims. Rows that ablate the encoder rather than the "
+        r"operator are not ranked. \texttt{--} = not trained in that cell.}",
         r"\label{tab:arch}",
         r"\resizebox{\textwidth}{!}{%",
         r"\begin{tabular}{@{}lr" + "r" * len(cols) + r"@{}}", r"\toprule",

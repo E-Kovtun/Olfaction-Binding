@@ -57,7 +57,8 @@ def sign_of(metric):
 # ------------------------------------------------------------------ loading
 
 def load(root=DEFAULT_ROOT, dataset=None, regime=None, mol_source=None,
-         combo="cls+mol", split="test", seeds=None, drop_failed=True):
+         combo="cls+mol", split="test", seeds=None, drop_failed=True,
+         gnn_regime=None):
     """Every CSV under `root`, filtered and given a `series` label.
 
     `drop_failed` removes the NaN rows the sweep writes for a cell it could not
@@ -74,7 +75,7 @@ def load(root=DEFAULT_ROOT, dataset=None, regime=None, mol_source=None,
                          f"scripts/article_sweeps/s4_run_quantile_criteria.py first")
     df = pd.concat([pd.read_csv(f) for f in files], ignore_index=True)
     for col, want in (("dataset", dataset), ("regime", regime),
-                      ("mol_source", mol_source)):
+                      ("mol_source", mol_source), ("gnn_regime", gnn_regime)):
         if want is not None:
             df = df[df[col].isin([want] if isinstance(want, str) else list(want))]
     if split is not None and "split" in df.columns:
@@ -89,6 +90,28 @@ def load(root=DEFAULT_ROOT, dataset=None, regime=None, mol_source=None,
     df = df.assign(series=df.dataset + " / " + df.regime)
     df.attrs["files"] = [str(f) for f in files]
     return df.reset_index(drop=True)
+
+
+#: What the sweep stamps on every row to say WHICH MODEL wrote it. Two values of any of
+#: these in one frame means two runs, and a curve drawn across both is not a curve.
+PROVENANCE = ("gnn_regime", "n_models", "epochs", "mol_source", "k_mode")
+
+
+def provenance(df):
+    """One row per distinct (encoder regime, bagging, epochs, molecule source, k_mode).
+
+    More than one row here is a finding, not a formatting detail: a directory is
+    resumable, so an older exploratory run left in it is silently concatenated with the
+    reported one. `load(gnn_regime=...)` is the filter that separates them.
+    """
+    cols = [c for c in PROVENANCE if c in df.columns]
+    if not cols:
+        return pd.DataFrame()
+    out = (df.groupby(cols, dropna=False)
+             .agg(rows=("criterion", "size"), quantiles=("quantile", "nunique"),
+                  folds=("fold", "nunique"), seeds=("seed", "nunique"))
+             .reset_index())
+    return out.sort_values("rows", ascending=False).reset_index(drop=True)
 
 
 def graph_rows(df):

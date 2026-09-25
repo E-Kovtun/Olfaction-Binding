@@ -100,6 +100,17 @@ def is_operator(arch):
     return base not in (ANCHOR, "none") and not notes
 
 
+def in_ablation_block(arch):
+    """The second, closed set: our own row, its encoder ablations, and the control.
+
+    Our row is in it as the reference -- "one layer" is only meaningful beside the two
+    layers it removes one from -- but its PRINTED rank stays the operator one, because
+    that is the number the text quotes.
+    """
+    base, _, _, notes = split_arch(arch)
+    return arch == OURS or base == "none" or bool(notes)
+
+
 def is_ranked(arch):
     """True for the rows the `rank` column ranks: the operators AND the boosting base.
 
@@ -202,16 +213,25 @@ def combine(cells):
     wide, labels, ranks = {}, {}, {}
     for ds, reg, metric, t in cells:
         col = (ds, reg, metric)
-        # The rank is over the operators AND the boosting base -- see `is_ranked`.
-        # The encoder ablations are left out and print `--`.
-        ops = t[t["arch"].map(is_ranked)]
-        order = ops["value"].rank(ascending=metric in ag.LOWER_IS_BETTER,
-                                  method="average")
+        # TWO ranks, each over a closed set, because a rank is a mean place among a
+        # fixed field and a row added to the field moves every number in it. The
+        # operator set (operators + base) answers "which operator would you rather
+        # have"; the ablation set (ours + its ablations + the control) answers "which
+        # part of the design is load-bearing". A row belongs to exactly one printed
+        # rank: ours is ranked as an operator, because that is the number the text
+        # quotes, even though it takes part in the ablation ranking as its reference.
+        def _order(sub):
+            return sub["value"].rank(ascending=metric in ag.LOWER_IS_BETTER,
+                                     method="average")
+
+        op_order = _order(t[t["arch"].map(is_ranked)])
+        abl_order = _order(t[t["arch"].map(in_ablation_block)])
         for i, r in t.iterrows():
             wide.setdefault(r["arch"], {})[col] = (r["value"], r["hw"])
             labels[r["arch"]] = r["label"]
-            if i in order.index:
-                ranks.setdefault(r["arch"], []).append(float(order.loc[i]))
+            use = op_order if i in op_order.index else abl_order
+            if i in use.index:
+                ranks.setdefault(r["arch"], []).append(float(use.loc[i]))
     cols = [(ds, reg, m) for ds, reg, m, _ in cells]
     rows = sorted(wide, key=row_order)
     return rows, cols, wide, labels, ranks
@@ -277,8 +297,13 @@ def text(rows, cols, wide, labels, ranks):
     out += ["", "* = best operator in column (the base is the anchor, not a "
             "competitor). mean +/- 95% CI over folds;",
             "    seeds averaged inside each fold first.",
-            "rank = mean place among the operators AND the base, averaged over "
-            "columns (smaller is better); the encoder ablations are not ranked."]
+            "rank = mean place averaged over columns (smaller is better), taken "
+            "within a block:",
+            "    operators and the base in one field; our row, its encoder ablations "
+            "and the",
+            "    no-message-passing control in the other, where our row is the "
+            "reference and keeps",
+            "    its operator rank."]
     if ties:
         out += [f"ours overlaps the marked operator's interval in: {', '.join(ties)} "
                 f"-- those columns separate nothing."]
@@ -316,8 +341,11 @@ def latex(rows, cols, wide, labels, ranks):
         r"\textbf{Bold} = best operator in column; the boosting base is the anchor the "
         r"graphs are read against and is not marked, though it does take part in the "
         r"rank --- an operator that places above it and one that places below it are "
-        r"making different claims. Rows that ablate the encoder rather than the "
-        r"operator are not ranked. \texttt{--} = not trained in that cell.}",
+        r"making different claims. The rank is a mean place within a block: the "
+        r"operators and the base form one field, and our row together with its encoder "
+        r"ablations and the no-message-passing control form the other, so that adding "
+        r"an ablation cannot move an operator's number. Our row is ranked as an "
+        r"operator. \texttt{--} = not trained in that cell.}",
         r"\label{tab:arch}",
         r"\resizebox{\textwidth}{!}{%",
         r"\begin{tabular}{@{}lr" + "r" * len(cols) + r"@{}}", r"\toprule",

@@ -321,6 +321,16 @@ def test_the_base_is_ranked_and_the_ablations_are_not(reader):
     assert not reader.is_ranked("sage:paper:pos")
 
 
+def test_the_ablations_are_ranked_in_their_own_block(reader):
+    """Their own closed set: our row as the reference, its ablations, and the control.
+    Adding one therefore cannot move an operator's number -- which the text quotes."""
+    for a in ("sage:paper", "sage:paper:pos", "sage:paper:1layer",
+              "sage:paper:unsigned", "none"):
+        assert reader.in_ablation_block(a), a
+    for a in ("boost_full", "gat:paper", "gin:paper"):
+        assert not reader.in_ablation_block(a), a
+
+
 def test_only_the_operators_are_operators(reader):
     assert reader.is_operator("sage:paper") and reader.is_operator("gin:paper")
     assert not reader.is_operator("boost_full")

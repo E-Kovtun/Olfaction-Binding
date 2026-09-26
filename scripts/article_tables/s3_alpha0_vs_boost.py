@@ -29,10 +29,12 @@ absent the column reads `--` and the run prints the command that makes them.
 Writes to results/article_tables/alpha0/: alpha0_long.csv, alpha0.tex, and a printed
 text block.
 
-`--layout delta` (the default, and the paper's) prints the graph at alpha=0 once and then
-its PAIRED differences from the two boostings: the difference is taken inside each split
-and then averaged, with a Student-t interval over splits and a paired t-test, Holm-
-corrected over the two comparisons of a cell. The splits differ far more in difficulty
+`--layout delta` (the default, and the paper's) prints XGBoost-base once and then two
+PAIRED differences from it: the graph at alpha=0, and the one-hot boosting -- the two
+predictors that know nothing about the receptor beyond which one it is. Each difference
+is taken inside each split and then averaged, with a Student-t interval over splits and
+a paired t-test, Holm-corrected over the two differences of a row. The graph-vs-one-hot
+difference is kept in the CSV and the printed block, uncorrected, as context. The splits differ far more in difficulty
 than the rows differ from each other, and the unpaired intervals of `--layout abs` carry
 that shared variation into every comparison. Differences are oriented so that positive
 means the graph is AHEAD, error metrics included.
@@ -156,7 +158,10 @@ def build(a):
             wb, nb = wins(g, b, m)
             wo, no = wins(g, o, m)
             db, do = paired(g, b, m, a.level), paired(g, o, m, a.level)
-            adj = tk.holm({"boost": db["p"], "onehot": do["p"]})
+            ob = paired(o, b, m, a.level)
+            # the family is what the paper's table reports: both identity-only rows
+            # against XGBoost-base
+            adj = tk.holm({"boost": db["p"], "onehot_boost": ob["p"]})
             out.append(dict(
                 series=s, dataset=ds, regime=regime, metric=m,
                 **{f"{k}_{n}": v for n, d in
@@ -167,7 +172,8 @@ def build(a):
                 d_boost=db["mean"], hw_d_boost=db["hw"], p_boost=db["p"],
                 p_holm_boost=float(adj["boost"]),
                 d_onehot=do["mean"], hw_d_onehot=do["hw"], p_onehot=do["p"],
-                p_holm_onehot=float(adj["onehot"])))
+                d_onehot_boost=ob["mean"], hw_d_onehot_boost=ob["hw"],
+                p_onehot_boost=ob["p"], p_holm_onehot_boost=float(adj["onehot_boost"])))
     if missing:
         cells = ", ".join(f"{d}/{r}" for d, r in sorted(missing))
         datasets = " ".join(sorted({d for d, _ in missing}))
@@ -273,43 +279,49 @@ def dnum(m, hw, p_adj, alpha=0.05, tex=True):
 
 
 def text_delta(t):
-    lines = [f"{'dataset':<10} {'setting':<15} {'metric':<6} {'graph a=0':>14} "
-             f"{'d vs 1hot':>15} {'p_holm':>7} {'d vs ESM':>15} {'p_holm':>7}"]
+    lines = [f"{'dataset':<10} {'setting':<15} {'metric':<6} {'boost ESM':>14} "
+             f"{'graph-ESM':>15} {'p_holm':>7} {'1hot-ESM':>15} {'p_holm':>7} "
+             f"{'graph-1hot':>15} {'p_raw':>7}"]
     lines.append("-" * len(lines[0]))
     for _, r in paper_order(t).iterrows():
         lines.append(
             f"{PAPER_DATASET.get(r.dataset, r.dataset):<10} "
             f"{PAPER_REGIME.get(r.regime, r.regime):<15} {r.metric:<6} "
-            f"{num(r, GRAPH):>14} "
-            f"{dnum(r.d_onehot, r.hw_d_onehot, r.p_holm_onehot, tex=False):>15} "
-            f"{r.p_holm_onehot:>7.3f} "
+            f"{num(r, BOOST):>14} "
             f"{dnum(r.d_boost, r.hw_d_boost, r.p_holm_boost, tex=False):>15} "
-            f"{r.p_holm_boost:>7.3f}")
+            f"{r.p_holm_boost:>7.3f} "
+            f"{dnum(r.d_onehot_boost, r.hw_d_onehot_boost, r.p_holm_onehot_boost, tex=False):>15} "
+            f"{r.p_holm_onehot_boost:>7.3f} "
+            f"{dnum(r.d_onehot, r.hw_d_onehot, r.p_onehot, tex=False):>15} "
+            f"{r.p_onehot:>7.3f}")
     lines.append("")
-    lines.append("d = graph at alpha=0 minus the other row, inside each split, averaged "
-                 "over splits; positive = graph ahead. p: paired t over splits, Holm over "
-                 "the two comparisons of a row; * = p_holm < 0.05.")
+    lines.append("a-b = row a minus row b inside each split, averaged over splits; "
+                 "positive = a ahead. p: paired t over splits; the two differences from "
+                 "ESM are Holm-corrected together, graph-1hot is raw (context only); "
+                 "* = p < 0.05 on the column's own p.")
     return "\n".join(lines)
 
 
 def latex_delta(t, a):
     lvl = f"{a.level:.0%}".replace("%", r"\%")
     head = (r"\begin{table}[!ht]" "\n" r"\centering" "\n" r"\small" "\n"
-            r"\caption{OlfaGraph at $\alpha=0$ in the reduced form "
-            r"$[\mathbf{z}_{\mathrm{prot}}\|\mathbf{x}_{\mathrm{mol}}]$, and its "
-            r"difference from XGBoost over a one-hot receptor block and from "
-            r"XGBoost-base, $[\mathbf{x}_{\mathrm{prot}}\|\mathbf{x}_{\mathrm{mol}}]$. "
+            r"\caption{Two predictors that know each receptor only by its identity, "
+            r"compared with XGBoost-base, $[\mathbf{x}_{\mathrm{prot}}\|"
+            r"\mathbf{x}_{\mathrm{mol}}]$: OlfaGraph at $\alpha=0$ in the reduced form "
+            r"$[\mathbf{z}_{\mathrm{prot}}\|\mathbf{x}_{\mathrm{mol}}]$, and XGBoost "
+            r"with a one-hot receptor block in place of $\mathbf{x}_{\mathrm{prot}}$. "
             r"Differences are taken within each held-out split and averaged over the "
-            r"5 splits; positive values favor OlfaGraph. Mean $\pm$ " + lvl +
+            r"5 splits; positive values favor the identity-only predictor. "
+            r"Mean $\pm$ " + lvl +
             r" CI over splits. $^{*}$: paired $t$-test, Holm-corrected over the two "
             r"differences in a row, $p<0.05$.}" "\n"
             r"\label{tab:alpha0}" "\n"
             r"\resizebox{\textwidth}{!}{%" "\n"
             r"\begin{tabular}{@{}ll c cc@{}}" "\n" r"\toprule" "\n"
-            r"& & & \multicolumn{2}{c}{\textbf{Difference from}} \\" "\n"
+            r"& & & \multicolumn{2}{c}{\textbf{Difference from XGBoost-base}} \\" "\n"
             r"\cmidrule(lr){4-5}" "\n"
-            r"\textbf{Dataset} & \textbf{Setting} & OlfaGraph, $\alpha{=}0$ & "
-            r"XGBoost, one-hot & XGBoost-base \\" "\n" r"\midrule")
+            r"\textbf{Dataset} & \textbf{Setting} & XGBoost-base & "
+            r"OlfaGraph, $\alpha{=}0$ & XGBoost, one-hot \\" "\n" r"\midrule")
     body, last = [], None
     for _, r in paper_order(t).iterrows():
         first = r.dataset != last
@@ -319,9 +331,10 @@ def latex_delta(t, a):
         name = (f"{PAPER_DATASET.get(r.dataset, r.dataset)} "
                 f"({tk.METRIC_TEX.get(r.metric, r.metric)})") if first else ""
         body.append(f"{name} & {PAPER_REGIME.get(r.regime, r.regime)} & "
-                    f"{num(r, GRAPH).replace('+/-', chr(36) + chr(92) + 'pm' + chr(36))} & "
-                    f"{dnum(r.d_onehot, r.hw_d_onehot, r.p_holm_onehot)} & "
-                    f"{dnum(r.d_boost, r.hw_d_boost, r.p_holm_boost)} " + r"\\")
+                    f"{num(r, BOOST).replace('+/-', chr(36) + chr(92) + 'pm' + chr(36))} & "
+                    f"{dnum(r.d_boost, r.hw_d_boost, r.p_holm_boost)} & "
+                    f"{dnum(r.d_onehot_boost, r.hw_d_onehot_boost, r.p_holm_onehot_boost)} "
+                    + r"\\")
     return "\n".join([head] + body + [r"\bottomrule", r"\end{tabular}}",
                                       r"\end{table}"])
 

@@ -4,10 +4,10 @@ The readers that assemble the paper's tables. Every script here **reads** result
 on disk and writes LaTeX, a long CSV and a plain-text rendering under
 `results/article_tables/`. None trains a graph. The one exception, `s3_onehot_boost.py`,
 fits XGBoost heads and caches them, and is listed as producer P4 in
-[`README3.md`](../../README3.md).
+[`README.md`](../../README.md).
 
 The exact command for each paper table, and which producer output it needs, is in
-[`README3.md`](../../README3.md) §5. Run from the repo root with `.venv/bin/python`.
+[`README.md`](../../README.md) §5. Run from the repo root with `.venv/bin/python`.
 
 | script | paper artifact | reads |
 |---|---|---|

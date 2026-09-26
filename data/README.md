@@ -5,7 +5,7 @@
 `splits_indexes/lorax_m2or/`, `processed/full_full_split_indices.npz`, and
 `external/ofm/{CC,HC}/{rand_splits,our_inductive_splits}/`. Everything else (the
 benchmark release, the embeddings) is produced by the commands in
-[`README3.md`](../README3.md) §2. All code uses repository-relative paths.
+[`README.md`](../README.md) §2. All code uses repository-relative paths.
 
 ```text
 data/
@@ -126,7 +126,7 @@ is deliberately not renamed or merged into our conventions.
 ## Minimum set per experiment
 
 The paper's full list, with the commands that produce each file, is in
-[`README3.md`](../README3.md) §2. In short:
+[`README.md`](../README.md) §2. In short:
 
 | to run | you need |
 |---|---|

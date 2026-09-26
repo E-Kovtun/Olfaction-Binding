@@ -1,1169 +1,595 @@
-# orbind
+# OlfaGraph: reproducing the paper
 
-Receptor-side modelling of olfactory receptor–odorant binding.
+This document takes you from an empty checkout to every table and figure of the paper.
+It is organised as a two-stage pipeline:
 
-The question the code is built around is **what a protein representation has to
-carry** for a binding model to generalize. A plain gradient-boosted head over
-frozen embeddings (`ESM ‖ ChemBERTa → XGBoost`) is a very strong baseline that
-mostly reads *receptor identity*; this repository contains the experiments that
-measure that, the refinement that adds function-derived structure to the
-receptor vector (a signed bipartite receptor↔odorant graph), and the head-to-head
-against four published interaction models re-implemented on our splits.
+1. **Producers** train models and write *artifacts* — directories of per-split results.
+   They are slow (most of them want a GPU), resumable and never render anything.
+2. **Readers** turn artifacts into the paper's tables and figures. They fit nothing, so
+   they are cheap to re-run.
 
-Three datasets, one pipeline: **M2OR** (human ORs, binary), **Carey** (`cc`,
-mosquito *AgOr*, 50×110 continuous) and **Hallem–Carlson** (`hc`, fly, 24×110
-continuous).
+Every artifact in the paper is one reader applied to a fixed subset of the producers'
+output. Section 5 lists those subsets. Each producer below is given as the **one
+invocation** that yields exactly what the paper needs, even where the script accepts many
+more flags.
 
----
-
-## Layout
-
-```text
-orbind/       the library: datasets, splits, extractors, the ensembler
-scripts/      entry points (preprocessing, embeddings, training, analysis)
-notebooks/    display/analysis notebooks; the models they read come from scripts
-notes/        protocol decisions and the paper's storyline
-legacy/       every closed line — scripts, notebooks, notes, experiments
-data/         external datasets and embeddings (not versioned — see data/README.md)
-results/      run outputs: metrics, logs, checkpoints (not versioned)
-```
-
-Two rules make the tree readable:
-
-* **Nothing in `legacy/` feeds a paper table**, and nothing live imports from it.
-  Most of it is a negative result kept so nobody re-runs it. Archived *library*
-  modules are the one exception to the location: they sit in `orbind/legacy/`
-  because they must stay on the import path for archived consumers to run.
-* **Notebooks never train the models they display.** Every number in the paper
-  comes from a script writing to `results/`.
+| Paper artifact | Label | Reader | Needs producers |
+|---|---|---|---|
+| Main results (M2OR, Mosquito, Fly; seen and cold molecules) | `tab:main_results` | `m1_main_tables.py` | P1a, P2 |
+| Comparison of receptor representations | `tab:protein_representations` | `s2_protein_sources.py` | P3 |
+| Message-passing ablations and encoder comparison | `tab:graph_ablation` | `s5_architecture.py` | P5 |
+| App. A: interaction baselines with `cls` only | `tab:esm3t1` | `m1_main_tables.py` | P1a, P2 |
+| App. B.1: the α dial | `fig:dial` | `prediction_dial.ipynb` | P1a |
+| App. B.2: the identity-only end | `tab:alpha0` | `s3_alpha0_vs_boost.py` | P1a, P4 |
+| App. C: graph construction | `fig:construction` | `quantile_criteria.ipynb` | P6 |
+| App. D: molecular representation | `tab:mol` | `s6_molecule_ablation.py` | P1a, P1b, P2 |
 
 ---
 
-## Environments
+## 0. Vocabulary: paper names and code names
 
-Five, on purpose — the source dispatch in the trainer imports each method's deps
-lazily, so a ProSmith/LORAX run needs no PyG and the fragile torch↔PyG pin stays
-confined to the graph pipeline.
+The code predates some of the paper's terminology. Flags and CSV columns use the left-hand
+column below.
 
-| env | path | holds |
+| code | paper |
+|---|---|
+| `m2or` / `cc` / `hc` | M2OR / Mosquito (Carey et al.) / Fly (Hallem & Carlson) |
+| `transductive` | seen molecules |
+| `inductive` (M2OR: `inductive_molecule_v5`; insects: split family `our_inductive`) | cold molecules |
+| `boost_full`, "boosting base", `prot+mol` | XGBoost-base, $[\mathbf{x}_{\mathrm{prot}}\|\mathbf{x}_{\mathrm{mol}}]$ |
+| our `cls+mol` | OlfaGraph, reduced form $[\mathbf{z}_{\mathrm{prot}}\|\mathbf{x}_{\mathrm{mol}}]$ |
+| our `cls+prot+mol` | OlfaGraph, full form $[\mathbf{x}_{\mathrm{prot}}\|\mathbf{x}_{\mathrm{mol}}\|\mathbf{z}_{\mathrm{prot}}]$ |
+| a baseline's `cls` / `cls+prot+mol` | its interaction representation alone / with both original embeddings |
+| `--dial nodes`, `alpha` | the α dial of Appendix B (α=1: ESM3 input, α=0: receptor identity only) |
+| `greedy_pair_cover`, `q=0.99` | the odorant selection of Section 3.2 / Appendix C |
+
+Every model in the paper, OlfaGraph and the baselines alike, is read out by the same
+XGBoost head with fixed hyperparameters (400 trees, depth 6, learning rate 0.1, row and
+column subsampling 0.8), fitted on the training split only.
+
+---
+
+## 1. Environments
+
+Five virtual environments, because the baselines' dependencies conflict with each other.
+
+| env | holds | used for |
 |---|---|---|
-| project | `.venv` | graph + ensemble pipeline (torch, torch-geometric, xgboost, rdkit) — also Hladiš |
-| controls | `.venv-controls` | ProSmith / LORAX baselines, PyG-free, **no rdkit** |
-| embeddings | `.venv-embeddings` | run-once embedding generation (fair-esm, deepchem, rdkit) |
-| molor | `.venv-molor` | MolOR only (dgl 2.4 + dgllife — install `dgl` **before** `dgllife`) |
-| esm | `.venv-esm` | ESM3 / ESM-C embeddings only (EvolutionaryScale `esm` SDK) |
+| `.venv` | torch, torch-geometric, xgboost, rdkit, dgl + dgllife (the `gin` extra) | OlfaGraph, XGBoost-base, Hladiš, every fitter and reader; ChemBERTa import, ESM-1b import, GIN and ECFP embeddings |
+| `.venv-controls` | torch, transformers, peft, xgboost (no PyG, no rdkit) | LORAX, ProSmith |
+| `.venv-molor` | torch 2.4, dgl 2.4 + dgllife, rdkit, xgboost | MolOR |
+| `.venv-embeddings` | torch, transformers, sentencepiece | ProtT5 embeddings |
+| `.venv-esm` | EvolutionaryScale `esm` SDK | ESM3 embeddings |
 
 ```bash
 uv python install 3.11
-uv sync --frozen                 # the project env (.venv)
-bash scripts/setup_envs.sh       # controls + embeddings
+uv sync --frozen --extra gin     # .venv
+bash scripts/setup_envs.sh       # the other four
 ```
 
-`.venv-esm` is separate because the SDK's package is also named `esm` and clashes
-with fair-esm. Its install lines are in the docstring of
-`scripts/embedding_generation/proteins/embed_proteins_plm.py`; add `httpx` by hand
-(the SDK imports it without declaring it), and expect it to pull its own torch
-(2.14+cu130 on the server — it works on the A100s there).
+`.venv-esm` is separate because the SDK's package is also called `esm` and clashes with
+fair-esm. ESM3's weights download from HuggingFace on first use; if that answers 401,
+`export HF_TOKEN=<read token>` and rerun.
 
-**Every env that fits a boosting head must hold `xgboost>=2.0,<3.0`** — the same
-head is what all reported numbers share, and 3.x also aborts on some of the
-server's GPUs (see [`orbind/docs/gotchas.md`](orbind/docs/gotchas.md)). A run now
-refuses to start on the wrong major. `.venv-molor` is built by hand, so pin it
-there explicitly:
+**Every environment that fits an XGBoost head holds `xgboost>=2.0,<3.0`.** The same head
+is what all reported numbers share, and the producers refuse to start on another major.
+`setup_envs.sh` pins it everywhere.
 
-```bash
-uv pip install --python .venv-molor/bin/python "xgboost>=2.0,<3.0"
-uv pip install --python .venv-controls/bin/python "xgboost>=2.0,<3.0"
-```
-
-Scripts add the repo root to `sys.path` themselves, so `orbind` imports without
-being installed — call an env's interpreter directly:
-`.venv-controls/bin/python scripts/modeling/train/train_ensemble_boost.py ...`.
-
-**Running a method in the wrong env is the failure mode to watch for.** It does
-not always crash: it can silently fall back to an existing checkpoint. A MolOR
-"training run" that finished in 5 s was exactly this.
+Scripts put the repository root on `sys.path` themselves. Run every command from the
+repository root and call the interpreter of the environment named in it. A method run in
+the wrong environment does not always crash: it can silently load a stale checkpoint
+instead of training.
 
 ---
 
-## Data
+## 2. Data
 
-`data/` is not versioned. **[`data/README.md`](data/README.md)** is the manifest:
-what each file is, which script produces it, and which experiment needs it.
+[`data/README.md`](data/README.md) is the manifest of `data/`. The splits are versioned
+with the repository; everything else (the benchmark release and the embeddings) is
+produced by the commands below.
 
----
+### 2.1 What is in the repository
 
-## The pipeline: one entry point
+The held-out splits every number stands on:
 
-Every table in the paper comes from
-[`scripts/modeling/train/train_ensemble_boost.py`](scripts/modeling/train/train_ensemble_boost.py).
-It fits one boosting head per *combination of sources* and writes a timestamped
-run folder under `results/ensemble_logs/`.
-
-**Sources.** Each `--source name=type:...` registers one embedding extractor.
-Entity-level ones (`esm`, `gin`) are static npz lookups; the rest train their own
-model per fold and emit a pair-level `cls` vector:
-
-| type | what it is |
+| path | what |
 |---|---|
-| `esm`, `gin` | frozen protein / molecule embeddings from an npz |
-| `gnn_signed` | **ours** — signed bipartite receptor↔odorant graph, refines the receptor vector |
-| `lorax` | LoRA-ChemBERTa + cross-attention over frozen per-residue ESM-1b |
-| `prosmith` | ProSmith/MPP transformer over per-residue protein + pooled molecule |
-| `molor` | dgllife GCN cross-attending frozen per-residue ESM-1b |
-| `hladis` | Receptor2Odorant (ICLR 2023): MPNN-attention, receptor broadcast onto every atom |
+| `data/splits_indexes/lorax_m2or/rand_split_{1..5}/{train,val,test}_df.csv` | M2OR: LORAX's five folds of its 46,563-pair pool (seen molecules). Every fold holds the same rows, so the pool itself is reconstructed from these files |
+| `data/processed/full_full_split_indices.npz` | M2OR: the positions of those folds in the pool, and five molecule-disjoint splits, seeds 42–46 (cold molecules) |
+| `data/external/ofm/{CC,HC}/rand_splits/` | Mosquito and Fly: the released five folds (seen molecules) |
+| `data/external/ofm/{CC,HC}/our_inductive_splits/` | Mosquito and Fly: our five molecule-disjoint folds (cold molecules) |
 
-**Combos.** `--combos "1 2 12"` is a digit-string mini-language: each digit is the
-**1-based position of a `--source` flag on that command line**. With
-`--source cls=... --source prot=... --source mol=...`, `1` = cls alone, `23` =
-prot+mol (the boosting baseline), `123` = cls+prot+mol. One combo = one boosting
-head over the concatenation of its sources' features.
+They can be rebuilt with `scripts/preprocessing/02_build_full_full_split_indices.py` and
+`scripts/preprocessing/03_build_ofm_our_inductive_splits.py`; both are deterministic.
 
-> Adding or reordering a `--source` flag silently changes what every digit means.
-> `metrics.csv` records combos by *name*, so compare names, never digits.
+### 2.2 Download
 
-**What we report.** One combo, one head, fixed hyperparameters. The machine can
-also weight several combos into an ensemble and tune each head by hyperparameter
-search; both are implemented, and both are deliberately switched off in everything
-reported — see [`orbind/docs/ensembler.md`](orbind/docs/ensembler.md) for the whole
-mechanism and the reasoning.
+All three benchmarks are the versions released with LORAX, in the olfactory
+foundation-models data release on Zenodo (<https://zenodo.org/records/17228740>).
+Download its archive from that page and unpack it anywhere. It holds two folders:
 
-**Regimes and splits.**
+* `data/`, with one folder per dataset (`CC`, `HC` and M2OR's), each with its response
+  table, its splits and the authors' precomputed features under
+  `embeddings/featurized_mols/` and `embeddings/featurized_proteins/`;
+* `BindingDB/`, whose `saved_model/` holds the BindingDB-pretrained ProSmith checkpoint
+  the ProSmith paper uses and we initialise ProSmith from.
 
-| `--regime` | splits | flag |
-|---|---|---|
-| `curated_full` | stratified / group_molecule / group_receptor over a pairs csv | `--split`, `--seeds` |
-| `full_full` | M2OR on LORAX's own pool: `transductive`, `inductive_molecule`, `inductive_molecule_v5` | `--full-full-mode`, `--repeats` |
-| `ofm` | Carey / Hallem: `rand`, `cdhit`, `scaf`, `our_inductive` | `--dataset`, `--split-family`, `--repeats` |
+Then:
 
-`inductive_molecule_v5` is the cold-molecule split every M2OR baseline is compared
-on. On the insect datasets the cold-molecule split of record is **`our_inductive`**,
-ours, not upstream's `scaf` — see [Split validity](#split-validity) below.
+1. Copy the dataset folders from `data/` into `data/external/ofm/`, without overwriting
+   anything already there: the splits of `CC` and `HC` are versioned in this repository
+   and must stay as they are.
+2. Copy `pretraining_IC50_6gpus_bs144_1.5e-05_layers6.txt.pkl` from `BindingDB/saved_model/`
+   into `data/external/ofm/saved_model/`.
 
-**Task.** `--task {classification,regression}`; `--regime ofm` defaults to
-regression, which swaps the head to `XGBRegressor` and the metrics to
-R²/RMSE/MAE/Pearson/Spearman.
+The layout the scripts expect afterwards:
+
+```text
+data/external/ofm/
+  CC/  HC/        raw/, rand_splits/, our_inductive_splits/, embeddings/featurized_{mols,proteins}/
+  M2OR/ or M2OR_full/   embeddings/featurized_{mols,proteins}/
+  saved_model/    pretraining_IC50_6gpus_bs144_1.5e-05_layers6.txt.pkl
+```
+
+### 2.3 Molecule tables and embeddings
+
+Every embedding is a flat `.npz` of `{key: vector}`. Proteins are keyed by amino-acid
+sequence, molecules by InChIKey. No producer computes an embedding during a run.
+
+| file (under `data/embeddings/`) | what | produced by | env | needed by |
+|---|---|---|---|---|
+| `proteins/esm3_{m2or,cc,hc}.npz` | ESM3 (`esm3-sm-open-v1`), mean over residues, 1536-d | `embed_proteins_plm.py --model esm3 --per-residue` | `.venv-esm` | everything |
+| `proteins/esm3_per_residue_{m2or,cc,hc}.npz` | ESM3 per residue | the same command | `.venv-esm` | P2 (LORAX, ProSmith, MolOR) |
+| `proteins/prott5_{m2or,cc,hc}.npz` | ProtT5, mean | `embed_proteins_plm.py --model prott5` | `.venv-embeddings` | P3 |
+| `proteins/esm1b_650m_mean_{full_full,cc,hc}.npz` | ESM-1b, mean, as released | `06_import_ofm_esm1b.py` | `.venv` | P3 |
+| `molecules/chemberta_77m_{m2or,cc,hc}.npz` | ChemBERTa-77M-MTR, as released | `07_prepare_ofm_molecules.py` | `.venv` | everything |
+| `molecules/gin_supervised_contextpred_all_m2or.npz`, `…_{cc,hc}.npz` | pretrained GIN (Hu et al.), 300-d | `embed_molecules_gin.py` | `.venv` | P1b, P2 (Hladiš) |
+| `molecules/ecfp_{m2or,cc,hc}.npz` | ECFP4, 2048 bits | `embed_molecules_ecfp.py` | `.venv` | P1b, P2 (Hladiš) |
+
+```bash
+# molecule tables (SMILES -> InChIKey) and the released ChemBERTa vectors, per dataset.
+# M2OR's molecules are read from the LORAX pool itself (596), the insects' from their
+# response tables. An existing npz is replaced only if the new vectors are identical.
+for DS in m2or cc hc; do
+  .venv/bin/python scripts/embedding_generation/molecules/07_prepare_ofm_molecules.py --tag ${DS}
+done
+
+# ESM3: mean and per-residue in one pass (the mean is derived from the per-residue file)
+.venv-esm/bin/python scripts/embedding_generation/proteins/embed_proteins_plm.py \
+    --model esm3 --dataset all --per-residue
+
+# ProtT5
+.venv-embeddings/bin/python scripts/embedding_generation/proteins/embed_proteins_plm.py \
+    --model prott5 --dataset all
+
+# ESM-1b, imported from the release rather than recomputed
+.venv/bin/python scripts/embedding_generation/proteins/06_import_ofm_esm1b.py \
+    --prots-pt data/external/ofm/M2OR_full/embeddings/featurized_proteins/prots.pt
+for DS in cc hc; do
+  UP=$(echo ${DS} | tr a-z A-Z)
+  .venv/bin/python scripts/embedding_generation/proteins/06_import_ofm_esm1b.py \
+      --prots-pt data/external/ofm/${UP}/embeddings/featurized_proteins/prots.pt \
+      --tag ${DS} --pool none --compare-mean ""
+done
+
+# ECFP
+for DS in m2or cc hc; do
+  .venv/bin/python scripts/embedding_generation/molecules/embed_molecules_ecfp.py --dataset ${DS}
+done
+
+# GIN. M2OR's file is computed on the 770 molecules of the M2OR export listed in
+# molecule_smiles_all_m2or.csv (versioned); it covers 595 of the pool's 596, and the
+# pairs of the missing one are dropped in every M2OR run on GIN.
+.venv/bin/python scripts/embedding_generation/molecules/embed_molecules_gin.py \
+    --molecules data/processed/molecules/molecule_smiles_all_m2or.csv \
+    --out data/embeddings/molecules/gin_supervised_contextpred_all_m2or.npz
+for DS in cc hc; do
+  .venv/bin/python scripts/embedding_generation/molecules/embed_molecules_gin.py \
+      --molecules data/processed/molecules/molecule_smiles_${DS}.csv \
+      --out data/embeddings/molecules/gin_supervised_contextpred_${DS}.npz
+done
+```
+
+ESM3 and ChemBERTa are the embeddings of record throughout. ProtT5 and ESM-1b appear only
+in the receptor-representation table, GIN and ECFP only in Appendix D.
 
 ---
 
-## Reproducing the paper
+## 3. Stage 1: producers
 
-All runs go to `results/ensemble_logs/<pool>/<run>/metrics.csv`, one row per
-(fold, combo) plus a `naive[train-mean]` row. Pool names below are the ones the
-recorded results use.
+| # | producer | writes | feeds | cost |
+|---|---|---|---|---|
+| P1a | `run_alpha_gate_sweep.py`, ChemBERTa, the whole α dial | `results/graph/olfagraph/` | main table, App. A, B, D | 11 α × 6 cells × 5 splits × 5 seeds of graph training |
+| P1b | the same, GIN and ECFP, α=1 only | `results/graph/olfagraph/` | App. D | 2 × 6 × 5 × 5 graphs |
+| P2 | `train_ensemble_boost.py`, the four interaction baselines | `results/baselines/<cell>/<run>/` | main table, App. A, D | 4 methods × 6 cells × 5 splits, plus Hladiš on GIN/ECFP |
+| P3 | `prot_floor_sweep.py` | `results/tables/` | receptor-representation table | descriptors are minutes, the three graph rows are 3 × 6 × 5 × 5 graphs |
+| P4 | `s3_onehot_boost.py` | `results/article_tables/onehot_boost/` | App. B.2 | XGBoost only, minutes per split on M2OR |
+| P5 | `s5_run_architecture.py` | `results/article_sweeps/architecture/` | architecture table | 8 rows × 6 cells × 5 splits × 5 seeds |
+| P6 | `s4_run_quantile_criteria.py` | `results/article_sweeps/quantile_criteria/` | App. C | 41 grid cells × 2 settings × 5 splits × 5 seeds = 2,050 graphs, M2OR only |
 
-Shared paths (M2OR):
+P1 and P2 are the backbone. P3–P6 each feed a single artifact and can run in parallel
+with them. Every producer is **resumable at cell granularity**: re-running the same
+command continues it and skips what is already on disk.
 
-```bash
-PROT=data/embeddings/proteins/esm1b_650m_mean.npz
-PRES=data/embeddings/proteins/esm1b_650m_per_residue_full_full.npz
-MOL=data/embeddings/molecules/chemberta_77m_m2or.npz
-```
+Two rules hold for every root:
 
-### T1 / T1b — competitors head-to-head on M2OR
+* **A root is one configuration.** The resume key does not include every flag, so topping
+  up a root with different flags silently mixes two models under one name. If you change
+  a flag, change the output directory with it.
+* **One receptor embedding per pair of roots.** A reader takes OlfaGraph from the sweep
+  root and the baselines from the baseline root, and cannot tell if they were trained on
+  different protein embeddings.
 
-Every method as a `cls` source, scored both alone (T1) and concatenated with the
-raw protein and molecule embeddings (T1b), against the boosting base.
-Pools: `m2or-{transductive,inductive}-chemberta-fixed`.
+### P1: OlfaGraph and XGBoost-base
 
-```bash
-.venv-controls/bin/python scripts/modeling/train/train_ensemble_boost.py \
-    --regime full_full --full-full-mode inductive_molecule_v5 \
-    --run-name inductive_lorax_chemberta \
-    --source cls=lorax \
-    --source prot=esm:$PROT:esm1b_t33_650M_UR50S \
-    --source mol=gin:$MOL:chemberta_77m \
-    --combos "1 123" --on-missing drop --max-parallel 1 --repeats 42 43 44 45 46
-```
-
-Swap `cls=lorax` for `cls=prosmith::::data/external/ofm/saved_model/pretraining_IC50_6gpus_bs144_1.5e-05_layers6.txt.pkl`,
-`cls=hladis` (in the project `.venv` — it needs rdkit, which `.venv-controls` does
-not have), or (in `.venv-molor`) `cls=molor`. Our graph runs in the project env:
+One script produces both OlfaGraph and XGBoost-base, on the same splits and with the same
+seeds, so every OlfaGraph row is paired with its reference.
 
 ```bash
-.venv/bin/python scripts/modeling/train/train_ensemble_boost.py \
-    --regime full_full --full-full-mode inductive_molecule_v5 \
-    --run-name inductive_gnn99signed_chemberta \
-    --source cls=gnn_signed:$PROT:$MOL \
-    --source prot=esm:$PROT:esm1b_t33_650M_UR50S \
-    --source mol=gin:$MOL:chemberta_77m \
-    --combos "13 123" --on-missing drop --repeats 42 43 44 45 46
-```
-
-`gnn_signed` defaults are the headline configuration: `q=0.99`,
-`criterion=greedy_pair_cover`, `emit=prot`, `n_models=1`. The graph's headline row
-is `cls+mol` (`13`) — it deliberately excludes raw ESM. Replace
-`--full-full-mode inductive_molecule_v5` with `transductive` and `--repeats 1 2 3 4 5`
-for the other regime.
-
-### T2 — molecule-source robustness (M2OR)
-
-The same graph-vs-base comparison with `mol` set to each of ChemBERTa, GIN and
-ECFP, both regimes: six pools `m2or-{inductive,transductive}-{chemberta,gin,ecfp}-fixed`.
-Only the `mol=` path changes (`gin_supervised_contextpred_all_m2or.npz`,
-`ecfp_m2or.npz`), and `gnn_signed`'s own molecule field with it.
-
-### T4 / T5 — transfer to insects (Carey, Hallem–Carlson)
-
-Pools `{cc,hc}-{rand,ourind}-molcross-fixed`; `rand` is the transductive column,
-`our_inductive` the cold-molecule one. Regression throughout.
-
-```bash
-.venv/bin/python scripts/modeling/train/train_ensemble_boost.py \
-    --regime ofm --dataset cc --split-family our_inductive \
-    --run-name cc_ourind_gnn_chemberta \
-    --source cls=gnn_signed:data/embeddings/proteins/esm1b_650m_mean_cc.npz:data/embeddings/molecules/chemberta_77m_cc.npz \
-    --source prot=esm:data/embeddings/proteins/esm1b_650m_mean_cc.npz:esm1b_t33_650M_UR50S \
-    --source mol=gin:data/embeddings/molecules/chemberta_77m_cc.npz:chemberta_77m \
-    --combos "13 23" --on-missing drop --repeats 1 2 3 4 5
-```
-
-A `_pm` run-name suffix marks the variant that also adds raw ESM (`cls+prot+mol`);
-it is null everywhere on these datasets. Only the `*-molcross-fixed` complexes feed
-the paper tables — the other cc/hc complexes on disk are older exploratory grids.
-
-**The external `cls` baselines must be given the insect protein file explicitly.**
-Bare `cls=lorax` (likewise prosmith, molor, hladis) loads its M2OR default, which
-holds none of the insect receptors: coverage drops every row and the run dies with
-`num_samples=0`. The specs of record, with `{ds}` = `cc` or `hc`:
-
-```
-cls=lorax:data/embeddings/proteins/esm1b_650m_per_residue_{ds}.npz
-cls=prosmith:data/embeddings/proteins/esm1b_650m_per_residue_{ds}.npz:data/embeddings/molecules/chemberta_77m_{ds}.npz::data/external/ofm/saved_model/pretraining_IC50_6gpus_bs144_1.5e-05_layers6.txt.pkl
-cls=molor:data/embeddings/proteins/esm1b_650m_per_residue_{ds}.npz:1
-cls=hladis:data/embeddings/proteins/esm1b_650m_mean_{ds}.npz:1:2000:1200:100
-```
-
-with `--combos "1 12 123" --max-parallel 2 --gpus 0 1`. Hladiš's `2000:1200:100` is its
-step budget rescaled to the insect panels (see `orbind/docs/gotchas.md`).
-
-### Shrunk insect panels (`cc_shrinked`, `hc_shrinked`, `*_shrinked50`)
-
-The insect panels with most cells declared *not measured*, so that what is left has
-M2OR's sparsity profile — to separate "M2OR behaves differently because it is sparse"
-from "because it is a different assay". Built by
-`scripts/preprocessing/04_build_shrunk_ofm.py`; registered in
-`orbind/regimes_ofm.DATASETS` with a `base` key naming the parent panel, whose
-embeddings they share (no npz of their own).
-
-| tag | density | mask |
-|---|---|---|
-| `{cc,hc}_shrinked` | 0.063 (M2OR's own) | `marginal`: M2OR's row/column count profile, IPF + Gumbel top-k |
-| `{cc,hc}_shrinked50` | 0.5 | the same profile rescaled; its head saturates against the panel width |
-
-**The mask constrains training, not scoring.** train/val = the parent's split ∩
-measured; test = *everything else*, with its labels. Each fold's `test_origin.csv`
-says which test rows were the parent's own test block (`origin == "upstream_test"`,
-the anchor for a paired comparison with the complete panel) and which entities the
-masked train never saw (`cold_molecule`/`cold_receptor` — a wider set). Read R²
-against the `naive` row, never against 0: the masked train mean and the test mean differ.
-
-Baseline pools are `{ds}-{rand,ourind}-fulltest`; graph sweeps are
-`results/graph/v11_shrunk` (0.063) and `results/graph/v12_shrunk50` (0.5), both
-`--dial nodes --seed-graph`.
-
-### Tp — protein-source floor
-
-Separate script, not the ensembler: real pLMs (ESM-1b, ProtT5, ESM3; ESM-2 on M2OR
-only) against a classical amino-acid floor (kmer2, CTD, PseAAC, BLOSUM, AAC,
-AAIndex) plus `onehot`, `onehot_only` and `mol_only` controls. A pLM whose npz is
-absent is skipped with a warning. The boost is fitted on **train only** at seeds
-42–46 (averaged within each fold) with `[prot ‖ mol]` columns — the alpha sweep's
-`boost_full` exactly, so its ESM-1b row equals the main tables' boosting row. (Until
-2026-09-19 it fitted the insects on train+val with the fold number as seed, which put
-its insect numbers 0.007–0.051 R² above the same boost everywhere else.)
-
-Protein sources and where they come from:
-
-| source | files | how |
-|---|---|---|
-| ESM-1b | `esm1b_650m_mean*.npz`, `esm1b_650m_per_residue_*.npz` | **imported**, not computed: M2OR mean from LoRaX, per-residue from the OFM zenodo release (`06_import_ofm_esm1b.py`) |
-| ESM-2 | `esm2_650m_*` | `05_per_residue_embeddings.py` |
-| ProtT5 | `prott5_{ds}.npz` | `embed_proteins_plm.py --model prott5` |
-| ESM3 | `esm3_{ds}.npz`, `esm3_per_residue_{ds}.npz` | `embed_proteins_plm.py --model esm3 --dataset all --per-residue` in `.venv-esm` |
-
-ESM3 is `esm3-sm-open-v1` (1.4B, the only open-weight ESM3; MIT licence), fed the
-sequence track alone. Any of these drops in by file name: `prot=esm:<npz>:<label>`
-(the third field is provenance only), `--prot-embeddings …/esm3_{ds}.npz` for the
-sweep, the per-residue file for LORAX/ProSmith/MolOR's `cls=` spec.
-
-```bash
-.venv/bin/python scripts/modeling/analysis/prot_floor_sweep.py --help
-```
-
-### T6 — mechanism holdout (`tab:t6`)
-
-Hold out every odorant of a chemical class, train the graph without it, then ask whether the
-receptor embedding still says something true about that class. Three receptor representations:
-raw ESM (structure), GNN+ESM (both), GNN one-hot (function only).
-
-Each dataset writes its own directory and shares nothing with the others, so the three run
-side by side, one per GPU -- no merge step, the artifacts land exactly where the serial run
-puts them:
-
-```sh
-i=0
-for d in m2or cc hc; do
-  CUDA_VISIBLE_DEVICES=$i .venv/bin/python scripts/modeling/analysis/mechanism_holdout.py --dataset $d > mh_$d.log 2>&1 &
-  i=$((i + 1))
-done; wait
-```
-
-Which refinement graph is a flag: `--variant q99greedy` (M2OR's default -- the q99 + greedy
-pair cover the rest of the M2OR paper uses) or `--variant q0cov` (the insects' default -- full
-coverage, no quantile cut stacked on the class removal). A non-legacy variant writes to
-`<dataset>__<variant>/`, so the two coexist and the notebook's `VARIANT` flag selects one.
-
-`CUDA_VISIBLE_DEVICES` rather than `--device cuda:N`: it also pins whatever the boosting head
-and the extractor pick up on their own. A fourth GPU has nothing to do here -- M2OR is the long
-pole and stays one process. Serially, on one GPU, it is the same command with `--dataset all`.
-
-Three post-hoc passes bring an older run up to date without retraining anything, all reading
-its own `embeddings.npz`: `--derive` adds the two derived representations and the per-model
-nulls (and runs automatically after a fresh run), `--backfill` adds the isolation controls
-and null spreads to `nulls.csv`, and `--rescore-ood` refits the boosting head for BOTH target
-series and rewrites `ood.csv`:
-
-```sh
-.venv/bin/python scripts/modeling/analysis/mechanism_holdout.py --dataset all --backfill --derive --rescore-ood
-```
-
-Writes `results/mechanism_holdout/<ds>/`; `notebooks/graph/mechanism_holdout/mechanism_holdout.ipynb`
-reads those artifacts and draws them (set `DATASET` in its first cell). The metrics of record
-are three geometric ones — RSA, CCA, Procrustes — none with a head or a hyperparameter; `tab:t6`
-reports RSA. A predictive-OOD boosting readout runs on the same masks as a differently-shaped
-check, and `--hladis` scores a competitor on those masks too. The notebook closes on one number per
-representation: each class scored against its own null in units of that null's spread, then
-averaged with weights `trust = (1 - struct_leak)(1 - func_redund)` — how isolated the holdout
-actually was — printed beside the equal-weight mean. The run also dumps the receptor
-embeddings, so any further second-order metric costs no retraining. The two insect matrices are
-the stand; M2OR is illustrative.
-
-### Appendix — quantile × criterion sweep
-
-```bash
-.venv/bin/python scripts/modeling/train/run_quantile_criteria_sweep.py --dataset cc
-```
-
-Read by `notebooks/graph/alternatives/protein_based_graph{,_carey}.ipynb`.
-Note the two datasets need different readings of `q`: M2OR's coverage quantile
-cuts a long-tailed distribution, while the insect matrices are complete, so
-coverage is constant and the quantile is a no-op — `--k-mode fraction` is what
-makes the axis mean anything there (`orbind/mol_selection.resolve_K`).
-
----
-
-## The runbook: what to run, in order
-
-The sections above explain *why* each run exists. This one is what to type. It has
-two stages and the order between them is fixed: **stage 1 computes and names things**,
-stage 2 turns those names into tables. Nothing in stage 2 fits a model except where it
-says so; nothing in stage 1 needs a table to exist.
-
-Every command runs from the repo root. Which interpreter matters: `.venv-controls`
-for LORAX/ProSmith, `.venv-molor` for MolOR, `.venv` for Hladiš, the graph, the
-fitters and every reader.
-
-**The three names you choose, and what they mean.**
-
-| name | chosen by | what it is | ours |
-|---|---|---|---|
-| `<run>` | `--out results/graph/<run>` (1.1) | one sweep grid = one protein source + one set of dial flags + one encoder regime | `v9_seeded` (ESM-1b), `v14_esm3_paper` (ESM3) |
-| `<pool>` | `--out-dir results/ensemble_logs*/<pool>` (1.2) | one (dataset, regime, molecule source, protein source) of baselines | `m2or-transductive-chemberta-esm3`, `cc-ourind-esm3`, … |
-| `--out` | every reader | where a rendered table lands | `results/article_tables/esm3/…` |
-
-A third root, `v13_esm3`, is the same ESM3 grid trained **before 23.09.2026**, when
-neighbour sampling and per-layer normalisation were off. It is kept for provenance and
-must not be mixed with `v14_esm3_paper` in one table -- the two are different models
-under one name. `--fanout 0 0 --no-normalize-layers` reproduces it.
-
-`<run>` and the ensemble root must be a **matched pair**: `v14_esm3_paper` goes with
-`results/ensemble_logs_esm3`, `v9_seeded` with `results/ensemble_logs`. Crossing them
-does not fail — it prints a table that compares a graph on one protein source against
-baselines on another.
-
----
-
-### Stage 1 — the producers
-
-#### 1.1 The sweep — our graph and the boosting base
-
-The run name is the thing every later command points back at, and every command writing
-into one root must carry the **same** dial flags or its cells are not comparable:
-`--dial nodes` is the v9 parameterisation (alpha moves the graph's *input*), and
-`--seed-graph` ties the initialisation to the row's seed. Turning either on or off makes
-a new series, not more folds of an old one.
-
-Two commands, in this order. The first is what five artifacts wait on; the second is
-small and feeds only A6, so it can be left until just before that table.
-
-```bash
-# (a) THE DIAL, chemberta. Long: 11 positions x 6 cells x 5 folds x 5 seeds of graph.
-#     Feeds M1 and A1 (the alpha=1 end), A3.1 (every position, incl. the val
-#     files), A3.2 (the alpha=0 end). This is the command currently defining the root.
+# P1a: ChemBERTa, the full alpha dial (alpha=1 is the model the paper reports)
 .venv/bin/python scripts/modeling/train/run_alpha_gate_sweep.py \
     --dataset m2or cc hc --regime transductive inductive \
     --mol-source chemberta \
     --alphas 0 0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 1.0 \
     --dial nodes --seed-graph --seeds 42 43 44 45 46 \
     --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz' \
-    --out results/graph/v14_esm3_paper \
+    --out results/graph/olfagraph \
     --max-parallel 4 --gpus 0 1 2 3
 
-# (b) THE OTHER MOLECULE SOURCES, one position each. Feeds A6 and nothing else.
+# P1b: the other molecular embeddings, at the reported alpha only
 .venv/bin/python scripts/modeling/train/run_alpha_gate_sweep.py \
     --dataset m2or cc hc --regime transductive inductive \
     --mol-source gin ecfp --alphas 1.0 \
     --dial nodes --seed-graph --seeds 42 43 44 45 46 \
     --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz' \
-    --out results/graph/v14_esm3_paper \
+    --out results/graph/olfagraph \
     --max-parallel 4 --gpus 0 1 2 3
 ```
 
-Both go into ONE root and cannot collide: the molecule source is part of each cell's
-filename, the dial position is part of the cell key inside it. (a) therefore subsumes any
-earlier `--alphas 1.0` chemberta run — those rows count as done.
+What the flags fix:
 
-Both train the encoder in **GraphSAGE's own regime** — neighbour sampling (fan-out 25
-then 10, redrawn every epoch, inference still full-neighbourhood) and per-layer L2
-normalisation, the default since 23.09.2026. `--fanout 0 0 --no-normalize-layers` gives
-the historical encoder back. **Consequence for the ESM-1b root `v9_seeded`:** re-running
-either command against it tops it up with rows from a different model than the ones
-already there. Give the new regime its own `--out`, or pass those two flags.
+* `--prot-embeddings` is ESM3 by default and is spelled out anyway, because the root
+  is only meaningful together with the file it was built on. Quote the template: `{ds}`
+  is filled in by the script, not by the shell.
+* `--dial nodes` makes α move the receptor *input* of the graph, as in Appendix B. The
+  default (`gate`) is a different, earlier parameterisation. Required.
+* `--seed-graph` seeds the graph's initialisation from the model seed. Without it a rerun
+  draws a new initialisation. Required.
+* `--seeds 42 43 44 45 46` are the five model seeds. The default is a single seed.
+  Required.
 
-Quote `'…{ds}.npz'`: the placeholder belongs to the script and an unquoted brace belongs
-to the shell. ESM3's files are named uniformly (`esm3_m2or.npz`, `esm3_cc.npz`,
-`esm3_hc.npz`), so one template covers all three.
+The remaining defaults are the paper's configuration and need no flag:
 
-The sweep is resumable — it reads what is already in the CSV and fits only the missing
-heads — so the commands above are also the commands that top a series up, and the dense
-grid extends the same root rather than needing its own.
+* the encoder: two signed GraphSAGE layers, hidden size 256, neighbour sampling 25/10,
+  L2 normalisation after each layer, 900 epochs, Adam with learning rate 3·10⁻³, weight
+  decay 10⁻⁴, gradient clipping at 1.0;
+* the graph: on M2OR the message-passing odorants are chosen by greedy pair cover at the
+  0.99 coverage quantile; on Mosquito and Fly the graph is the complete panel;
+* both forms of OlfaGraph (`cls+mol` and `cls+prot+mol`) and XGBoost-base in every cell.
 
-One run writes three files per cell: `metrics_*.csv` (TEST), `val_metrics_*.csv` (the
-same fitted head scored on VALIDATION — the only split alpha may be chosen on) and
-`records_*.csv` (everything, with wall clock and provenance). Runs made before Sep 2026
-have no val file; see 1.4.
+P1b can share P1a's root because the molecular embedding is part of every cell's file
+name. Per cell the sweep writes `metrics_*.csv` (test), `val_metrics_*.csv` (validation,
+the same fitted heads) and `records_*.csv` (provenance and wall clock).
 
-To check that an existing root was produced the way the tables assume, read the flags
-back out of the CSV rather than trusting shell history:
-
-```bash
-.venv/bin/python scripts/analysis/sweep_provenance.py --root results/graph/v14_esm3_paper
-```
-
-#### 1.2 The baselines — LORAX, ProSmith, MolOR, Hladiš
-
-Four methods × 3 datasets × 2 regimes, one pool directory per cell. The ESM-1b M2OR
-form is under **T1 / T1b** above; this is its ESM3 counterpart.
+To confirm that an existing root was produced with these flags, read them back from the
+data rather than from shell history:
 
 ```bash
-PRES3=data/embeddings/proteins/esm3_per_residue_m2or.npz
-PROT3=data/embeddings/proteins/esm3_m2or.npz
-MOL=data/embeddings/molecules/chemberta_77m_m2or.npz
-
-.venv-controls/bin/python scripts/modeling/train/train_ensemble_boost.py \
-    --regime full_full --full-full-mode transductive \
-    --out-dir results/ensemble_logs_esm3/m2or-transductive-chemberta-esm3 \
-    --run-name transductive_lorax_esm3 \
-    --source cls=lorax:${PRES3} \
-    --source prot=esm:${PROT3}:esm3-sm-open-v1 \
-    --source mol=gin:${MOL}:chemberta_77m \
-    --combos "1 123" --on-missing drop \
-    --max-parallel 2 --gpus 0 1 --repeats 1 2 3 4 5
+.venv/bin/python scripts/analysis/sweep_provenance.py --root results/graph/olfagraph
 ```
 
-For cold molecule: `--full-full-mode inductive_molecule_v5 --repeats 42 43 44 45 46`
-and the `m2or-inductive-chemberta-esm3` pool.
+### P2: interaction baselines
 
-Two things that silently break a run rather than failing it:
+Four methods (LORAX, ProSmith, MolOR, Hladiš) × three datasets × two settings, each run
+in its own directory `results/baselines/<cell>/<run>/`. Both directory names are free:
+readers classify a run by the `config.json` it writes, not by its path, but the depth is
+fixed. Every method receives the same frozen ESM3 embeddings in place of its original
+protein encoder.
 
-* **`--out-dir` is not optional.** The readers glob `<root>/<pool>/<run>/config.json`
-  at exactly that depth; a run written to the default root is invisible to them.
-* **`cls=` goes first.** Combos are named after the `--source` order, so a reordered
-  command line produces `prot+mol+cls` where the reader is looking for
-  `cls+prot+mol`, and the row is simply not found.
-
-The other three `cls=` specs, with `{ds}` = `m2or`, `cc` or `hc`:
-
-```
-cls=prosmith:esm3_per_residue_{ds}.npz:chemberta_77m_{ds}.npz::<prosmith .pkl>
-cls=molor:esm3_per_residue_{ds}.npz:1
-cls=hladis:esm3_{ds}.npz
-```
-
-Hladiš takes the **mean** file — it has no per-residue path, and its molecule side is
-built from SMILES, so it has no molecule npz either.
-
-Its budget is counted in **optimizer steps**, and since 24.09.2026 every ESM3 run takes
-upstream's defaults — 1 model, `max_steps=10000`, `warmup_steps=6000`, `eval_every=500` —
-on all three panels. Hence the bare spec above: no budget fields anywhere.
-
-That is deliberately generous on the insects. The defaults are sized for M2OR's 41k train
-rows, about 24 epochs at batch 100; the same step count on CC (5500 rows) is ~180 epochs
-and on HC (2640) ~380. We accept the overshoot rather than calibrate per panel, because
-one spec across panels is worth more here than a tuned step count: what the extra steps
-buy Hladiš is compute, not an unfair advantage — the weights kept are the best of 20
-validation checkpoints (`eval_every` divides the budget into twenty either way), so a
-longer run cannot score worse than a shorter one by overtraining past its own optimum.
-Reading it the other way round: a competitor given more training than it needs is a
-*conservative* comparison for us.
-
-The three numbers are coupled and must not be changed one at a time. The LR is
-`init·min(step^-0.5, step·warmup^-1.5)`, so `warmup_steps` fixes where the peak falls and
-a `max_steps` below it never leaves the ramp.
-
-**The earlier ESM3 insect runs used a rescaled `1:2000:1200:100` and are superseded** —
-see 1.3 for which ones and what retyping that costs. The ESM-1b section above keeps the
-rescaled spec because that is what those runs actually did; it is a record of the old
-series, not a recipe.
-
-Insects: `--regime ofm --dataset {cc,hc} --split-family {rand,our_inductive}
---task regression --combos "1 12 123" --repeats 1 2 3 4 5`, pools
-`{cc,hc}-{rand,ourind}-esm3`. The insect protein file must be named explicitly — a
-bare `cls=lorax` loads its M2OR default, which holds none of these receptors, and the
-run dies with `num_samples=0`.
-
-#### 1.3 Hladiš on the other molecule sources
-
-Sweep 1.1 already covers the graph and the base on all three molecule sources. Only
-Hladiš needs extra runs, because its row in the molecule ablation (A6) moves with the
-*boost's* molecular half rather than with its own input:
+Each run fits two XGBoost heads per split: `cls` (the method's interaction representation
+alone, App. A) and `cls+prot+mol` (the main table).
 
 ```bash
-for DS in cc hc; do
-  for FAM in rand our_inductive; do
-    if [[ ${FAM} == rand ]]; then POOL=${DS}-rand-esm3; TAG=${DS}_rand
-    else POOL=${DS}-ourind-esm3; TAG=${DS}_our_inductive; fi
-    for MOL in gin ecfp; do
-      if [[ ${MOL} == gin ]]; then MF=data/embeddings/molecules/gin_supervised_contextpred_${DS}.npz
-      else MF=data/embeddings/molecules/ecfp_${DS}.npz; fi
-      .venv/bin/python scripts/modeling/train/train_ensemble_boost.py \
-        --regime ofm --dataset ${DS} --split-family ${FAM} --task regression \
-        --out-dir results/ensemble_logs_esm3/${POOL} \
-        --run-name ${TAG}_hladis_esm3_${MOL} \
-        --source cls=hladis:data/embeddings/proteins/esm3_${DS}.npz \
-        --source prot=esm:data/embeddings/proteins/esm3_${DS}.npz:esm3-sm-open-v1 \
-        --source mol=gin:${MF}:${MOL} \
-        --combos "1 12 123" --on-missing drop \
-        --max-parallel 2 --gpus 0 1 --repeats 1 2 3 4 5
-    done
+E=data/embeddings
+PROSMITH_CKPT=data/external/ofm/saved_model/pretraining_IC50_6gpus_bs144_1.5e-05_layers6.txt.pkl
+run () {   # run <env-python> <dataset> <setting> <run-name> <cls-spec> <mol-npz> <mol-tag>
+  local PY=$1 DS=$2 SET=$3 NAME=$4 CLS=$5 MOL=$6 MTAG=$7 SPLIT REP COMBOS
+  if [[ ${DS} == m2or ]]; then
+    COMBOS="1 123"
+    if [[ ${SET} == seen ]]; then SPLIT=(--regime full_full --full-full-mode transductive);          REP=(1 2 3 4 5)
+    else                          SPLIT=(--regime full_full --full-full-mode inductive_molecule_v5); REP=(42 43 44 45 46); fi
+  else
+    COMBOS="1 12 123"
+    if [[ ${SET} == seen ]]; then SPLIT=(--regime ofm --dataset ${DS} --split-family rand          --task regression)
+    else                          SPLIT=(--regime ofm --dataset ${DS} --split-family our_inductive --task regression); fi
+    REP=(1 2 3 4 5)
+  fi
+  ${PY} scripts/modeling/train/train_ensemble_boost.py "${SPLIT[@]}" \
+      --out-dir results/baselines/${DS}-${SET} --run-name ${NAME} \
+      --source cls=${CLS} \
+      --source prot=esm:${E}/proteins/esm3_${DS}.npz:esm3-sm-open-v1 \
+      --source mol=gin:${MOL}:${MTAG} \
+      --combos "${COMBOS}" --on-missing drop \
+      --max-parallel 2 --gpus 0 1 --repeats "${REP[@]}"
+}
+
+for DS in m2or cc hc; do
+  PRES=${E}/proteins/esm3_per_residue_${DS}.npz
+  CB=${E}/molecules/chemberta_77m_${DS}.npz
+  for SET in seen cold; do
+    run .venv-controls/bin/python ${DS} ${SET} lorax    "lorax:${PRES}"                                 ${CB} chemberta_77m
+    run .venv-controls/bin/python ${DS} ${SET} prosmith "prosmith:${PRES}:${CB}::${PROSMITH_CKPT}"      ${CB} chemberta_77m
+    run .venv-molor/bin/python    ${DS} ${SET} molor    "molor:${PRES}:1"                               ${CB} chemberta_77m
+    run .venv/bin/python          ${DS} ${SET} hladis   "hladis:${E}/proteins/esm3_${DS}.npz"           ${CB} chemberta_77m
   done
 done
 ```
 
-And the same on M2OR, where the bare spec is the budget of record — these four runs did
-not exist before 24.09.2026:
+ProSmith is initialised from `${PROSMITH_CKPT}`, the BindingDB-pretrained checkpoint of the
+ProSmith paper, shipped in the same release (§2.2). The `mol=gin:` source type is the
+generic loader for any molecular `.npz`; its third field is a label only, and the file
+decides the embedding. On the insect datasets a third head, `cls+prot` (`12`), is fitted as
+well; no table reads it.
+
+**Hladiš on the other molecular embeddings.** Appendix D compares Hladiš with each
+molecular embedding. Hladiš builds its own molecular side from SMILES, but its row is
+`cls+prot+mol`, whose molecular half is the embedding under test. It therefore needs one
+run per embedding:
 
 ```bash
-P3=data/embeddings/proteins/esm3_m2or.npz
-
-for MOL in gin ecfp; do
-  case ${MOL} in
-    gin)  MF=data/embeddings/molecules/gin_supervised_contextpred_all_m2or.npz ;;
-    ecfp) MF=data/embeddings/molecules/ecfp_m2or.npz ;;
-  esac
-  for MODE in transductive inductive_molecule_v5; do
-    if [[ ${MODE} == transductive ]]; then
-      POOL=m2or-transductive-${MOL}-esm3; TAG=transductive; REP=(1 2 3 4 5)
-    else
-      POOL=m2or-inductive-${MOL}-esm3;    TAG=inductive;    REP=(42 43 44 45 46)
-    fi
-    .venv/bin/python scripts/modeling/train/train_ensemble_boost.py \
-        --regime full_full --full-full-mode ${MODE} \
-        --out-dir results/ensemble_logs_esm3/${POOL} \
-        --run-name ${TAG}_hladis_esm3_${MOL} \
-        --source cls=hladis:${P3} \
-        --source prot=esm:${P3}:esm3-sm-open-v1 \
-        --source mol=gin:${MF}:${MOL} \
-        --combos "1 123" --on-missing drop \
-        --max-parallel 2 --gpus 0 1 --repeats ${REP}
+for DS in m2or cc hc; do
+  for SET in seen cold; do
+    GIN=${E}/molecules/gin_supervised_contextpred_${DS}.npz
+    [[ ${DS} == m2or ]] && GIN=${E}/molecules/gin_supervised_contextpred_all_m2or.npz
+    run .venv/bin/python ${DS} ${SET} hladis_gin  "hladis:${E}/proteins/esm3_${DS}.npz" ${GIN}                      gin
+    run .venv/bin/python ${DS} ${SET} hladis_ecfp "hladis:${E}/proteins/esm3_${DS}.npz" ${E}/molecules/ecfp_${DS}.npz ecfp
   done
 done
 ```
 
-M2OR's GIN file is the one special case in the project: `gin_supervised_contextpred_all_m2or.npz`,
-without the `_{ds}` suffix the other panels use.
+Hladiš's training budget is counted in optimizer steps and left at the published defaults
+on every dataset: 10,000 steps, 6,000 warm-up steps, evaluation every 500 steps, keeping
+the best of the twenty validation checkpoints. That is why its spec carries no budget
+fields. Its checkpoints are named without the budget, so changing the budget requires
+deleting the run directory first; otherwise the old weights are reloaded.
 
-`mol=gin:` is the generic entity extractor, not the GIN model: the file decides what
-the embedding is and the third field is provenance only.
+Two mistakes break a baseline run silently rather than loudly:
 
-**The spec is bare on purpose** — one budget on every panel and every molecule source, as
-1.2 explains. Two consequences for what is already on disk:
+* **`--out-dir` is required.** Readers look for `<root>/<cell>/<run>/config.json` at
+  exactly that depth.
+* **`cls=` must be the first `--source`.** Combos are named by source order; a reordered
+  command writes `prot+mol+cls`, and the reader does not find the row.
 
-* the eight gin/ecfp insect runs (`{cc,hc}_{rand,our_inductive}_hladis_esm3_{gin,ecfp}`)
-  were made with a bare spec and therefore already satisfy this. Nothing to redo;
-* the four **ChemBERTa** insect runs (`{cc,hc}_{rand,our_inductive}_hladis_esm3`) were made
-  with `1:2000:1200:100` and no longer match. They have to be refitted.
-
-Refitting them is not a plain rerun: the checkpoints are named
-`hladis_{name}_model{m}.pt` with **no budget in the name**, so a rerun that finds them
-skips training entirely and reloads the old weights. Delete the four run directories
-first, then refit them at ChemBERTa:
+Every run records its sources, feature sets and repeats in its own `config.json`. For a
+root that stopped partway, `relaunch_incomplete.py` rebuilds the command of every
+unfinished run from that file:
 
 ```bash
-for DS in cc hc; do
-  for FAM in rand our_inductive; do
-    if [[ ${FAM} == rand ]]; then POOL=${DS}-rand-esm3; TAG=${DS}_rand
-    else POOL=${DS}-ourind-esm3; TAG=${DS}_our_inductive; fi
-    rm -rf results/ensemble_logs_esm3/${POOL}/${TAG}_hladis_esm3
-    .venv/bin/python scripts/modeling/train/train_ensemble_boost.py \
-      --regime ofm --dataset ${DS} --split-family ${FAM} --task regression \
-      --out-dir results/ensemble_logs_esm3/${POOL} \
-      --run-name ${TAG}_hladis_esm3 \
-      --source cls=hladis:data/embeddings/proteins/esm3_${DS}.npz \
-      --source prot=esm:data/embeddings/proteins/esm3_${DS}.npz:esm3-sm-open-v1 \
-      --source mol=gin:data/embeddings/molecules/chemberta_77m_${DS}.npz:chemberta_77m \
-      --combos "1 12 123" --on-missing drop \
-      --max-parallel 2 --gpus 0 1 --repeats 1 2 3 4 5
-  done
-done
+.venv/bin/python scripts/modeling/train/relaunch_incomplete.py --root results/baselines
 ```
 
-**These four feed M1, not only A6.** The Hladiš row of `tab:esm3cc` and `tab:esm3hc` comes
-from exactly these runs, so after refitting, both insect M1 tables have to be regenerated
-and retyped — and not just that one row: the rank column and the bold marks are computed
-across the rows of the table, so every row's rank moves when Hladiš's values do. M2OR's
-M1 table and A1 are untouched (M2OR was always on the defaults).
+### P3: receptor representations
 
-`transductive_hladis_esm3` on M2OR spells the same defaults out and adds a sixth field,
-`report_own_head=1`, which only prints Hladiš's own scalar head on test and changes no
-number in any table — it does not need refitting.
-
-#### 1.4 The fitters that belong to one table each
-
-These do not feed the main tables and do not read `<run>`; each is the compute half of
-one supplementary artefact, and each is listed again beside its reader in stage 2. They
-can run while 1.1 is still going.
+One script fits every row of the receptor-representation table under the same XGBoost
+head: the protein language models, the sequence descriptors, the one-hot and
+single-input controls, and, with `--gnn`, OlfaGraph itself. OlfaGraph's rows are trained
+here, inside this script's own folds. The response-aware embedding of a receptor depends
+on the training pairs of its fold, so importing it from another run would leak test
+pairs.
 
 ```bash
-# for A2 (tab:t4): fits every row of the protein-representation table, ours included
 .venv/bin/python scripts/modeling/analysis/prot_floor_sweep.py \
     --dataset m2or cc hc --regime transductive inductive \
-    --gnn esm3@1 esm3@0 prott5@1 --seeds 42 43 44 45 46
+    --gnn esm3@1 esm3@0 prott5@1 --seeds 42 43 44 45 46 \
+    --root results/tables
+```
 
-# for A3.2 (tab:alpha0): the one-hot boosting heads. Pass the SAME protein npz the
-# sweep used -- it decides the coverage mask even though one-hot replaces ESM
+Every flag above is the script's default, so a bare call does the same. `--no-gnn` leaves
+out OlfaGraph's rows: the rest of the table then takes minutes and needs no GPU.
+`name@alpha` names an OlfaGraph row: `esm3@1` is ESM3 initialisation, `prott5@1` ProtT5
+initialisation, and `esm3@0` is α=0, the table's "random initialization" row (receptor
+identity only). The protein language models are ESM3, ESM-1b and ProtT5, each
+included only if its `.npz` exists and covers every receptor of the dataset. Output: one
+CSV per cell under `--root`, each with a provenance sidecar `prot_floor_<ds>_<regime>.json`.
+
+### P4: the one-hot boosting heads
+
+The identity control of Appendix B.2 compares OlfaGraph at α=0 with XGBoost over a
+one-hot receptor block. No sweep writes that head, so it is fitted and cached once:
+
+```bash
 .venv/bin/python scripts/article_tables/s3_onehot_boost.py \
     --dataset m2or cc hc \
     --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz'
+```
 
-# for A4: the construction sweep, criterion x quantile. M2OR only (decided 25.09)
-.venv/bin/python scripts/article_sweeps/s4_run_quantile_criteria.py \
-    --dataset m2or --regime inductive transductive \
-    --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz' \
-    --seed-graph --seeds 42 43 --max-parallel 4 --gpus 0 1 2 3
+The protein file is passed even though one-hot replaces it: it decides which pairs are
+covered, and the control must see exactly the rows of the model it controls.
 
-# for A5: the architecture sweep. The graph is PINNED per dataset at the paper's
-# construction -- this moves the operator and nothing else
+### P5: architecture
+
+The graph is fixed per dataset inside the script; only the message-passing operator or
+the ablated component changes. Two commands, the operators and the encoder ablations:
+
+```bash
+# GraphSAGE (ours), GAT, GraphConv, GIN
 .venv/bin/python scripts/article_sweeps/s5_run_architecture.py \
     --dataset m2or cc hc --regime transductive inductive \
     --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz' \
-    --seeds 42 43 44 45 46 --seed-graph --max-parallel 4 --gpus 0 1 2 3
+    --max-parallel 4 --gpus 0 1 2 3
 
-# for A3.1, ONLY for a root made before Sep 2026: score that root's validation split.
-# The head is refit on the same train rows with the same seed and asked for the val
-# rows instead -- one XGBoost fit per cell, no message passing, no GPU, resumable,
-# and self-checking (it re-predicts test and compares against the recorded number)
-.venv/bin/python scripts/analysis/val_rescore.py --root results/graph/v14_esm3_paper
+# one layer, positive edges only, unsigned edges, no message passing
+.venv/bin/python scripts/article_sweeps/s5_run_architecture.py \
+    --dataset m2or cc hc --regime transductive inductive \
+    --conv sage:paper:1layer sage:paper:pos sage:paper:unsigned none \
+    --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz' \
+    --max-parallel 4 --gpus 0 1 2 3
 ```
 
-#### 1.5 Before reading anything
+Seeds (42–46) and graph seeding are on by default here. The suffix `:paper` names the
+encoder configuration of the paper (neighbour sampling and per-layer normalisation) and
+is printed as the plain operator name.
 
-Inventory reports READY / PARTIAL / MISSING per input cell, which is the difference
-between a table that is complete and one that merely printed:
+### P6: graph construction
+
+The odorant-selection sweep of Appendix C: eight criteria (seven rankings and a random
+control) × six coverage quantiles, on M2OR in both settings. The cell the paper reports,
+greedy pair cover at q=0.99, is a point of the grid. At q=0 nothing is cut, so that
+column is fitted once and shared by all criteria.
 
 ```bash
-.venv/bin/python scripts/article_tables/inventory.py \
-    --sweep-root results/graph/v14_esm3_paper --ensemble-root results/ensemble_logs_esm3
+.venv/bin/python scripts/article_sweeps/s4_run_quantile_criteria.py \
+    --dataset m2or --regime inductive transductive \
+    --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz' \
+    --seed-graph --seeds 42 43 44 45 46 --max-parallel 4 --gpus 0 1 2 3
 ```
+
+Mosquito and Fly are not swept: every odorant there is measured against every receptor,
+so a coverage cut removes nothing and their graph is always complete.
 
 ---
 
-### Stage 2 — the tables, in the order they stand in the paper
-
-The order below is the registry's order (`paper/PLAN.md`): the main table first, then
-the supplementary ablations as the argument needs them.
-
-| # | artefact | reader | needs |
-|---|---|---|---|
-| M1 | main battery | `m1_main_tables.py` | 1.1 + 1.2 |
-| A1 | baselines as `cls` vs the boosting base | `m1_main_tables.py --baseline-combo cls --no-ours` | 1.1 + 1.2 |
-| A2 | protein representations + our rows (`tab:t4`) | `s2_protein_sources.py` | 1.4 (`prot_floor_sweep`) |
-| A3.1 | the dial as advantage over the base, 3x2 battery | `notebooks/article_figures/prediction_dial.ipynb` | 1.1, dense grid + its `val_metrics_*` if `SPLIT="val"` |
-| A3.2 | identity control (`tab:alpha0`) | `s3_alpha0_vs_boost.py` | 1.1 + 1.4 (`s3_onehot_boost`) |
-| A4 | criterion × quantile, + the random control | `notebooks/article_figures/quantile_criteria.ipynb` | 1.4 (`run_quantile_criteria`) |
-| A5 | architecture: which operator | `s5_architecture.py` | 1.4 (`run_architecture`) |
-| A6 | molecule ablation | `s6_molecule_ablation.py` | 1.1 (all three `--mol-source`) + 1.3 |
-
-#### M1 — the main battery
+## 4. Checking the artifacts before reading them
 
 ```bash
-# one table per dataset, both regimes, one run per protein source
-.venv/bin/python scripts/article_tables/m1_main_tables.py --no-val-cut \
-    --sweep-root results/graph/v9_seeded --ensemble-root results/ensemble_logs \
-    --out results/article_tables/esm1b
-.venv/bin/python scripts/article_tables/m1_main_tables.py --no-val-cut \
-    --sweep-root results/graph/v14_esm3_paper --ensemble-root results/ensemble_logs_esm3 \
-    --out results/article_tables/esm3
+# READY / PARTIAL / MISSING for every input cell of every table
+.venv/bin/python scripts/article_tables/inventory.py \
+    --sweep-root results/graph/olfagraph --ensemble-root results/baselines
 ```
 
-`--no-val-cut` drops the extra column whose threshold is chosen on validation and
-leaves the 0.5 cut alone. Give each protein source its own `--out`, or the second run
-overwrites the first and there is nothing left to compare.
+A table rendered from a partial artifact still prints, but averages fewer splits than it
+claims.
 
-#### A1 — every competitor in its `cls` form, against the boosting base
+---
 
-The same reader, told to take each baseline in its own learned pair representation and
-to leave our graph out entirely:
+## 5. Stage 2: readers, in the order of the paper
+
+| artifact | P1a | P1b | P2 | P3 | P4 | P5 | P6 |
+|---|---|---|---|---|---|---|---|
+| `tab:main_results` | α=1, both forms, XGBoost-base | | ChemBERTa runs, `cls+prot+mol` | | | | |
+| `tab:protein_representations` | | | | ● | | | |
+| `tab:graph_ablation` | | | | | | ● | |
+| `tab:esm3t1` | XGBoost-base | | M2OR ChemBERTa runs, `cls` | | | | |
+| `fig:dial` | every α, both forms, XGBoost-base | | | | | | |
+| `tab:alpha0` | α=0 reduced form, XGBoost-base | | | | ● | | |
+| `fig:construction` | | | | | | | ● |
+| `tab:mol` | α=1 reduced form, XGBoost-base | ● | Hladiš, all three embeddings | | | | |
+
+Readers write LaTeX, a long CSV and a plain-text rendering under
+`results/article_tables/`. The paper's tables are typeset from them. Where the paper
+stacks or relabels a reader's output, this is noted below.
+
+### Main text
+
+**`tab:main_results`**: every method on all four metrics, both settings, per dataset.
+
+```bash
+.venv/bin/python scripts/article_tables/m1_main_tables.py --no-val-cut \
+    --sweep-root results/graph/olfagraph --ensemble-root results/baselines \
+    --out results/article_tables/main
+```
+
+It writes one table per dataset; the paper stacks the three. Baselines are read as
+`cls+prot+mol` and OlfaGraph in its full form. The reader also prints OlfaGraph's reduced
+form, which the paper's main table does not show. Cells are mean ± standard deviation over
+the five splits. `--no-val-cut` omits the extra MCC/F1 columns at a validation-chosen
+threshold, leaving the 0.5 threshold.
+
+**`tab:protein_representations`**: one column per dataset and setting, the metric of
+record (AUROC on M2OR, R² on the insects).
+
+```bash
+.venv/bin/python scripts/article_tables/s2_protein_sources.py \
+    --dataset m2or cc hc --regime transductive inductive \
+    --root results/tables --out results/article_tables/protein_representations
+```
+
+**`tab:graph_ablation`**: the operators and the encoder ablations in the reduced form,
+with XGBoost-base as the unranked anchor.
+
+```bash
+.venv/bin/python scripts/article_tables/s5_architecture.py \
+    --dataset m2or cc hc --regime transductive inductive \
+    --root results/article_sweeps/architecture --out results/article_tables/architecture
+```
+
+### Appendix
+
+**`tab:esm3t1` (A)**: each baseline with its interaction representation alone, on M2OR.
+It is the main-table reader told to read the baselines as `cls` and to leave OlfaGraph out.
 
 ```bash
 .venv/bin/python scripts/article_tables/m1_main_tables.py --no-val-cut \
     --dataset m2or --baseline-combo cls --no-ours \
-    --sweep-root results/graph/v14_esm3_paper --ensemble-root results/ensemble_logs_esm3 \
-    --out results/article_tables/esm3/t1
+    --sweep-root results/graph/olfagraph --ensemble-root results/baselines \
+    --out results/article_tables/baselines_cls
 ```
 
-#### A2 — the protein-representation table (`tab:t4`)
-
-Two commands: the fitter from 1.4, then the reader. `--dataset` and `--regime` take
-lists, so the whole six-cell table is one invocation of each.
-
-```bash
-# fits: classical amino-acid descriptors, the one-hot controls, each pLM whose npz
-# covers the pool, and -- with --gnn -- our graph, boosted as
-# [refined receptor || ChemBERTa], which is our cls+mol.
-# Five seeds, as everywhere: one seed initialises the graph AND seeds the head,
-# so a row is (fold, seed) exactly as in 1.1. There is no separate graph-seed axis.
-.venv/bin/python scripts/modeling/analysis/prot_floor_sweep.py \
-    --dataset m2or cc hc --regime transductive inductive \
-    --gnn esm3@1 esm3@0 prott5@1 --seeds 42 43 44 45 46
-
-# renders: one combined table, a column per cell, the metric of record only
-.venv/bin/python scripts/article_tables/s2_protein_sources.py \
-    --dataset m2or cc hc --regime transductive inductive
-```
-
-**Swapping only the graph rows.** Our three rows train in the sampled + normalised
-regime (the default since 23.09.2026) and each one stamps `gnn_regime` into the CSV. A
-resume that would mix two regimes in one table is refused by name. To replace the graph
-rows of a table already on disk while keeping every descriptor row -- no pLM boosting is
-refitted, and those are most of the table:
-
-```bash
-for f in results/tables/prot_floor_*.csv(N); do
-  python - "${f}" <<'PY'
-import sys, pandas as pd
-p = sys.argv[1]
-d = pd.read_csv(p)
-keep = d["gnn_seed"].isna() if "gnn_seed" in d.columns else d.index == d.index
-print(f"{p}: {len(d)} rows -> {int(keep.sum())} kept")
-d[keep].to_csv(p, index=False)
-PY
-done
-```
-
-`s2_protein_sources.py` also needs `--root results/tables` only if you moved the
-fitter's output; the default is that path.
-
-**Keeping what is still valid.** The resume key is `(representation, fold, seed,
-gnn_seed)` and `gnn_seed == seed` now, so a graph row from a run that predates the
-single-seed rule is reusable exactly when it sits on that diagonal. This keeps those and
-drops the rest, including anything whose regime stamp is not the current one:
-
-```bash
-for f in results/tables/prot_floor_*.csv(N); do
-  python - "${f}" <<'PY'
-import sys, pandas as pd
-p = sys.argv[1]
-d = pd.read_csv(p)
-if "gnn_seed" not in d.columns:
-    print(f"{p}: no graph rows, left alone"); raise SystemExit
-g = d["gnn_seed"].notna()
-tag = d.get("gnn_regime", pd.Series(index=d.index, dtype=object)) == "sampled25-10+norm"
-keep = (~g) | (g & (d["gnn_seed"] == d["seed"]) & tag)
-print(f"{p}: {len(d)} -> {int(keep.sum())}   graph {int(g.sum())} -> "
-      f"{int((keep & g).sum())}")
-d[keep].to_csv(p, index=False)
-PY
-done
-```
-
-then re-run the fitter above; it refits the graphs alone. `--gnn-fanout 0 0
---gnn-no-normalize-layers` trains the historical encoder instead.
-
-**What comes out.** The fitter writes one CSV per (dataset, regime) under
-`results/tables/`, plus a provenance sidecar `prot_floor_<ds>_<regime>.json`. The reader
-writes `results/article_tables/protein_sources/`: `protein_long.csv` (every metric,
-every row), `protein_sources.tex` (the combined table) and the same table as text.
-`--which headline|all` widens the rendered metrics; the long CSV always holds them all.
-
-**Our rows are fitted here, not imported from the sweep.** The refined receptor vector
-is trained on its fold's training pairs, so a vector lifted from another run's folds is
-a leak, not a cached feature. `name@alpha` names the row: `esm3@1` is the plain graph on
-ESM3 nodes, `esm3@0` is the v9 node dial at zero — receptor identity alone, so there the
-protein file only decides the coverage mask. The edge variant follows the dataset
-(M2OR's hub core, the insects' complete matrix).
-
-**Resuming.** Rows already in the CSV are kept and only the missing ones are fitted, so
-adding `--gnn` to a cell that already has its descriptor and pLM rows costs the graphs
-and nothing else. What may be reused is decided by the sidecar; a CSV without one is
-refused by default, since it may predate the fix that stopped this script folding the
-insects' validation rows into train. `--trust-existing` accepts such a file, `--force`
-refits everything. A cell a dataset cannot do (HC ships no `cold_receptor`) is skipped
-with a note.
-
-#### A3.1 — the dial as advantage over the base (one figure)
-
-A 3×2 battery: columns are datasets, rows are regimes. Two curves per panel, each the
-**paired difference of one boosting head against the base**, computed fold by fold on the
-same held-out rows and then averaged over folds — `cls+mol`, where the refined receptor
-replaces the raw protein vector, and `cls+prot+mol`, where it is added beside it. The base
-is the zero line and is deliberately not a curve: every point is already measured against
-it, so drawing it would be drawing zero twice.
+**`fig:dial` (B.1)**: the paired difference between OlfaGraph and XGBoost-base along α,
+both forms, with per-panel slope tests.
 
 ```bash
 jupyter lab notebooks/article_figures/prediction_dial.ipynb
 ```
 
-Each curve carries a least-squares line, and the box inside each panel gives the
-zero-slope test for both. **The slope is fitted per fold**, and the five slopes are the
-sample the t-test is over — a slope fitted on the (fold, seed) rows would count five seeds
-that share a held-out set as five observations. The per-fold advantages come from
-`alpha_grid.delta_folds`, which shares its pairing with `delta_vs`, so the band and the
-slope cannot rest on different reductions.
+Set the first knob, `ROOT_DIR`, to `results/graph/olfagraph` and keep `SPLIT = "test"`.
+Nothing is chosen on this figure: α=1 is reported because it is the model, not because
+it is the best point. With `SAVE_FIGS = True` the figure lands in
+`results/article_figures/alpha_dial/alpha_dial_delta.pdf`.
 
-The question is not which $\alpha$ wins — an argmax over a flat surface is noise — but
-whether the surface is flat at all. `SPLIT` defaults to `test`, which is honest here
-precisely because nothing is chosen on this page: $\alpha = 1$ is reported for what it
-means, not for being the argmax. Set `SPLIT = "val"` to see the same panels on the split a
-choice would have to be made on; a root made before Sep 2026 gets validation rows from
-`val_rescore.py` (1.4).
-
-This figure replaced two (levels along the dial, and mean rank across cells) on
-24.09.2026: they asked one question in two idioms. `alpha_rank_dial.ipynb` is still in the
-tree and still runs, but it is not part of the paper.
-
-`MOL_SOURCE` stays `chemberta`: the dense grid exists only there, and on the other
-molecule sources only $\alpha \in \{0, 1\}$ was run.
-
-#### A3.2 — the identity control (`tab:alpha0`)
-
-Our graph with the receptor's sequence removed, against the boost over ESM and over a
-one-hot receptor. The `s3_onehot_boost` half from 1.4 fits heads — minutes per fold on M2OR — and
-caches; `05` only reads, so it is safe to re-run while tweaking a label.
+**`tab:alpha0` (B.2)**: OlfaGraph at α=0 and XGBoost over one-hot receptors, as paired
+differences from XGBoost-base.
 
 ```bash
 .venv/bin/python scripts/article_tables/s3_alpha0_vs_boost.py \
-    --sweep-root results/graph/v14_esm3_paper
+    --sweep-root results/graph/olfagraph
 ```
 
-#### A4 — the construction ablation, criterion × quantile
-
-A different knob from the dial: not what the receptor vector is mixed from, but which
-molecules carry the messages at all. `scripts/article_sweeps/` owns it, imports the
-alpha sweep as a module for the folds and the metric battery, and touches none of it.
-
-**This is the whole construction ablation, and there is no second one.** Our edges
-*are* the measured pairs, so the only knob over that graph is which molecules may carry
-messages: the full graph is `q = 0`, a point in this grid, and an IDF-weighted
-construction is the `idf_coverage` / `composite` criterion, a curve in it. The grid
-also carries `random` — K molecules drawn uniformly from the same eligible set, at the
-same K — which is the control the criteria are read against: if a ranked criterion does
-not beat a random draw, what the graph buys is message passing and not the choice of
-hubs. Its draw follows the cell's seed, so what the figure shows is its spread and not
-one lucky set.
-
-**Scope, decided 25.09: M2OR only, both regimes, two seeds.** The insects are left
-out on purpose. Their matrices are complete, so a coverage quantile cuts nothing there
-and the criterion axis collapses to tie-breaks; what is left, `--k-mode fraction`, is a
-different knob from the one M2OR is reported on, so the two would not belong on one
-figure. M2OR is also the only dataset whose reported construction is non-trivial
-(`greedy_pair_cover` at `q = 0.99`) and therefore the only one that owes a defence.
+**`fig:construction` (C)**: the construction sweep on the validation split.
 
 ```bash
-# the producer. Quantiles are FRACTIONS, and the cell the paper reports
-# (greedy_pair_cover at 0.99) must be in the grid or there is nothing to compare against
-.venv/bin/python scripts/article_sweeps/s4_run_quantile_criteria.py \
-    --dataset m2or --regime inductive transductive \
-    --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz' \
-    --seed-graph --seeds 42 43 --max-parallel 4 --gpus 0 1 2 3
-
-# the figure. This sweep is read by eye and there is no text reader for it:
-# quantile_grid.py is the aggregation layer the notebook imports, not a command
 jupyter lab notebooks/article_figures/quantile_criteria.ipynb
 ```
 
-That is 8 criteria x 6 quantiles x 5 folds x 2 seeds x 2 regimes, minus the `q = 0`
-column: nothing is cut there, so all eight criteria keep the same molecules and train
-the same graph. The sweep computes that cell once per (fold, seed) and writes the other
-seven rows from it with `shared_from` naming the fit that ran — one experiment drawn
-through eight curves rather than eight identical fits. That is 7 x 5 x 2 x 2 = 140 fits
-not done: **820 graphs**, not 960, plus 20 boosting reference fits (one per fold, seed
-and regime), which are cheap.
+Its defaults already point at P6's output and at `SPLIT = "val"`, where a construction
+may be judged. The cell after the figure prints the numbers the appendix text quotes. The
+figure lands in `results/article_figures/quantile_criteria/quantile_pair.pdf`.
 
-The notebook's headline is **one pair of panels** (25.09), M2OR transductive and
-M2OR cold-molecule, built in the same idiom as the dial's highlight figure in
-`prediction_dial.ipynb`: full page width, the base as the zero line because every curve
-is a paired difference, letters in the margin, one legend strip, a fixed box corner and
-a ring on the cell the paper reports. Eight criteria on one axis is the most a
-colour-safe palette carries, so each also has its own marker, `random` is grey as the
-control, and only the reported construction draws a band — eight bands is grey mud. The
-I-mark in the left margin is the smallest difference the grid resolves. The absolute
-levels, the K panel and the `sep`/`behind` tables stay below it as diagnostics.
-
-**The quantile is chosen on VALIDATION.** Reading the best `q` off these curves and then
-defending it with the same curves takes the number and its defence from one set of rows,
-so the notebook's `SPLIT` defaults to `"val"`; `test` is read once, at the end, for the
-cell already picked. The claim the figure is meant to support is the weak one — that
-over the range where `sep < 1` the construction does not matter, and the cell we report
-is not behind the best one by more than the grid can resolve. The ablation's job is to
-show the choice was not load-bearing, not to win a fourth decimal.
-
-`--seed-graph` for the same reason the dial passes it: without a seeded graph
-initialisation two cells differ by their init as well as by their construction, and the
-knob's own effect is the smaller of the two. The `random` control is unaffected -- it
-draws its hubs from `--seeds`, not from the init. Everything else is left at the
-default, and the defaults here are the alpha sweep's own (`--fanout 25 10`, layer norm
-on, `--n-models 1`, `--epochs 900`, chemberta), so this runs in the paper's
-`v14_esm3_paper` encoder regime.
-
-The folds are the paper's own: M2OR's splits come from
-`data/processed/full_full_split_indices.npz` through `orbind.regimes.load_split`, the
-same store M1, A1 and the dial read, so a row here is on the same held-out set as a row
-there — including its `val` third.
-
-**Before the long run, a smoke test.** One fold, two quantiles, two criteria — a few
-minutes, and its rows count toward the full run, which writes into the same file:
+**`tab:mol` (D)**: OlfaGraph (reduced form), XGBoost-base and Hladiš with each molecular
+embedding.
 
 ```bash
-.venv/bin/python scripts/article_sweeps/s4_run_quantile_criteria.py     --dataset m2or --regime inductive     --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz'     --seed-graph --seeds 42 --n-folds 1     --quantiles 0 0.99 --criteria coverage random --max-parallel 2 --gpus 0 1
+.venv/bin/python scripts/article_tables/s6_molecule_ablation.py --spread std \
+    --sweep-root results/graph/olfagraph --ensemble-root results/baselines \
+    --out results/article_tables/molecule
 ```
 
-**`--max-parallel` above the number of cards is allowed.** Workers are assigned
-round-robin (`gpus[i % len(gpus)]`), so `--max-parallel 8 --gpus 0 1 2 3` puts two on
-each card. It usually does help: a 900-epoch GNN on a graph this small is bound by
-kernel-launch latency rather than by arithmetic, which is exactly why the card reads as
-under-used. Two things bound it, and both are worth a look before committing 820 cells
-to it:
-
-* **Host RAM, which is the real limit.** Each worker is a separate process that caches
-  `_fold_prep` for every fold it touches, and on M2OR with ESM3 that is roughly half a
-  gigabyte per fold (the dense `Xp`/`Xm` blocks for train, val and test), so a worker
-  that has seen all five holds ~2.5 GB, plus its CUDA context. Eight of those is ~25 GB.
-  Check with `free -g` while it runs.
-* **Per-card memory**, since XGBoost trains on the device too (`device="cuda"`,
-  `tree_method="hist"`) in the same process as the graph. Two workers per card double
-  it. `nvidia-smi` during the smoke test answers this in one line.
-
-**Adding a seed later costs only the new seed.** The seed is part of the cell key, so
-repeating the command with `--seeds 42 43 44` trains 205 graphs per regime and touches
-nothing that is already there; the `q = 0` column is shared for the new seed exactly as
-for the old ones. The sharing does not depend on which criteria a later run asks for
-either: the source of a copy is any `q <= 0` row that was actually fitted (`shared_from`
-empty), not a fixed criterion name, so a run with a shorter `--criteria` list cannot
-refit that cell under a second name.
-
-Two things to know about a re-run. `config_*.json` records the LAST invocation, not the
-union of them, which is the same convention every producer here follows — the CSV is the
-record of what was computed. And a seed that is added but not finished leaves cells
-averaging different numbers of draws, which moves a curve by the imbalance rather than
-by the knob: the notebook's second guard prints `qg.seed_balance` and says so, and
-`SEEDS` cuts back to the seeds that are complete.
-
-Resumable: re-running the same command continues it, and a resume also fills the shared
-`q = 0` rows if an older run left them out. See `scripts/article_sweeps/README.md` for
-what `--k-mode` changes and why a failed cell is written down rather than dropped.
-
-#### A5 — the architecture table (`tab:arch`)
-
-**The encoder ablations (25.09).** Four further rows, each requested on the command
-line, none of them in the default set. `:1layer` drops the second message-passing layer,
-which is the direct ablation of the two-hop path the method section claims: with one
-layer a receptor never reaches another receptor. `:pos` removes the negative edges from
-message passing; `:unsigned` keeps every edge but sends them all through one stack, so
-only the SIGN stops being structural. Those two belong together — alone, neither
-separates "fewer edges" from "no sign". And `none` is not an operator at all: two
-trainable projections, the same decoder, the same loss, the same pairs, no graph, which
-is the control that says how much of the refined receptor is message passing and how
-much is a projection of ESM3 trained under the binding loss.
-
-```bash
-# the four ablations. ~150 graph fits each (3 datasets x 2 regimes x 5 folds x 5 seeds),
-# resumable, and they do not touch the operator rows already on disk
-.venv/bin/python scripts/article_sweeps/s5_run_architecture.py \
-    --dataset m2or cc hc --regime transductive inductive \
-    --conv sage:paper:1layer sage:paper:pos sage:paper:unsigned none \
-    --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz' \
-    --max-parallel 8 --gpus 0 1 2 3
-```
-
-On the insect panels `:pos` removes about half the graph, because there a negative edge
-is a response below the z-scored threshold rather than a measured non-response; on M2OR
-it removes measured non-responses. The two panels answer different questions and are
-read apart.
-
-**The rank column changed (25.09).** It used to be taken over every row in the cell,
-the boosting base included, while the caption said the base was not ranked. It is now a
-mean place within a FIELD, and there are two: the operators in one, and our row with its
-encoder ablations and the no-message-passing control in the other, so that adding an
-ablation cannot move an operator's number. The base is in neither — it is what every
-graph is read against. Consequence: **the four operator ranks move**, because they were
-computed against five rows and are now computed against four; any prose quoting them has
-to be re-read off the regenerated table.
-
-One row per message-passing operator, one column per (dataset, regime), each column that
-panel's metric of record — six numbers per row, which is the whole table. The boosting
-base is the anchor row, because "our graph against the base" is the comparison every
-other table here makes.
-
-```bash
-# trains: the four operators, five folds, five seeds, on the pinned graph
-.venv/bin/python scripts/article_sweeps/s5_run_architecture.py \
-    --dataset m2or cc hc --regime transductive inductive \
-    --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz' \
-    --max-parallel 4 --gpus 0 1 2 3
-
-# renders: one combined table, six columns, the metric of record only
-.venv/bin/python scripts/article_tables/s5_architecture.py \
-    --dataset m2or cc hc --regime transductive inductive
-```
-
-**The graph does not move when the operator does.** The construction is pinned per
-dataset in `VARIANT` (M2OR's hub core, the insects' complete matrix) and is deliberately
-not a command-line flag: an operator comparison run on two different graphs is not one.
-Everything else is held too — the signed two-stack structure, the subtraction, the
-decoder, the epoch budget, the folds, the head, and since 23.09.2026 the encoder regime.
-
-**The four operators** (`orbind.gnn_extractor.CONVS`): `sage` is ours; `gat` is the
-attention epoch of this project, ported from `orbind/legacy/hetero_gat.py` with the two
-details that make attention work on a bipartite graph (`add_self_loops=False`,
-multi-head concat on layer 1 and a single head on layer 2); `graphconv` is the GCN-shaped
-operator that is actually defined on two node sets — plain `GCNConv` is not here and
-cannot be, since its symmetric normalisation and mandatory self-loops assume one node
-set; `gin` is the molecular domain's standard and the most expressive of the four.
-
-So the table is five rows: four operators and the boosting anchor.
-
-**Why `DEFAULT_SPECS` carries a `:paper` suffix on all four.** That suffix names the
-encoder regime on disk — neighbour sampling plus per-layer L2 normalisation — and it is
-now the only regime the table reports, so the reader prints a suffixed row as the plain
-operator name. It is kept rather than removed because every cell already computed carries
-it in its `arch` column, and renaming would make each of them look missing. The
-un-suffixed specs still train the historical encoder and still render, marked
-`(full neighbourhood, un-normalised)`; they are what measured the regime in the first
-place and are worth keeping on disk, but they are not part of the table. `--historical`
-does not exist: pass the un-suffixed spec if you want those rows back and read them
-knowing the label.
-
-**The randomness is M1's, by construction.** One seed per row: it initialises the graph
-AND seeds the boosting head, exactly as `--seed-graph` does in the main sweep, and the
-reader averages seeds inside each fold before taking any interval. `--seeds` defaults to
-`42 43 44 45 46` and graph seeding is ON by default — `--no-seed-graph` turns it off, and
-a row produced that way is a different experiment from the main tables. `prot_mix=1.0` is
-passed explicitly for the same reason: the main sweep always passes it, and rho=1
-short-circuits to the embedding file, so the two scripts make the same call and not
-merely the same model.
-
-**Width is free, depth is not.** `--hidden 128 256 512` adds one row per width with no
-new code. Depth is not a knob: the encoder is two layers by construction, and making that
-variable is a refactor of the module rather than a flag — it is out of this sweep
-deliberately.
-
-The reader marks the best operator per column, never the anchor, and names in words any
-column where our interval overlaps the marked one.
-
-#### A6 — the molecule ablation
-
-ChemBERTa / GIN / ECFP × {graph, base, Hladiš}:
-
-```bash
-.venv/bin/python scripts/article_tables/s6_molecule_ablation.py \
-    --sweep-root results/graph/v14_esm3_paper --ensemble-root results/ensemble_logs_esm3 \
-    --out results/article_tables/esm3/molecule
-```
-
-#### Beside the tables
-
-Two runs side by side — value, place, and what moved between two `main_long.csv`:
-
-```bash
-.venv/bin/python scripts/legacy/04_compare_runs.py \
-    --a results/article_tables/esm1b --a-label ESM-1b \
-    --b results/article_tables/esm3  --b-label ESM3
-```
-
-The geometry pair is **not in the paper** (the whole geometry line is parked), but it
-still runs, and `02a` skips a CSV that already exists — `--force` is what adds a
-protein source generated after those files were written:
-
-```bash
-.venv/bin/python scripts/legacy/02a_protein_geometry.py --dataset cc hc --force
-.venv/bin/python scripts/legacy/02_geometry_table.py \
-    --sweep-root results/graph/v14_esm3_paper --out results/article_tables/esm3/geometry
-```
+`--spread std` reproduces the table as printed (mean ± standard deviation over splits).
+Without it the reader quotes the 95% interval.
 
 ---
 
-## Reading results
+## 6. How the numbers are computed
 
-```bash
-python scripts/analysis/summarize_runs.py                      # everything
-python scripts/analysis/summarize_runs.py --pool cc-ourind      # substring filter
-python scripts/analysis/summarize_runs.py --pool m2or --folds   # per-fold values
-```
+* **The unit of evidence is the held-out split.** Model seeds are averaged inside each
+  split first; intervals and tests are taken over the five splits (Student-t, n=5).
+  Treating (split, seed) pairs as independent would roughly halve every interval.
+* **Paired comparisons are paired within the split.** OlfaGraph and XGBoost-base come
+  from the same sweep cell, on the same held-out rows and seeds, so their difference is
+  taken split by split before averaging. The figures of Appendices B and C and the
+  differences in `tab:alpha0` are built this way.
+* **Tests** are paired two-sided t-tests over splits, Holm-corrected within the family
+  each caption names. Wilcoxon is not used: at five splits its smallest attainable
+  two-sided p is 0.0625.
+* **RMSE is the only metric where lower is better**; every ranking, bold mark and test
+  direction flips for it, and the readers handle this themselves.
+* **Seen molecules** hold out individual measured pairs (M2OR: LORAX's five folds;
+  insects: the released `rand` folds). **Cold molecules** hold out whole odorants
+  (M2OR: five molecule-disjoint splits, seeds 42–46; insects: `our_inductive`, built by
+  `03_build_ofm_our_inductive_splits.py`). Validation rows are never used for training
+  by any model in the paper.
 
-One row per (run, combo), mean ± 95% t-CI, columns chosen by task. Fold counts are
-printed rather than filtered, so a half-finished run is visible instead of silently
-averaged. `scripts/analysis/extend_runs_with_combo.py` prints the commands that add
-a `cls+prot+mol` row to an existing cls-only run by reusing its checkpoints.
-
----
-
-## Before you read a number
-
-Four things decide whether a result means what it looks like. The full list, with
-the failures that produced each one, is in
-[`orbind/docs/gotchas.md`](orbind/docs/gotchas.md).
-
-* **One combo, one head, fixed hyperparameters** — no combo stacking, no per-head
-  tuning, identical settings for us and for every baseline. Why:
-  [`orbind/docs/ensembler.md`](orbind/docs/ensembler.md#the-convention-first).
-* **Read the `naive[train-mean]` row next to every R².** R² is measured against the
-  **test** mean while naive predicts the **train** mean, so a model can beat naive
-  and still score below zero.
-* **Five seeds minimum on cold-molecule regimes.** Per-seed swings there reach
-  ±0.1 AUROC; a one-seed win in this project has already turned out to be noise.
-* <a name="split-validity"></a>**On Carey, `our_inductive` is the cold-molecule
-  split, not upstream's `scaf`.** `scaf`'s fold 1 lands on the carboxylic-acid
-  homologous series (test sd 0.215, naive R² −4.92, which *is* the published
-  −1.016 average); `our_inductive` holds naive R² ≈ 0 on every fold.
-
-Two more that bite during a run rather than after it: a method run in the wrong
-environment can silently load a checkpoint instead of training (pass
-`--skip-checkpoints` for anything timed), and `config.json` records what a run was
-*asked* to do — read `metrics.csv` for what it actually produced.
-
-## Tests
-
-```bash
-uv sync --frozen --group dev     # once, for pytest
-uv run pytest
-```
-
-They cover the pure, semantics-carrying functions -- the two readings of the
-quantile (`resolve_K`), what "positive" means on a continuous target
-(`pos_threshold`), the `--combos` digit language and the `--source` field order.
-No data, no GPU, ~10 s. This is deliberately not a test suite for the models: it
-pins the plumbing whose meaning can shift without anything crashing.
-
-## Notebooks
-
-See [`notebooks/README.md`](notebooks/README.md). All of them locate the repo root
-by walking up to `pyproject.toml`, so they run from any depth.
-
-## Archive
-
-[`legacy/README.md`](legacy/README.md) indexes every closed line and says what each
-one showed — the graph line v3–v6, the attention/site-MIL branch, the molecule-side
-graph nulls, the pocket/protein-variant cluster, and the exploratory embedding
-notebooks. Kept rather than deleted because most of them are negative results.
+Further detail on the pipeline's pitfalls is in
+[`orbind/docs/gotchas.md`](orbind/docs/gotchas.md), and on the boosting ensembler, of
+which the paper uses one head per feature set, in
+[`orbind/docs/ensembler.md`](orbind/docs/ensembler.md).

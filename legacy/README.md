@@ -10,7 +10,14 @@ legacy/
   notes/       the notes belonging to those lines
   experiments/ isolated side directions with their own deps and binaries
   config.yaml  the pre-`regimes.py` data descriptor (read by nothing since)
+  README_research.md     the former root README: the research log of every line,
+                         with the commands of its time (ESM-1b, internal root names)
+  README_tables_draft.md the first draft of the reproduction guide, four tables only
 ```
+
+The two READMEs were retired on 26.09.2026, when the reproduction guide became the
+root [`README.md`](../README.md). Their links are written relative to the repository
+root and are not rewritten here.
 
 The mirrored layout means a file's original location is still readable from its
 path: `legacy/scripts/modeling/train/train_mp.py` was

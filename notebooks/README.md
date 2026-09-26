@@ -28,7 +28,7 @@ notebooks/
                            sharing figkit.py's visual contract. They DRAW only -- every
                            mean and interval comes from scripts/analysis/alpha_grid.py
                            (or s4_quantile_grid.py, which delegates to it). How to
-                           produce their inputs: README3.md at the repository root
+                           produce their inputs: README.md at the repository root
   datasets/                carey_hallem_carlson_overview  -- the dataset description
                            behind the paper's data section
   graph/

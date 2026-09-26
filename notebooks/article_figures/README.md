@@ -1,7 +1,7 @@
 # notebooks/article_figures/
 
 The paper's figures. Each notebook reads a producer's output and draws; none trains
-anything. How to produce their inputs is in [`README3.md`](../../README3.md).
+anything. How to produce their inputs is in [`README.md`](../../README.md).
 
 | notebook | paper artifact | reads | first knobs |
 |---|---|---|---|

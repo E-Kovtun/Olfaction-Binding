@@ -4,7 +4,7 @@ Sweeps that exist **for the article's ablations** rather than for the pipeline. 
 train models, so they want a GPU and they cache; `scripts/article_tables/` reads results
 and this folder produces them.
 
-In [`README3.md`](../../README3.md) these are producers **P5** (`s5_run_architecture.py`,
+In [`README.md`](../../README.md) these are producers **P5** (`s5_run_architecture.py`,
 the architecture table) and **P6** (`s4_run_quantile_criteria.py`, Appendix C); the exact
 invocations the paper uses are there. The readers with the same prefixes are in
 `../article_tables/`, except the construction sweep's, which is a notebook.

@@ -3,9 +3,9 @@
 Entry points. Each script finds the repo root by walking up to `pyproject.toml`, so it
 can be invoked from anywhere; call an environment's interpreter directly
 (`.venv/bin/python scripts/...`), since `orbind` is put on `sys.path` by the script itself.
-Which environment each one needs is in [`README3.md`](../README3.md) §1.
+Which environment each one needs is in [`README.md`](../README.md) §1.
 
-**To reproduce the paper, follow [`README3.md`](../README3.md).** It names the exact
+**To reproduce the paper, follow [`README.md`](../README.md).** It names the exact
 invocation of every script the paper depends on. This file is the map of the folder: what
 each script is, and whether the paper uses it.
 
@@ -23,7 +23,7 @@ Figures are drawn by notebooks in `../notebooks/article_figures/`.
 
 ## What is where
 
-`P1`–`P6` refer to the producers of [`README3.md`](../README3.md) §3. Scripts without a
+`P1`–`P6` refer to the producers of [`README.md`](../README.md) §3. Scripts without a
 mark are not on the paper's path.
 
 ```
@@ -98,7 +98,7 @@ legacy/                                 retired scripts: the parked geometry lin
 ```
 
 `setup_envs.sh` creates `.venv-controls` and `.venv-embeddings`. `.venv-molor` and
-`.venv-esm` are set up by hand (see [`README3.md`](../README3.md) §1).
+`.venv-esm` are set up by hand (see [`README.md`](../README.md) §1).
 
 ## Archive
 

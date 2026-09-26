@@ -80,3 +80,36 @@ def test_a_cell_with_one_fold_prints_a_value_but_no_interval():
 
 def test_an_empty_cell_renders_as_a_dash():
     assert A.num(pd.Series({"mean_x": np.nan, "hw_x": np.nan}), "x") == "--"
+
+
+def test_a_paired_difference_is_oriented_so_positive_means_the_graph_is_ahead():
+    graph = {1: 0.30, 2: 0.30, 3: 0.30}
+    other = {1: 0.50, 2: 0.50, 3: 0.50}
+    # R2: the graph is behind, so the difference is negative
+    assert A.paired(graph, other, "R2", 0.95)["mean"] == pytest.approx(-0.2)
+    # RMSE: the graph's error is smaller, so it is AHEAD and the difference is positive
+    assert A.paired(graph, other, "RMSE", 0.95)["mean"] == pytest.approx(+0.2)
+
+
+def test_pairing_removes_the_split_difficulty_that_both_rows_share():
+    # Two rows that move together over splits of very different difficulty, one always
+    # 0.01 ahead: unpaired they overlap completely, paired the difference is exact.
+    hard_easy = {1: 0.40, 2: 0.60, 3: 0.80, 4: 0.50, 5: 0.70}
+    ahead = {f: v + 0.01 for f, v in hard_easy.items()}
+    ahead[5] += 0.002                         # not exactly constant, so t is defined
+    d = A.paired(ahead, hard_easy, "R2", 0.95)
+    assert d["n"] == 5 and d["mean"] == pytest.approx(0.0104)
+    assert d["hw"] < 0.002 and d["p"] < 0.001
+
+
+def test_a_paired_difference_uses_only_the_shared_splits():
+    d = A.paired({1: 1.0, 2: 1.0, 3: 1.0, 4: 1.0}, {2: 0.5, 3: 0.5, 4: 0.5, 5: 0.0},
+                 "R2", 0.95)
+    assert d["n"] == 3 and d["mean"] == pytest.approx(0.5)
+
+
+def test_the_star_follows_the_corrected_p_and_not_the_sign():
+    assert A.dnum(0.046, 0.012, 0.01).endswith("$^{*}$")
+    assert "*" not in A.dnum(0.046, 0.012, 0.20)
+    assert A.dnum(-0.056, 0.02, 0.01, tex=False) == "-0.056+/-0.020*"
+    assert A.dnum(np.nan, np.nan, np.nan) == "--"

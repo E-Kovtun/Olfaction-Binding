@@ -28,6 +28,14 @@ absent the column reads `--` and the run prints the command that makes them.
 
 Writes to results/article_tables/alpha0/: alpha0_long.csv, alpha0.tex, and a printed
 text block.
+
+`--layout delta` (the default, and the paper's) prints the graph at alpha=0 once and then
+its PAIRED differences from the two boostings: the difference is taken inside each split
+and then averaged, with a Student-t interval over splits and a paired t-test, Holm-
+corrected over the two comparisons of a cell. The splits differ far more in difficulty
+than the rows differ from each other, and the unpaired intervals of `--layout abs` carry
+that shared variation into every comparison. Differences are oriented so that positive
+means the graph is AHEAD, error metrics included.
 """
 from __future__ import annotations
 
@@ -94,6 +102,25 @@ def wins(a_vals, b_vals, metric):
     return sum(1 for f in shared if sign * (a_vals[f] - b_vals[f]) > 0), len(shared)
 
 
+def paired(a_vals, b_vals, metric, level):
+    """a minus b inside each shared split, oriented so that positive = `a` ahead.
+
+    Mean and t half-width over the per-split differences, and the two-sided p of a
+    paired t-test (= a one-sample test of those differences against zero). Error
+    metrics are flipped, so the sign reads the same way on every column."""
+    shared = sorted(set(a_vals) & set(b_vals))
+    out = dict(mean=np.nan, hw=np.nan, n=len(shared), p=np.nan)
+    if not shared:
+        return out
+    sign = -1.0 if metric in ag.LOWER_IS_BETTER else 1.0
+    d = [sign * (a_vals[f] - b_vals[f]) for f in shared]
+    out["mean"], out["hw"], _ = ag.ci(d, level)
+    if len(d) >= 3 and float(np.std(d, ddof=1)) > 0:
+        from scipy.stats import ttest_1samp
+        out["p"] = float(ttest_1samp(d, 0.0).pvalue)
+    return out
+
+
 def cell(vals, level):
     """mean +- t half-width over folds, as the table prints it."""
     if not vals:
@@ -128,13 +155,19 @@ def build(a):
                  else fold_values(oh, m))
             wb, nb = wins(g, b, m)
             wo, no = wins(g, o, m)
+            db, do = paired(g, b, m, a.level), paired(g, o, m, a.level)
+            adj = tk.holm({"boost": db["p"], "onehot": do["p"]})
             out.append(dict(
                 series=s, dataset=ds, regime=regime, metric=m,
                 **{f"{k}_{n}": v for n, d in
                    ((GRAPH, cell(g, a.level)), (BOOST, cell(b, a.level)),
                     (ONEHOT, cell(o, a.level)))
                    for k, v in d.items()},
-                won_vs_boost=wb, n_vs_boost=nb, won_vs_onehot=wo, n_vs_onehot=no))
+                won_vs_boost=wb, n_vs_boost=nb, won_vs_onehot=wo, n_vs_onehot=no,
+                d_boost=db["mean"], hw_d_boost=db["hw"], p_boost=db["p"],
+                p_holm_boost=float(adj["boost"]),
+                d_onehot=do["mean"], hw_d_onehot=do["hw"], p_onehot=do["p"],
+                p_holm_onehot=float(adj["onehot"])))
     if missing:
         cells = ", ".join(f"{d}/{r}" for d, r in sorted(missing))
         datasets = " ".join(sorted({d for d, _ in missing}))
@@ -212,6 +245,87 @@ def latex(t, a):
                                       r"\end{table}"])
 
 
+#: the paper's names, which are not the ones the rest of the tooling prints
+PAPER_DATASET = {"m2or": "M2OR", "cc": "Mosquito", "hc": "Fly"}
+PAPER_REGIME = {"transductive": "Seen molecules", "inductive": "Cold molecules"}
+
+
+def paper_order(t):
+    """Datasets and settings in the paper's order, metric of record only."""
+    rec = t[t.metric == t.dataset.map(lambda d: tk.OF_RECORD[tk.TASK[d]])]
+    key = rec.dataset.map({d: i for i, d in enumerate(tk.DATASETS)}).fillna(99) * 10 \
+        + rec.regime.map({r: i for i, r in enumerate(tk.REGIMES)}).fillna(9)
+    return rec.assign(_k=key).sort_values("_k").drop(columns="_k")
+
+
+def dnum(m, hw, p_adj, alpha=0.05, tex=True):
+    """+0.046+/-0.012, starred when the Holm-corrected p is below `alpha`."""
+    if not np.isfinite(m):
+        return "--"
+    pm = r"$\pm$" if tex else "+/-"
+    sign = f"{m:+.3f}"
+    if tex and sign.startswith("-"):
+        sign = "$-$" + sign[1:]           # a minus, not a hyphen
+    txt = sign + ("" if not np.isfinite(hw) else f"{pm}{hw:.3f}")
+    if np.isfinite(p_adj) and p_adj < alpha:
+        txt += r"$^{*}$" if tex else "*"
+    return txt
+
+
+def text_delta(t):
+    lines = [f"{'dataset':<10} {'setting':<15} {'metric':<6} {'graph a=0':>14} "
+             f"{'d vs 1hot':>15} {'p_holm':>7} {'d vs ESM':>15} {'p_holm':>7}"]
+    lines.append("-" * len(lines[0]))
+    for _, r in paper_order(t).iterrows():
+        lines.append(
+            f"{PAPER_DATASET.get(r.dataset, r.dataset):<10} "
+            f"{PAPER_REGIME.get(r.regime, r.regime):<15} {r.metric:<6} "
+            f"{num(r, GRAPH):>14} "
+            f"{dnum(r.d_onehot, r.hw_d_onehot, r.p_holm_onehot, tex=False):>15} "
+            f"{r.p_holm_onehot:>7.3f} "
+            f"{dnum(r.d_boost, r.hw_d_boost, r.p_holm_boost, tex=False):>15} "
+            f"{r.p_holm_boost:>7.3f}")
+    lines.append("")
+    lines.append("d = graph at alpha=0 minus the other row, inside each split, averaged "
+                 "over splits; positive = graph ahead. p: paired t over splits, Holm over "
+                 "the two comparisons of a row; * = p_holm < 0.05.")
+    return "\n".join(lines)
+
+
+def latex_delta(t, a):
+    lvl = f"{a.level:.0%}".replace("%", r"\%")
+    head = (r"\begin{table}[!ht]" "\n" r"\centering" "\n" r"\small" "\n"
+            r"\caption{OlfaGraph at $\alpha=0$ in the reduced form "
+            r"$[\mathbf{z}_{\mathrm{prot}}\|\mathbf{x}_{\mathrm{mol}}]$, and its "
+            r"difference from XGBoost over a one-hot receptor block and from "
+            r"XGBoost-base, $[\mathbf{x}_{\mathrm{prot}}\|\mathbf{x}_{\mathrm{mol}}]$. "
+            r"Differences are taken within each held-out split and averaged over the "
+            r"5 splits; positive values favor OlfaGraph. Mean $\pm$ " + lvl +
+            r" CI over splits. $^{*}$: paired $t$-test, Holm-corrected over the two "
+            r"differences in a row, $p<0.05$.}" "\n"
+            r"\label{tab:alpha0}" "\n"
+            r"\resizebox{\textwidth}{!}{%" "\n"
+            r"\begin{tabular}{@{}ll c cc@{}}" "\n" r"\toprule" "\n"
+            r"& & & \multicolumn{2}{c}{\textbf{Difference from}} \\" "\n"
+            r"\cmidrule(lr){4-5}" "\n"
+            r"\textbf{Dataset} & \textbf{Setting} & OlfaGraph, $\alpha{=}0$ & "
+            r"XGBoost, one-hot & XGBoost-base \\" "\n" r"\midrule")
+    body, last = [], None
+    for _, r in paper_order(t).iterrows():
+        first = r.dataset != last
+        if first and last is not None:
+            body.append(r"\midrule")
+        last = r.dataset
+        name = (f"{PAPER_DATASET.get(r.dataset, r.dataset)} "
+                f"({tk.METRIC_TEX.get(r.metric, r.metric)})") if first else ""
+        body.append(f"{name} & {PAPER_REGIME.get(r.regime, r.regime)} & "
+                    f"{num(r, GRAPH).replace('+/-', chr(36) + chr(92) + 'pm' + chr(36))} & "
+                    f"{dnum(r.d_onehot, r.hw_d_onehot, r.p_holm_onehot)} & "
+                    f"{dnum(r.d_boost, r.hw_d_boost, r.p_holm_boost)} " + r"\\")
+    return "\n".join([head] + body + [r"\bottomrule", r"\end{tabular}}",
+                                      r"\end{table}"])
+
+
 def parser():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -234,6 +348,9 @@ def parser():
                     help="mark a row with this many wins or more")
     ap.add_argument("--cache", default="results/article_tables/onehot_boost",
                     help="where s3_onehot_boost.py wrote its CSVs")
+    ap.add_argument("--layout", default="delta", choices=["delta", "abs"],
+                    help="delta: the graph once, then its paired differences (the "
+                         "paper's table); abs: the three rows side by side, with wins")
     ap.add_argument("--out", default="results/article_tables/alpha0")
     return ap
 
@@ -245,9 +362,11 @@ def main(argv=None):
         print("nothing on disk for those knobs")
         return 0
     out = tk.out_dir(a.out)
-    print("\n" + text(t, a.flag_at))
+    delta = a.layout == "delta"
+    print("\n" + (text_delta(t) if delta else text(t, a.flag_at)))
     t.to_csv(out / "alpha0_long.csv", index=False)
-    (out / "alpha0.tex").write_text(latex(t, a) + "\n", encoding="utf-8")
+    (out / "alpha0.tex").write_text((latex_delta(t, a) if delta else latex(t, a)) + "\n",
+                                    encoding="utf-8")
     print(f"\nwritten to {out}")
     return 0
 

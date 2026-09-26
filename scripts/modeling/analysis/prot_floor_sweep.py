@@ -4,13 +4,14 @@ For one dataset x one regime, boosts `[protein_feature || ChemBERTa]` with the
 pipeline's own fit_boost/predict_scores (auto-GPU) and reports the fold-mean
 metric for each protein feature side by side:
 
-  * real pLMs      -- esm1b, esm2, prott5, esm3  (loaded from npz, keyed by SEQUENCE;
+  * real pLMs      -- esm3, esm1b, prott5  (loaded from npz, keyed by SEQUENCE;
                       each is included only if its npz exists AND covers every
                       receptor, so a box that is missing one just skips it)
   * classical floor -- AAC, kmer2, AAindex, CTD, PseAAC, BLOSUM (computed here
                       from the receptor sequence, no learning)
   * controls       -- onehot (identity), onehot_only (no molecule), mol_only.
-  * OUR graph      -- `--gnn esm3@1 esm3@0 prott5@1`: the pipeline's signed GNN,
+  * OUR graph      -- by default `esm3@1 esm3@0 prott5@1` (`--no-gnn` drops them):
+                      the pipeline's signed GNN,
                       emit=prot, boosted as [refined receptor || ChemBERTa] (that is
                       our `cls+mol`). Trained HERE, per fold, on THIS script's splits:
                       the refined receptor sees its fold's train pairs, so a vector
@@ -43,11 +44,12 @@ insects' val rows into train (see `make_splits`), so an old file can hold rows f
 on more data than the paper's other methods ever saw. `--trust-existing` overrides,
 `--force` refits everything.
 
-    # one cell:
-    .venv/bin/python scripts/modeling/analysis/prot_floor_sweep.py --dataset m2or --regime transductive
-    # everything (skips cells a dataset can't do):
-    for d in m2or cc hc; do for r in transductive inductive; do \
-      .venv/bin/python scripts/modeling/analysis/prot_floor_sweep.py --dataset $d --regime $r; done; done
+    # the paper's table: all six cells, every row, OlfaGraph included
+    .venv/bin/python scripts/modeling/analysis/prot_floor_sweep.py
+    # the same into a fresh directory (read it back with s2_protein_sources.py --root)
+    .venv/bin/python scripts/modeling/analysis/prot_floor_sweep.py --root results/tables_fresh
+    # descriptors, pLMs and controls only -- minutes, no GPU
+    .venv/bin/python scripts/modeling/analysis/prot_floor_sweep.py --no-gnn
 """
 import argparse
 import json
@@ -211,28 +213,26 @@ DESC = {"aac": d_aac, "kmer2": d_kmer2, "aaindex": d_aaindex,
 # ---------------- per-dataset config ------------------------------------------
 # The pLM order here is the order they appear in the table. A file that is
 # absent (or doesn't cover every receptor) is skipped with a warning, so the
-# same command runs on any box -- ProtT5 shows up wherever prott5_<ds>.npz was
-# built, esm2 only on M2OR until insect esm2 exists.
+# same command runs on any box. Every file is one the repository's own scripts
+# write: ESM3 and ProtT5 by embed_proteins_plm.py, ESM-1b by 06_import_ofm_esm1b.py
+# (on M2OR its default --tag full_full, hence the suffix).
 EMB = "data/embeddings"
 DATASETS = {
     "m2or": {"task": "classification", "primary": "AUROC",
              "mol": f"{EMB}/molecules/chemberta_77m_m2or.npz",
-             "plms": {"esm1b": f"{EMB}/proteins/esm1b_650m_mean.npz",
-                      "esm2":  f"{EMB}/proteins/esm2_650m_mean.npz",
-                      "prott5": f"{EMB}/proteins/prott5_m2or.npz",
-                      "esm3":  f"{EMB}/proteins/esm3_m2or.npz"}},
+             "plms": {"esm3":  f"{EMB}/proteins/esm3_m2or.npz",
+                      "esm1b": f"{EMB}/proteins/esm1b_650m_mean_full_full.npz",
+                      "prott5": f"{EMB}/proteins/prott5_m2or.npz"}},
     "cc":   {"task": "regression", "primary": "R2",
              "mol": f"{EMB}/molecules/chemberta_77m_cc.npz",
-             "plms": {"esm1b": f"{EMB}/proteins/esm1b_650m_mean_cc.npz",
-                      "esm2":  f"{EMB}/proteins/esm2_650m_mean_cc.npz",
-                      "prott5": f"{EMB}/proteins/prott5_cc.npz",
-                      "esm3":  f"{EMB}/proteins/esm3_cc.npz"}},
+             "plms": {"esm3":  f"{EMB}/proteins/esm3_cc.npz",
+                      "esm1b": f"{EMB}/proteins/esm1b_650m_mean_cc.npz",
+                      "prott5": f"{EMB}/proteins/prott5_cc.npz"}},
     "hc":   {"task": "regression", "primary": "R2",
              "mol": f"{EMB}/molecules/chemberta_77m_hc.npz",
-             "plms": {"esm1b": f"{EMB}/proteins/esm1b_650m_mean_hc.npz",
-                      "esm2":  f"{EMB}/proteins/esm2_650m_mean_hc.npz",
-                      "prott5": f"{EMB}/proteins/prott5_hc.npz",
-                      "esm3":  f"{EMB}/proteins/esm3_hc.npz"}},
+             "plms": {"esm3":  f"{EMB}/proteins/esm3_hc.npz",
+                      "esm1b": f"{EMB}/proteins/esm1b_650m_mean_hc.npz",
+                      "prott5": f"{EMB}/proteins/prott5_hc.npz"}},
 }
 
 
@@ -515,10 +515,12 @@ def parser():
                     help="refit every cell, ignoring what is already in the CSV")
     ap.add_argument("--trust-existing", action="store_true",
                     help="reuse a CSV that has no provenance sidecar (see RESUMABLE)")
-    ap.add_argument("--gnn", nargs="*", default=None, metavar="name@alpha",
-                    help="add OUR graph as rows: name@alpha, alpha on the v9 NODE "
-                         f"dial (1 = plain graph on that source, 0 = receptor identity "
-                         f"alone). Bare --gnn means {' '.join(DEFAULT_GNN)}")
+    ap.add_argument("--gnn", nargs="*", default=list(DEFAULT_GNN), metavar="name@alpha",
+                    help="OUR graph's rows: name@alpha, alpha on the v9 NODE dial "
+                         f"(1 = plain graph on that source, 0 = receptor identity alone). "
+                         f"Default: {' '.join(DEFAULT_GNN)}, the paper's three rows")
+    ap.add_argument("--no-gnn", dest="gnn", action="store_const", const=None,
+                    help="skip our graph's rows: descriptors, pLMs and controls only")
     ap.add_argument("--gnn-seeds", type=int, nargs="+", default=None,
                     help="REMOVED 23.09.2026. The graph seed is the row's seed now, so "
                          "there is one seed axis, as in the main sweep. Use --seeds")
@@ -534,8 +536,11 @@ def parser():
                          "23.09.2026, together with --gnn-fanout)")
     ap.add_argument("--gnn-epochs", type=int, default=900)
     ap.add_argument("--gnn-n-models", type=int, default=1)
+    ap.add_argument("--root", default="results/tables",
+                    help="directory the per-cell CSVs are written to; s2_protein_sources.py "
+                         "reads the same directory through its own --root")
     ap.add_argument("--out", default=None,
-                    help="default: results/tables/prot_floor_<dataset>_<regime>.csv")
+                    help="ONE file, for a single cell; overrides --root")
     return ap
 
 
@@ -608,8 +613,8 @@ def run_cell(args, dataset, regime):
 
     splits = make_splits(dataset, pairs, y_all, regime, args.folds)
 
-    out = pathlib.Path(args.out) if args.out else pathlib.Path(
-        f"results/tables/prot_floor_{dataset}_{regime}.csv")
+    out = pathlib.Path(args.out) if args.out else (
+        pathlib.Path(args.root) / f"prot_floor_{dataset}_{regime}.csv")
     if not out.is_absolute():
         out = _root / out
     out.parent.mkdir(parents=True, exist_ok=True)

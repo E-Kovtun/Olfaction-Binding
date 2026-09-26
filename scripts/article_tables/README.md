@@ -1,67 +1,55 @@
 # scripts/article_tables/
 
-Everything the article's tables are assembled from. All scripts **read** results already
-on disk and write LaTeX + a long CSV + a plain-text summary to `results/article_tables/`.
+The readers that assemble the paper's tables. Every script here **reads** results already
+on disk and writes LaTeX, a long CSV and a plain-text rendering under
+`results/article_tables/`. None trains a graph. The one exception, `s3_onehot_boost.py`,
+fits XGBoost heads and caches them, and is listed as producer P4 in
+[`README3.md`](../../README3.md).
 
-**The prefix is the registry item** (`paper/PLAN.md`), renamed 23.09.2026: `m1_` for the
-main-text battery, `s2_`/`s3_`/`s5_`/`s6_` for supplementary items A2, A3.2, A5 and A6,
-and no prefix for a tool that serves every table. The old prefixes (`00`, `01`, `03`,
-`05`, `05a`, `07`, `08`) were the order the scripts were written in -- they looked like a
-sequence and corresponded to nothing.
+The exact command for each paper table, and which producer output it needs, is in
+[`README3.md`](../../README3.md) §5. Run from the repo root with `.venv/bin/python`.
 
-Two gaps in the numbering are real and deliberate. There is no `s1_`: the supplementary
-baselines table is `m1_main_tables.py` with `--baseline-combo cls --no-ours`, the same
-reader answering a narrower question. There is no `s4_` here either: A4's reader is a
-notebook, and its compute half lives in `../article_sweeps/`. A3.1 is a notebook
-too, which is why `s3_` names only the identity control.
+| script | paper artifact | reads |
+|---|---|---|
+| `m1_main_tables.py` | `tab:main_results` (main table); with `--dataset m2or --baseline-combo cls --no-ours`, `tab:esm3t1` (App. A) | `--sweep-root` (P1) + `--ensemble-root` (P2) |
+| `s2_protein_sources.py` | `tab:protein_representations` | `results/tables/` (P3) |
+| `s5_architecture.py` | `tab:graph_ablation` | `results/article_sweeps/architecture/` (P5) |
+| `s3_onehot_boost.py` | — (fits the one-hot heads for `tab:alpha0`) | the sweep's own fold preparation; writes `results/article_tables/onehot_boost/` |
+| `s3_alpha0_vs_boost.py` | `tab:alpha0` (App. B.2) | `--sweep-root` (P1) + the one-hot cache (P4) |
+| `s6_molecule_ablation.py` | `tab:mol` (App. D) | `--sweep-root` (P1, all three molecular embeddings) + `--ensemble-root` (P2, Hladiš) |
+| `inventory.py` | — | READY / PARTIAL / MISSING for every input cell of every table |
+| `tablekit.py` | — | the conventions below, shared by every script |
 
-Retired to `scripts/legacy/` on the same day, because no current table is built from
-them: `02a_protein_geometry.py` and `02_geometry_table.py` (the geometry line is parked)
-and `06_alpha_choice_not_used.py` (replaced by a figure). `04_compare_runs.py` went with
-them. All four still run; they are simply not in any chain.
+The figures of Appendices B and C are drawn by notebooks in
+[`notebooks/article_figures/`](../../notebooks/article_figures/), not here.
 
-Run from the repo root with `.venv/bin/python`.
-
-| script | item | table | inputs |
-|---|---|---|---|
-| `inventory.py` | tool | — | reports READY / PARTIAL / MISSING for every input cell of every table |
-| `m1_main_tables.py` | **M1** + **A1** | main: all methods × {M2OR, Carey, Hallem} × {transductive, cold molecule} | sweep `results/graph/v9_seeded` (graph α=1, both heads; boost) + `results/ensemble_logs` (LORAX, ProSmith, MolOR, Hladiš) |
-| `s6_molecule_ablation.py` | **A6** | graph vs boost vs Hladiš × ChemBERTa / GIN / ECFP (successor of tab:t2m2or/t2cc/t2hc) | sweep + ensemble_logs |
-| `s3_onehot_boost.py` | **A3.2** | (compute) the boosting head over [one-hot receptor ‖ molecule] — the row no sweep writes | the sweep's own fold prep, `fit_boost` and metric battery |
-| `s3_alpha0_vs_boost.py` | **A3.2** | the identity control: our graph at alpha=0 vs boost over ESM and vs the one-hot boost | sweep + `s3_onehot_boost`'s CSVs |
-| `s5_architecture.py` | **A5** | the architecture table (`tab:arch`): one row per message-passing operator, six columns (dataset x regime), the boosting base as the anchor | `s5_run_architecture.py`'s CSVs under results/article_sweeps/architecture |
-| `s2_protein_sources.py` | **A2** | what the receptor side has to be: our graph, pLMs, the classical floor and the one-hot controls under one head; metric of record only by default | `prot_floor_sweep.py --gnn` CSVs under `results/tables/` |
-
-Every table takes `--dataset` from `paper_tables.DATASET_ORDER`, which includes the
-shrunk insect panels (`cc_shrinked`, `hc_shrinked`, `*_shrinked50`). Their graph rows
-live in their own sweep, so pass it: `--sweep-root results/graph/v11_shrunk` (0.063) or
-`results/graph/v12_shrunk50` (0.5). On them the `*_fun` geometry columns carry the
-same assay-design contamination as M2OR's — they now have a measured-cell mask.
+**The prefix is the table's place in the paper's argument**: `m1_` for the main table,
+`s2_`–`s6_` for the ablations in the order they were planned. There is no `s1_` (App. A
+is `m1_main_tables.py` answering a narrower question) and no `s4_` (the construction
+ablation is a figure). `sweep-root` and `ensemble-root` have no usable default: pass them
+every time, and always as a pair built on the same protein embedding.
 
 ## Conventions shared by every table (`tablekit.py`)
 
 - **Unit = held-out split.** Sweep rows are averaged over model seeds inside each split
-  first. External baselines have one seed per split.
-- **Cell = mean ± std over splits**, except the molecular ablation (`s6`), which
-  quotes the 95% Student-t interval by default so that it matches the rest of the
-  appendix; `--spread std` restores the older form. At n=5 the interval is 1.24× wider
-  than the std, so the two are not interchangeable in a caption.
+  first. Baseline runs have one seed per split.
+- **Spread.** `m1_main_tables.py` prints mean ± standard deviation over splits;
+  `s2_`, `s3_alpha0_vs_boost.py` and `s5_` print the half-width of the 95% Student-t
+  interval; `s6_` prints the interval by default and the standard deviation with
+  `--spread std`. At n = 5 the interval is 1.24× the standard deviation, so the two are
+  not interchangeable in a caption.
+- **Paired differences** (`s3_alpha0_vs_boost.py`): the difference is taken inside each
+  split and then averaged, with a paired t-test Holm-corrected over the comparisons of a
+  row.
 - **Significance:** a paired two-sided t-test over splits against the reference row,
-  Holm-corrected within the column. Wilcoxon is not used: at 5 splits its smallest
+  Holm-corrected within the column. Wilcoxon is not used: at five splits its smallest
   two-sided p is 0.0625.
-- **Rank:** place within each split among all rows, averaged over splits (and over the
-  metrics shown, in the main table). Friedman p is in the long CSV.
-- **Baseline row selection:** reuses `scripts/analysis/paper_tables.baseline_row`, with
-  the molecule source matched on the file, the requested combo first, and `_timing`
-  skipped. A baseline fed another molecule embedding is not usable unless
-  `--allow-mol-mismatch` is passed.
+- **Rank:** place within each split among the ranked rows, averaged over splits (and over
+  the metrics shown, in the main table).
+- **Baseline row selection:** `scripts/analysis/paper_tables.baseline_row` finds a
+  baseline run by its `config.json`, matches the molecular embedding on the file it was
+  fed, takes the requested feature set and skips `_timing` rows. A baseline fed another
+  molecular embedding is not used unless `--allow-mol-mismatch` is passed.
 
-## Typical order
-
-```
-.venv/bin/python scripts/article_tables/inventory.py
-.venv/bin/python scripts/article_tables/m1_main_tables.py
-.venv/bin/python scripts/article_tables/s6_molecule_ablation.py
-.venv/bin/python scripts/legacy/02a_protein_geometry.py --dataset cc hc
-.venv/bin/python scripts/legacy/02_geometry_table.py
-```
+Every script also accepts the sparsified insect panels (`cc_shrinked`, `hc_shrinked`,
+`*_shrinked50`) of a closed experiment; they are not in the paper.

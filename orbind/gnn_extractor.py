@@ -1062,7 +1062,9 @@ def _run_models(ext, pairs: pd.DataFrame, train_idx, val_idx, test_idx, seed: in
 @dataclass
 class GnnSignedExtractor:
     name: str
-    protein_path: str = "data/embeddings/proteins/esm1b_650m_mean.npz"
+    # ESM3 since 26.09.2026 (was esm1b_650m_mean.npz); M2OR only -- the insect
+    # datasets pass their own file in the source spec.
+    protein_path: str = "data/embeddings/proteins/esm3_m2or.npz"
     molecule_path: str = "data/embeddings/molecules/gin_supervised_contextpred_all_m2or.npz"
     hidden: int = 256
     dropout: float = 0.3

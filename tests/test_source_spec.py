@@ -49,6 +49,19 @@ def test_entity_source_needs_a_path():
 
 # ------------------------------------------------------------ graph field order
 
+@pytest.fixture(autouse=True)
+def _graph_default_files(tmp_path, monkeypatch):
+    """Every test runs in a scratch cwd holding stand-ins for the graph extractor's
+    default embedding files: a bare `cls=gnn_signed` loads them, and a test of the
+    spec's field order must not depend on which embeddings this machine happens to
+    hold. (`workdir` below chdirs into the same tmp_path.)"""
+    monkeypatch.chdir(tmp_path)
+    from orbind.gnn_extractor import GnnSignedExtractor
+    for f in (GnnSignedExtractor.protein_path, GnnSignedExtractor.molecule_path):
+        pathlib.Path(f).parent.mkdir(parents=True, exist_ok=True)
+        np.savez(f, MKV=np.arange(4, dtype=np.float32))
+
+
 def test_graph_defaults_are_the_headline_configuration():
     name, ex = parse_source_arg("cls=gnn_signed")
     assert name == "cls"

@@ -49,14 +49,14 @@ FAMILY_ORDER = ["ours", "plm", "classical", "control", "other"]
 FAMILY_LABEL = {"ours": "Our graph (cls+mol)", "plm": "Protein language models",
                 "classical": "Classical amino-acid floor", "control": "Controls",
                 "other": "Other"}
-PLM = {"esm1b", "esm2", "prott5", "esm3", "esmc"}
+PLM = {"esm1b", "prott5", "esm3", "esmc"}
 CLASSICAL = {"aac", "kmer2", "aaindex", "ctd", "pseaac", "blosum"}
 CONTROL = {"onehot", "onehot_only", "mol_only"}
 #: How a row is printed. Everything else keeps the name the sweep wrote.
 LABEL = {"onehot": "one-hot receptor", "onehot_only": "one-hot, no molecule",
          "mol_only": "molecule only", "aac": "AAC", "kmer2": "k-mer (2)",
          "aaindex": "AAindex", "ctd": "CTD", "pseaac": "PseAAC", "blosum": "BLOSUM",
-         "esm1b": "ESM-1b", "esm2": "ESM-2", "prott5": "ProtT5", "esm3": "ESM3"}
+         "esm1b": "ESM-1b", "prott5": "ProtT5", "esm3": "ESM3"}
 
 
 def family(name):

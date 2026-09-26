@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
-# Create the project's isolated uv environments.
+# Create the project's isolated uv environments. Five in all:
 #
+#   project     -> ./.venv            OlfaGraph, XGBoost-base, Hladis, every fitter and
+#                                     reader, and the molecule embeddings (GIN needs the
+#                                     `gin` extra). Made by `uv sync --frozen --extra gin`,
+#                                     NOT by this script.
 #   env 1  controls    -> .venv-controls    ProSmith + LORAX baselines, PyG-FREE
 #                         (torch + xgboost/scikit-learn/optuna + transformers/peft)
-#   env 2  embeddings  -> .venv-embeddings  run-once embedding generation
-#                         (torch + fair-esm + transformers + deepchem + rdkit)
-#   env 3  project     -> your EXISTING ./.venv  (GNN + ensemble pipeline; PyG).
-#                         NOT created or touched by this script.
+#   env 2  embeddings  -> .venv-embeddings  ProtT5 embeddings
+#                         (torch + transformers + sentencepiece)
+#   env 3  molor       -> .venv-molor       the MolOR baseline (dgl 2.4 + dgllife)
+#   env 4  esm         -> .venv-esm         ESM3 embeddings (EvolutionaryScale `esm` SDK,
+#                         whose package name clashes with fair-esm -- hence its own env)
 #
 # Why the split: the source dispatch in train_ensemble_boost.py is lazy, so a
 # ProSmith/LORAX run imports no torch_geometric -- the controls env can drop the
@@ -50,23 +55,46 @@ uv pip install --python .venv-controls/bin/python \
     "xgboost>=2.0,<3.0" scikit-learn optuna pandas numpy transformers peft
 
 echo "############################################################"
-echo "# env 2: embeddings (run-once) -> .venv-embeddings"
-echo "#   NOTE: deepchem/rdkit resolution can be finicky against the latest"
-echo "#   torch. If this step fails, pin/loosen deepchem here -- the env is"
-echo "#   isolated and only used to (re)generate the cached .npz embeddings."
+echo "# env 2: embeddings (run-once) -> .venv-embeddings   (ProtT5)"
 echo "############################################################"
 uv venv .venv-embeddings --python "$PYVER"
 uv pip install --python .venv-embeddings/bin/python torch --index-url "$TORCH_INDEX"
+# sentencepiece is ProtT5's tokenizer; transformers does not pull it in by itself.
 uv pip install --python .venv-embeddings/bin/python \
-    fair-esm transformers deepchem rdkit numpy pandas
+    transformers sentencepiece numpy pandas
+
+echo "############################################################"
+echo "# env 3: molor -> .venv-molor   (MolOR baseline)"
+echo "############################################################"
+# dgl ships its CUDA wheels from its own index, per torch minor version, so torch is
+# pinned to the minor that index serves. dgl BEFORE dgllife: installing dgllife first
+# pulls a CPU dgl from PyPI that the CUDA wheel then cannot replace cleanly.
+uv venv .venv-molor --python "$PYVER"
+uv pip install --python .venv-molor/bin/python "torch==2.4.*" --index-url "$TORCH_INDEX"
+uv pip install --python .venv-molor/bin/python "dgl==2.4.*" \
+    -f https://data.dgl.ai/wheels/torch-2.4/cu124/repo.html
+uv pip install --python .venv-molor/bin/python \
+    dgllife rdkit "xgboost>=2.0,<3.0" scikit-learn pandas numpy
+
+echo "############################################################"
+echo "# env 4: esm -> .venv-esm   (ESM3 embeddings)"
+echo "############################################################"
+# The weights download from HuggingFace on first use; if that answers 401,
+# `export HF_TOKEN=<read token>` and rerun. httpx is imported by the SDK but not
+# declared by it.
+uv venv .venv-esm --python "$PYVER"
+uv pip install --python .venv-esm/bin/python torch --index-url "$TORCH_INDEX"
+uv pip install --python .venv-esm/bin/python esm httpx pandas scikit-learn
 
 cat <<'EOF'
 
 ############################################################
 # done.
 #   env 1 controls    -> .venv-controls    (ProSmith + LORAX)
-#   env 2 embeddings  -> .venv-embeddings  (run-once)
-#   env 3 project     -> your existing ./.venv  (GNN + ensemble; unchanged)
+#   env 2 embeddings  -> .venv-embeddings  (ProtT5)
+#   env 3 molor       -> .venv-molor       (MolOR)
+#   env 4 esm         -> .venv-esm         (ESM3)
+#   project           -> ./.venv, from `uv sync --frozen --extra gin` (not this script)
 #
 # Run a control in the controls env (note: call its python directly; the script
 # adds the repo root to sys.path itself, so `orbind` imports without an install):

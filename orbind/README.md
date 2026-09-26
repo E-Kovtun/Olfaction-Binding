@@ -39,7 +39,7 @@ shapes. Each docstring says so at length.
 |---|---|
 | `ensemble.py` | the multi-source boosting ensemble: extractor protocol, the combo mini-language, coverage intersection, the per-combo head |
 | `baselines.py` | the boosting/MLP heads themselves (`fit_boost`, `tune_boost`, `predict_scores`) |
-| `mol_selection.py` | which molecules become graph nodes: 7 ranking criteria, `resolve_K`'s two readings of the quantile |
+| `mol_selection.py` | which odorants carry messages in the graph: 7 ranking criteria plus a random control, `resolve_K`'s two readings of the quantile (Appendix C) |
 
 **Extractors** — one per source type in the trainer's dispatch table. Each takes
 row-positions into a shared `pairs` frame and returns a vector per row; how it gets

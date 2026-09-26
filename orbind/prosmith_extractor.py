@@ -478,7 +478,9 @@ class ProSmithExtractor:
     padding, at ~15x the cost -- see the module docstring."""
 
     name: str
-    protein_path: str = "data/embeddings/proteins/esm1b_650m_per_residue_full_full.npz"
+    # ESM3 since 26.09.2026 (was esm1b_650m_per_residue_full_full.npz); M2OR only --
+    # the insect datasets pass their own file in the source spec.
+    protein_path: str = "data/embeddings/proteins/esm3_per_residue_m2or.npz"
     molecule_path: str = "data/embeddings/molecules/chemberta_77m_m2or.npz"
     pretrained_path: str = ""
     hidden: int = 768

@@ -4,10 +4,10 @@ Sweeps that exist **for the article's ablations** rather than for the pipeline. 
 train models, so they want a GPU and they cache; `scripts/article_tables/` reads results
 and this folder produces them.
 
-**The prefix is the registry item** (`paper/PLAN.md`), renamed 23.09.2026:
-`s4_run_quantile_criteria.py` and `s4_quantile_grid.py` belong to A4 (the graph's
-construction), `s5_run_architecture.py` to A5 (which operator). The readers with the
-same prefixes are in `../article_tables/`, except A4's, which is a notebook.
+In [`README3.md`](../../README3.md) these are producers **P5** (`s5_run_architecture.py`,
+the architecture table) and **P6** (`s4_run_quantile_criteria.py`, Appendix C); the exact
+invocations the paper uses are there. The readers with the same prefixes are in
+`../article_tables/`, except the construction sweep's, which is a notebook.
 
 
 Each sweep ships as a pair, the same convention the tables use:
@@ -26,14 +26,42 @@ a property worth keeping, so a sweep over the variant itself is a separate scrip
 metric battery and boosting reference unchanged. Same folds, same head, same columns --
 a row here is comparable with a row there, and nothing in the older code had to move.
 
+## The architecture sweep
+
+```
+# the four operators (GraphSAGE, GAT, GraphConv, GIN)
+.venv/bin/python scripts/article_sweeps/s5_run_architecture.py \
+    --dataset m2or cc hc --regime transductive inductive \
+    --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz' \
+    --max-parallel 4 --gpus 0 1 2 3
+
+# the encoder ablations: one layer, positive edges only, unsigned edges, no message passing
+.venv/bin/python scripts/article_sweeps/s5_run_architecture.py \
+    --dataset m2or cc hc --regime transductive inductive \
+    --conv sage:paper:1layer sage:paper:pos sage:paper:unsigned none \
+    --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz' \
+    --max-parallel 4 --gpus 0 1 2 3
+```
+
+The graph is pinned per dataset (M2OR: greedy pair cover at q=0.99; insects: the complete
+panel), so only the operator or the ablated component moves. Seeds 42-46 and graph
+seeding are on by default. `:paper` names the paper's encoder configuration (neighbour
+sampling 25/10, per-layer L2 normalisation); specs without it train the earlier,
+unsampled encoder and are not in the table. Rendered by
+`../article_tables/s5_architecture.py`.
+
 ## The construction sweep
 
 ```
 .venv/bin/python scripts/article_sweeps/s4_run_quantile_criteria.py \
     --dataset m2or --regime inductive transductive \
     --prot-embeddings 'data/embeddings/proteins/esm3_{ds}.npz' \
-    --seeds 42 43 --max-parallel 4 --gpus 0 1 2 3
+    --seed-graph --seeds 42 43 44 45 46 --max-parallel 4 --gpus 0 1 2 3
 ```
+
+This is the paper's run: M2OR only, both settings, five seeds. Mosquito and Fly are
+complete panels, where the coverage cut removes nothing, and the paper always uses their
+complete graph.
 
 Writes one CSV per (dataset, regime) under `results/article_sweeps/quantile_criteria/`,
 one row per (criterion, quantile, fold, seed, head, split), plus a `config.json` with the
@@ -46,10 +74,11 @@ Then look at it:
 jupyter lab notebooks/article_figures/quantile_criteria.ipynb
 ```
 
-That notebook is the only reader. `s4_quantile_grid.py` is the aggregation layer it
-imports -- fold means, intervals, paired deltas -- and has no command line of its own:
-the artifact here is a figure, and a second text rendering of the same numbers would be
-one more thing to keep in agreement with it.
+That notebook is the only reader. It draws the paper's figure (the paired difference
+from XGBoost-base against q, M2OR seen and cold molecules, on validation) and, in the cell
+after it, prints the numbers the appendix quotes. `s4_quantile_grid.py` is the aggregation
+layer it imports -- fold means, intervals, paired deltas -- and has no command line of its
+own.
 
 ### Four things that decide whether the result means anything
 
@@ -62,8 +91,8 @@ one more thing to keep in agreement with it.
 * **`--k-mode` decides what a quantile means.** `coverage_quantile` cuts on the
   coverage distribution (M2OR's reading); `fraction` keeps the top (1-q) share
   outright. On the complete insect matrices the first keeps every molecule at every q,
-  so the whole sweep collapses to one point — the default switches for you and the run
-  says so.
+  so the script switches to `fraction` there. That thinning is available but is not in
+  the paper, which uses the complete insect graphs throughout.
 * **Pass the protein npz the comparison run used.** The one-hot block is not what
   changes here, but the file still decides the coverage mask, and a different mask is a
   different set of rows in every fold.

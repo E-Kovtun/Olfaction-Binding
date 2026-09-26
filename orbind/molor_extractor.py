@@ -366,7 +366,9 @@ class MolorExtractor:
     is read from the featurizer at load time."""
 
     name: str
-    protein_path: str = "data/embeddings/proteins/esm1b_650m_per_residue_full_full.npz"
+    # ESM3 since 26.09.2026 (was esm1b_650m_per_residue_full_full.npz); M2OR only --
+    # the insect datasets pass their own file in the source spec.
+    protein_path: str = "data/embeddings/proteins/esm3_per_residue_m2or.npz"
     n_models: int = 1
     gnn_hidden: int = 256
     num_gnn_layers: int = 2

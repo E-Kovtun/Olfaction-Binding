@@ -1,9 +1,11 @@
 # data/
 
-**Not versioned.** Only this file, the per-folder READMEs and the `.gitkeep`
-skeleton are tracked; everything else is distributed as a separate bundle.
-Unpack it so that paths begin at the repository root — all code uses
-repository-relative paths, never machine-specific absolute ones.
+**Mostly not versioned.** Tracked are this file, the per-folder READMEs, the
+`.gitkeep` skeleton and **the held-out splits** every result stands on:
+`splits_indexes/lorax_m2or/`, `processed/full_full_split_indices.npz`, and
+`external/ofm/{CC,HC}/{rand_splits,our_inductive_splits}/`. Everything else (the
+benchmark release, the embeddings) is produced by the commands in
+[`README3.md`](../README3.md) §2. All code uses repository-relative paths.
 
 ```text
 data/
@@ -50,7 +52,7 @@ what lets the same file serve datasets that name their entities differently.
 | `full_full_split_indices.npz` | `02_build_full_full_split_indices.py` | `orbind/regimes.py` — the `full_full` regime |
 | `proteins/receptor_sequences.csv` | `01_build_table.py` | protein embedding scripts |
 | `molecules/molecule_smiles.csv` | `01_build_table.py` | molecule embedding scripts |
-| `molecules/molecule_smiles_{cc,hc}.csv` | `07_prepare_ofm_molecules.py` | SMILES→InChIKey bridge for the insect datasets (`orbind/regimes_ofm.py`) |
+| `molecules/molecule_smiles_{m2or,cc,hc}.csv` | `07_prepare_ofm_molecules.py` | SMILES→InChIKey table of each dataset's molecules (M2OR: the 596 of the LORAX pool); the input of the GIN embedder, and the insects' bridge in `orbind/regimes_ofm.py` |
 | `molecules/lorax_smiles_to_inchikey.csv` | `07_prepare_ofm_molecules.py` | reconciles LORAX's SMILES with our InChIKey keying |
 | `bw_*_curated.csv` | `02_bw_numbering.py` | Ballesteros–Weinstein residue numbering; `bw_ref_used_curated.csv` labels receptors by OR family in `notebooks/legacy/refinement_geometry/` |
 
@@ -61,17 +63,22 @@ no orphan receptors) live in `orbind/filters.py`; `01_build_table.py` applies th
 
 | file | produced by | used by |
 |---|---|---|
-| `esm2_650m_mean.npz` | `02_embed_receptors.py` | the `curated_full` regime |
-| `esm1b_650m_mean{,_cc,_hc}.npz` | `06_import_ofm_esm1b.py` | **the protein source of record** — ESM-1b keeps us comparable to ProSmith / LORAX / MolOR, which all use it |
-| `esm1b_650m_per_residue_{full_full,cc,hc}.npz` | `06_import_ofm_esm1b.py` | `prosmith`, `lorax`, `molor` cross-attention |
-| `esm2_650m_per_residue_full.npz` | `05_per_residue_embeddings.py` | per-residue analyses |
-| other pLMs (ProtT5) and classical descriptors | `embed_proteins_plm.py` | the protein-source floor table (`prot_floor_sweep.py`) |
+| `esm3_{m2or,cc,hc}.npz` | `embed_proteins_plm.py --model esm3 --per-residue` | **the protein embedding of record** — every table in the paper: OlfaGraph's receptor nodes, XGBoost-base, Hladiš |
+| `esm3_per_residue_{m2or,cc,hc}.npz` | the same command | LORAX, ProSmith and MolOR cross-attention |
+| `prott5_{m2or,cc,hc}.npz` | `embed_proteins_plm.py --model prott5` | the receptor-representation table (ProtT5 row and ProtT5-initialised OlfaGraph) |
+| `esm1b_650m_mean_{full_full,cc,hc}.npz` | `06_import_ofm_esm1b.py` | the receptor-representation table (ESM-1b row). `full_full` is M2OR |
+| `esm1b_650m_per_residue_{full_full,cc,hc}.npz` | `06_import_ofm_esm1b.py` | the earlier ESM-1b baseline series only |
+| `esm1b_650m_mean.npz` | LORAX's own file | superseded by `esm1b_650m_mean_full_full.npz`, which `06` checks against it |
+| `esm2_650m_*` | `scripts/legacy/` | not in the paper |
+
+Classical sequence descriptors (AAC, k-mer, CTD, PseAAC, BLOSUM, AAindex) need no file:
+`prot_floor_sweep.py` computes them from the sequence.
 
 ### `embeddings/molecules/` — produced by `scripts/embedding_generation/molecules/`
 
 | file | produced by | used by |
 |---|---|---|
-| `chemberta_77m_{m2or,cc,hc}.npz` | `07_prepare_ofm_molecules.py` | the molecule source of record |
+| `chemberta_77m_{m2or,cc,hc}.npz` | `07_prepare_ofm_molecules.py`, imported from the release | **the molecular embedding of record** |
 | `gin_supervised_contextpred_*{,_per_atom}.npz` | `embed_molecules_gin.py` | the GIN column of the molecule-source table; `_per_atom` for site-level heads |
 | `ecfp_{m2or,cc,hc}.npz` | `embed_molecules_ecfp.py` | the ECFP column |
 | `mol_graphs.pt` | `03_embed_molecules.py` | PyG molecule graphs |
@@ -92,7 +99,12 @@ external/ofm/
         embeddings/featurized_{mols,proteins}          upstream's own features
   HC/   raw/hc_with_prot_seq_z.csv       Hallem-Carlson: fly, 24 x 110, z-scored
         rand_splits/  our_inductive_splits/            HC ships only `rand`
+  M2OR*/ embeddings/featurized_{mols,proteins}         M2OR's features (ChemBERTa, ESM-1b)
+  saved_model/                           the BindingDB-pretrained ProSmith checkpoint
 ```
+
+`rand_splits/` and `our_inductive_splits/` of CC and HC are versioned with the
+repository; the rest arrives with the release.
 
 The target is a **continuous** z-scored response, not a 0/1 flag. `orbind/regimes_ofm.py`
 puts it in `label` unchanged and the caller runs with `--task regression`.
@@ -113,12 +125,16 @@ is deliberately not renamed or merged into our conventions.
 
 ## Minimum set per experiment
 
+The paper's full list, with the commands that produce each file, is in
+[`README3.md`](../README3.md) §2. In short:
+
 | to run | you need |
 |---|---|
-| M2OR, any regime | `processed/pairs_curated.csv`, `splits_indexes/lorax_m2or/`, `embeddings/proteins/esm1b_650m_mean.npz`, one molecule npz |
-| ProSmith / LORAX / MolOR on M2OR | the above **plus** `embeddings/proteins/esm1b_650m_per_residue_full_full.npz` (and, for ProSmith's published numbers, the BindingDB checkpoint under `external/ofm/saved_model/`) |
-| Carey / Hallem | `external/ofm/{CC,HC}/`, `processed/molecules/molecule_smiles_{cc,hc}.csv`, `embeddings/*_{cc,hc}.npz` |
-| protein-source floor | `processed/pairs_curated.csv` + whatever `embed_proteins_plm.py` was asked to cache |
+| anything on M2OR | `splits_indexes/lorax_m2or/`, `processed/full_full_split_indices.npz`, `embeddings/proteins/esm3_m2or.npz`, `embeddings/molecules/chemberta_77m_m2or.npz` |
+| anything on Mosquito / Fly | `external/ofm/{CC,HC}/` (raw table and splits), `processed/molecules/molecule_smiles_{cc,hc}.csv`, `embeddings/proteins/esm3_{cc,hc}.npz`, `embeddings/molecules/chemberta_77m_{cc,hc}.npz` |
+| LORAX / ProSmith / MolOR | the above **plus** `embeddings/proteins/esm3_per_residue_{ds}.npz` (and, for ProSmith, upstream's pretrained checkpoint under `external/ofm/saved_model/`) |
+| the receptor-representation table | the above **plus** `prott5_{ds}.npz` and `esm1b_650m_mean_{full_full,cc,hc}.npz` |
+| the molecular-representation appendix | the above **plus** the GIN and ECFP files |
 
 A missing embedding fails loudly: extractors raise on an unknown key unless the
 run passes `--on-missing drop`, which drops the uncovered pairs and logs how many.

@@ -91,7 +91,7 @@ class EntityExtractor:
 def EsmExtractor(name, path, model_name="esm2_t33_650M_UR50D", pooling="mean"):
     """Protein embedding extractor, keyed by `receptor` (amino-acid sequence).
     Default model_name records the exact checkpoint this repo uses
-    (scripts/embedding_generation/proteins/02_embed_receptors.py)."""
+    (scripts/legacy/02_embed_receptors.py)."""
     return EntityExtractor(name=name, path=path, key_col="receptor",
                             model_name=model_name, pooling=pooling)
 

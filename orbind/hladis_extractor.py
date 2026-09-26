@@ -583,7 +583,9 @@ class HladisExtractor:
     a curriculum would be a guess about intent rather than a reproduction."""
 
     name: str
-    protein_path: str = "data/embeddings/proteins/esm1b_650m_mean.npz"
+    # ESM3 since 26.09.2026 (was esm1b_650m_mean.npz); M2OR only -- the insect
+    # datasets pass their own file in the source spec.
+    protein_path: str = "data/embeddings/proteins/esm3_m2or.npz"
     node_d_model: int = 72
     edge_d_model: int = 36
     n_layers: int = 5

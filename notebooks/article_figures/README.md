@@ -1,73 +1,56 @@
 # notebooks/article_figures/
 
-The figures the article uses, separated from the exploratory dial notebooks in
-`notebooks/graph/`. Those were written to *find out* what the dial does; these are
-written to *show* it, on one sweep, with one visual contract.
+The paper's figures. Each notebook reads a producer's output and draws; none trains
+anything. How to produce their inputs is in [`README3.md`](../../README3.md).
 
-```text
-figkit.py             the visual contract: rcParams, palette, panels, bands, legends
-geometry_dial.ipynb   alignment with structure vs function, along alpha
-prediction_dial.ipynb predictive metrics and the paired advantage over the base
-alpha_rank_dial.ipynb where the dial puts us in the RANKING, both heads, + slope test
-quantile_criteria.ipynb  the construction sweep: criterion x coverage quantile
-```
+| notebook | paper artifact | reads | first knobs |
+|---|---|---|---|
+| `prediction_dial.ipynb` | `fig:dial` (Appendix B.1) | the OlfaGraph sweep, P1a | `ROOT_DIR` = that sweep's root, `SPLIT = "test"` |
+| `quantile_criteria.ipynb` | `fig:construction` (Appendix C) | the construction sweep, P6 | `ROOT_DIR` = `results/article_sweeps/quantile_criteria`, `SPLIT = "val"` |
+| `alpha_rank_dial.ipynb` | — | P1a | superseded by `prediction_dial` |
+| `geometry_dial.ipynb` | — | P1a | the parked geometry line |
+| `figkit.py` | — | — | the shared visual contract: rcParams, palette, panels, bands, legends, `savefig` |
 
-They read the ESM3 sweep (`results/graph/v13_esm3`) by default; the root is the first
-knob in each.
+With `SAVE_FIGS = True` each notebook writes PNG and PDF under
+`results/article_figures/<notebook's folder>/`. The figures are built at their printed
+width (`FIG_WIDTH_IN = 7.1`), so fonts do not shrink when the PDF is placed.
 
-`alpha_rank_dial.ipynb` is the one exception to the rule below, and deliberately: it
-aggregates nothing new either --- the places come from
-[`scripts/analysis/alpha_choice.py`](../../scripts/analysis/alpha_choice.py), the same
-module the (unused) choice script reads --- but it does *test*, because "is this dial a
-slope or a flat surface" is a question a figure can pose and only a test can answer.
-The alpha-choice table it replaced is kept at
-`scripts/legacy/06_alpha_choice_not_used.py` and is not in the runbook.
+**`prediction_dial`** draws a 3×2 grid (datasets × settings) of the paired difference
+between OlfaGraph and XGBoost-base along α, one curve for each form (reduced and full),
+each with a least-squares line and a per-panel slope test. The slope is fitted per split,
+and the five slopes are the sample of the t-test, Holm-corrected over the two forms in a
+panel. The cell under the figure prints the slopes as a table. `SPLIT = "test"` is used
+because nothing is chosen on this figure: α=1 is the model, not the argmax.
+
+**`quantile_criteria`** draws M2OR's two settings, one curve per odorant-selection
+criterion against the coverage quantile, as paired differences from XGBoost-base on the
+validation split, with the reported configuration (greedy pair cover, q=0.99) ringed. The
+cell under the figure prints, per split and per cell of the grid, the number of odorants
+kept, the difference from XGBoost-base and the paired comparison with the reported cell
+(Holm over the grid).
 
 ## The rule these notebooks are built around
 
-**They draw and do not aggregate.** Every number comes from
-[`scripts/analysis/alpha_grid.py`](../../scripts/analysis/alpha_grid.py), which
+**They draw and do not aggregate.** Every mean and interval comes from
+[`scripts/analysis/alpha_grid.py`](../../scripts/analysis/alpha_grid.py) (or, for the
+construction sweep, `scripts/article_sweeps/s4_quantile_grid.py`, which delegates to it),
+which
 
-1. averages the **model seeds inside each fold**, then
-2. takes a Student-t interval over the **folds**.
+1. averages the **model seeds inside each split**, then
+2. takes a Student-t interval over the **splits**.
 
-A fold changes which rows are held out, which is what a claim about generalisation is
-over; a seed changes only the draw the same model made on the same rows. Treating the
-25 cells of a five-seed grid as 25 observations uses t(24) where the honest value is
-t(4) and divides by √25 where the effective sample is 5 — it roughly halves every
-interval, and every "significant" gap read off the figure inherits that.
-
-So a cell here may slice, label and plot an `alpha_grid` frame. It may not compute a
-mean, and it may not build an interval.
-
-## The visual conventions
-
-| element | what it means |
-|---|---|
-| solid line + band | our graph at that alpha; band = CI **over folds** |
-| dashed grey | the boosting base (`prot+mol`) on the same folds |
-| dotted pale | naive (constant train mean) |
-| blue / orange | against ESM (structure) / against the response profile (function) |
-| grey I-mark | the resolution floor — model noise left in a fold mean |
-
-The I-mark replaces per-fold whiskers on the curve. The between-fold spread is several
-times wider than the model noise, so whiskers would answer "how different are the
-folds" on a figure asking "did moving the dial change anything". The mark answers the
-second question: a bump shorter than it is noise whatever the band does.
-
-The palette is taken verbatim from `notebooks/graph/alpha_gate/`, where it was checked
-pairwise for colour-vision deficiency against a white ground (worst all-pairs ΔE 9.3
-deutan, 17.6 normal). Reuse is deliberate — the same hue meaning two different things
-across figures of one paper is harder to catch than a bad hue.
+A split changes which rows are held out, which is what a claim about generalisation is
+over; a seed changes only the draw the same model made on the same rows. Treating the 25
+cells of a five-seed grid as 25 observations would use t(24) where the honest value is
+t(4), and divide by √25 where the effective sample is 5 — roughly halving every interval.
 
 ## Two traps the notebooks refuse rather than warn about
 
-**The two dials must not share an axis.** On a v8 *gate* run alpha mixes the graph's
-output against a frozen ESM branch; on a v9 *node* dial it mixes the graph's input and
-runs the other way (alpha=0 is receptor identity, alpha=1 the legacy graph). Each
-notebook raises if the loaded frame holds both.
+**Two dials must not share an axis.** The paper's dial (`--dial nodes`) mixes the graph's
+*input* between receptor identity (α=0) and ESM3 (α=1). An earlier parameterisation
+(`--dial gate`) mixes the graph's output and runs the other way. Each notebook raises if
+the loaded frame holds both.
 
-**Alpha may not be chosen here.** Choosing on these curves and then reporting them
-takes the number and its defence from the same rows. The honest path is
-`scripts/analysis/val_rescore.py` then `alpha_choice.py --select-on val`, which is what
-`notebooks/graph/node_dial/` does.
+**A root holding two runs is refused.** The producers are resumable, so an older run left
+in the output directory would be concatenated with the reported one. The construction
+notebook checks the provenance columns and stops if it finds more than one configuration.

@@ -3,6 +3,15 @@ data/**
 !data/**/
 !data/**/.gitkeep
 !data/**/README.md
+# ...except the splits every result stands on, which are versioned (26.09.2026):
+# M2OR = LORAX's five folds; Mosquito/Fly = the released `rand` folds and our
+# cold-molecule `our_inductive` folds; plus the M2OR index store built from them.
+!data/splits_indexes/**
+!data/external/ofm/*/rand_splits/**
+!data/external/ofm/*/our_inductive_splits/**
+!data/processed/full_full_split_indices.npz
+# ...and the molecule list M2OR's GIN embedding of record was computed on
+!data/processed/molecules/molecule_smiles_all_m2or.csv
 
 # python
 __pycache__/
@@ -11,6 +20,7 @@ __pycache__/
 .venv-controls/
 .venv-embeddings/
 .venv-molor/
+.venv-esm/
 .uv-cache/
 .pytest_cache/
 .mypy_cache/

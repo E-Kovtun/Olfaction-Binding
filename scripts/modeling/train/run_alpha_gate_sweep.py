@@ -229,9 +229,11 @@ MOL_SOURCES = {"chemberta": {None: "data/embeddings/molecules/chemberta_77m_{ds}
                # depend on any pretrained molecular model. No per-dataset special
                # case: one file per dataset, all written by the same script.
                "ecfp": {None: "data/embeddings/molecules/ecfp_{ds}.npz"}}
-# M2OR's protein file carries no dataset suffix; cc/hc have one each.
-PROT_SOURCE = {None: "data/embeddings/proteins/esm1b_650m_mean_{ds}.npz",
-               "m2or": "data/embeddings/proteins/esm1b_650m_mean.npz"}
+# The receptor embedding of record, ESM3, one file per dataset. Until 26.09.2026 the
+# default was ESM-1b ({None: "esm1b_650m_mean_{ds}.npz", "m2or": "esm1b_650m_mean.npz"});
+# a root built on it (results/graph/v9_seeded) is topped up only with an explicit
+# --prot-embeddings pointing back at those files.
+PROT_SOURCE = {None: "data/embeddings/proteins/esm3_{ds}.npz"}
 UNTAGGED_MOL = "gin"
 # Which panel's EMBEDDING FILES a dataset reads. A shrunk panel changed only which cells
 # count as measured -- its receptors and odorants are its parent's, so it shares every

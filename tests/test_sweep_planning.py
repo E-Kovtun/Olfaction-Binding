@@ -144,13 +144,12 @@ def test_paths_pick_the_right_file_per_dataset(sweep):
         assert sweep.paths(ds, A(mol_source="gin"))[1].endswith(
             f"gin_supervised_contextpred_{ds}.npz")
         assert sweep.paths(ds, A())[1].endswith(f"chemberta_77m_{ds}.npz")
-        assert sweep.paths(ds, A())[0].endswith(f"esm1b_650m_mean_{ds}.npz")
-    # m2or's GIN file is the one name that breaks the {ds} template; its protein file
-    # carries no suffix at all
+        assert sweep.paths(ds, A())[0].endswith(f"esm3_{ds}.npz")
+    # m2or's GIN file is the one name that breaks the {ds} template
     assert sweep.paths("m2or", A(mol_source="gin"))[1].endswith(
         "gin_supervised_contextpred_all_m2or.npz")
     assert sweep.paths("m2or", A())[1].endswith("chemberta_77m_m2or.npz")
-    assert sweep.paths("m2or", A())[0].endswith("esm1b_650m_mean.npz")
+    assert sweep.paths("m2or", A())[0].endswith("esm3_m2or.npz")
 
 
 def test_n_repeats_slices_each_datasets_own_repeat_list(sweep):
